@@ -36,9 +36,15 @@ def verify_muir(function: muir.Function) -> None:
             elif isinstance(inst, muir.Helper):
                 if not inst.symbol:
                     raise VerifyError("HELPER requires a runtime symbol")
+            elif isinstance(inst, muir.ArchEscape):
+                for target in inst.targets:
+                    _check_target(target, labels)
 
         terminator = block.instructions[-1]
-        if not isinstance(terminator, (muir.Br, muir.Ret, muir.Trap)):
+        if isinstance(terminator, muir.ArchEscape):
+            if not terminator.targets:
+                raise VerifyError(f"non-terminating arch escape ends μIR block: {block.label}")
+        elif not isinstance(terminator, (muir.Br, muir.Ret, muir.Trap)):
             raise VerifyError(f"μIR block has no terminator: {block.label}")
 
 
