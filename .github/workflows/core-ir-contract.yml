@@ -1,0 +1,21 @@
+name: Core IR Contract
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/minimachine/**
+      - tests/test_ir_contract.py
+      - .github/workflows/core-ir-contract.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run IR contract tests
+        run: python3 -m unittest discover -s tests -p 'test_ir_contract.py' -v
