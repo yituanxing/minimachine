@@ -1,0 +1,91 @@
+name: Linux Full500 Legalizer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/minimachine/**
+      - scripts/legalize_bc.py
+      - scripts/normalize-corpus.sh
+      - .github/workflows/linux-full500-legalizer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minimachine-linux-full500-legalizer
+  cancel-in-progress: true
+
+jobs:
+  full500:
+    runs-on: ubuntu-24.04
+    env:
+      ROOT: ${{ github.workspace }}/build/full500
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-18 clang-18
+          key=$({ clang-18 --version | head -n 1; ld.lld-18 --version | head -n 1; } | sha256sum | cut -c1-16)
+          echo "TOOLCHAIN_KEY=$key" >> "$GITHUB_ENV"
+          echo "nproc=$(nproc)"
+
+      - name: Restore frozen full500 corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: build/full500/raw
+          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-${{ env.TOOLCHAIN_KEY }}-full500-v2-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
+          restore-keys: |
+            minimachine-linux-6.6.143-riscv-defconfig-llvm18-d2833d9ec4738db4-full500-v2-
+            minimachine-linux-6.6.143-riscv-defconfig-llvm18-full500-v1-
+
+      - name: Rehome restored corpus if needed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if test ! -s "$ROOT/raw/manifest.jsonl"; then
+            # actions/cache restores the path embedded in the original cache.
+            src="build/linux-6.6.143-riscv/corpus"
+            test -s "$src/manifest.jsonl"
+            mkdir -p "$ROOT"
+            mv "$src" "$ROOT/raw"
+          fi
+          test "$(find "$ROOT/raw" -type f -name '*.bc' | wc -l)" -eq 500
+
+      - name: Normalize full500
+        run: |
+          set -Eeuo pipefail
+          JOBS="$(nproc)" bash scripts/normalize-corpus.sh "$ROOT/raw" "$ROOT/normalized"
+
+      - name: Legalize full500 to μIR
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$ROOT/reports"
+          python3 scripts/legalize_bc.py "$ROOT/normalized" \
+            --llvm-major 18 \
+            --json "$ROOT/reports/legalize.json"
+
+      - name: Full500 summary
+        run: |
+          python3 - <<'PY'
+          import json
+          r=json.load(open("build/full500/reports/legalize.json"))
+          print(f"FULL500 pass={r['pass']}/500 fail={r['fail']}")
+          counts={}
+          for x in r["records"]:
+              if x["status"]=="FAIL":
+                  key=x["error"].split(":",3)[-1].strip()
+                  counts[key]=counts.get(key,0)+1
+          for k,v in sorted(counts.items(), key=lambda x:(-x[1],x[0]))[:30]:
+              print(f"BLOCKER {v}x {k}")
+          PY
+
+      - name: Upload full500 report
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-full500-legalizer-${{ github.run_id }}
+          path: build/full500/reports/legalize.json
+          retention-days: 14
