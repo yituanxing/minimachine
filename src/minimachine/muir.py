@@ -106,7 +106,6 @@ class Call:
     callee: Callee
     args: tuple[Value, ...]
     result: Slot | None
-    continuation: str
 
 
 @dataclass(frozen=True)
