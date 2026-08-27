@@ -9,14 +9,6 @@ on:
       - scripts/select-corpus.py
       - scripts/export-corpus.py
       - .github/workflows/linux-corpus.yml
-  pull_request:
-    branches: [main]
-    paths:
-      - configs/linux-6.6.143-riscv.env
-      - scripts/materialize-linux.sh
-      - scripts/select-corpus.py
-      - scripts/export-corpus.py
-      - .github/workflows/linux-corpus.yml
   workflow_dispatch:
 
 permissions:
@@ -72,9 +64,11 @@ jobs:
         with:
           path: build/linux-6.6.143-riscv/corpus
           key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-${{ steps.toolchain.outputs.key }}-full500-v2-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
+          restore-keys: |
+            minimachine-linux-6.6.143-riscv-defconfig-llvm18-full500-v1-
 
       - name: Materialize full Linux build and export full500
-        if: steps.corpus-cache.outputs.cache-hit != 'true'
+        if: hashFiles('build/linux-6.6.143-riscv/corpus/manifest.jsonl') == ''
         shell: bash
         run: |
           set -Eeuo pipefail
