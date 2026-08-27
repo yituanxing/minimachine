@@ -1,0 +1,95 @@
+name: Freeze Linux Full-All Corpus
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/linux-full-all-freeze.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minimachine-linux-full-all-freeze
+  cancel-in-progress: false
+
+jobs:
+  freeze:
+    name: linux-6.6.143-riscv-full-all
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      BUILD_ROOT: ${{ github.workspace }}/build/linux-6.6.143-riscv-full-all
+      CACHE_ROOT: ${{ github.workspace }}/.cache/minimachine
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux and LLVM dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 llvm-18 lld-18 \
+            flex bison bc libelf-dev libssl-dev \
+            dwarves zstd xz-utils
+
+      - name: Runner identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "nproc=$(nproc)"
+          clang-18 --version | head -n 1
+
+      - name: Restore pinned Linux archive
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/minimachine/source/linux-6.6.143.tar.xz
+          key: minimachine-linux-source-6.6.143-dace1f8dc9c0dbf5
+
+      - name: Full Linux compile and materialize every TU
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/materialize-linux.sh
+
+      - name: Freeze full-all corpus
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          manifest="$BUILD_ROOT/manifests/full-all.txt"
+          count=$(wc -l < "$manifest" | tr -d ' ')
+          echo "FULL_ALL_TUS=$count"
+          test "$count" -gt 500
+          python3 scripts/export-corpus.py \
+            --kbuild "$BUILD_ROOT/kbuild" \
+            --manifest "$manifest" \
+            --output "$BUILD_ROOT/full-all-corpus"
+          cp "$manifest" "$BUILD_ROOT/full-all-corpus/full-all.txt"
+          {
+            echo "linux=6.6.143"
+            echo "arch=riscv"
+            echo "config=defconfig"
+            echo "full_all_tus=$count"
+            echo "clang=$(clang-18 --version | head -n 1)"
+            echo "nproc=$(nproc)"
+          } > "$BUILD_ROOT/full-all-summary.txt"
+
+      - name: Cache full-all frozen corpus
+        uses: actions/cache/save@v4
+        with:
+          path: build/linux-6.6.143-riscv-full-all/full-all-corpus
+          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-full-all-v1-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
+
+      - name: Upload full-all manifest and summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-linux-full-all-${{ github.run_id }}
+          path: |
+            build/linux-6.6.143-riscv-full-all/full-all-summary.txt
+            build/linux-6.6.143-riscv-full-all/full-all-corpus/full-all.txt
+            build/linux-6.6.143-riscv-full-all/full-all-corpus/manifest.jsonl
+          retention-days: 30
