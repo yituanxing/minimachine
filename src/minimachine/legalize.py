@@ -78,6 +78,12 @@ def _first_width(text: str, *, default_pointer: bool = False) -> muir.Width:
 
 
 def _value(segment: str) -> muir.Value:
+    if re.search(r"\bpoison\b", segment):
+        return muir.Arbitrary("poison")
+    if re.search(r"\bundef\b", segment):
+        return muir.Arbitrary("undef")
+    if "zeroinitializer" in segment:
+        return muir.Imm(0)
     tokens = _VALUE_TOKEN_RE.findall(segment)
     if not tokens:
         raise ValueError(f"cannot parse scalar value from: {segment}")
@@ -161,11 +167,66 @@ def _result_defs(fn: TextFunction) -> dict[str, TextInst]:
     }
 
 
-def _parse_phi(inst: TextInst):
+def _split_top_commas(text: str) -> list[str]:
+    parts=[]
+    start=0
+    stack=[]
+    close_to_open={")":"(", "]":"[", "}":"{", ">":"<"}
+    for i,c in enumerate(text):
+        if c in "([{<":
+            stack.append(c)
+        elif c in close_to_open:
+            if stack and stack[-1] == close_to_open[c]:
+                stack.pop()
+        elif c == "," and not stack:
+            parts.append(text[start:i].strip())
+            start=i+1
+    parts.append(text[start:].strip())
+    return [p for p in parts if p]
+
+
+def _const_gep_value(text: str, layout: DataLayout) -> muir.Value:
+    raw=text.strip()
+    m=re.match(r"getelementptr(\s+inbounds)?\s*\((.*)\)$", raw)
+    if not m:
+        raise ValueError(f"not a constant GEP expression: {text}")
+    normalized="getelementptr" + (m.group(1) or "") + " " + m.group(2)
+    base, offset, dynamic=_parse_gep(TextInst(None, "getelementptr", normalized), layout)
+    if dynamic:
+        raise ValueError(f"dynamic constant-expression GEP: {text}")
+    if isinstance(base, muir.Symbol):
+        return muir.Reloc(base.name, offset)
+    if isinstance(base, muir.Reloc):
+        return muir.Reloc(base.symbol, base.addend + offset)
+    if offset == 0:
+        return base
+    raise ValueError(f"non-symbol constant-expression GEP needs materialization: {text}")
+
+
+def _parse_phi(inst: TextInst, layout: DataLayout):
     width = _first_width(inst.text, default_pointer=True)
-    incoming = []
-    for value_text, pred in _PHI_IN_RE.findall(inst.text):
-        incoming.append((_value(value_text), pred))
+    incoming=[]
+    text=inst.text
+    stack=[]
+    start=None
+    for i,c in enumerate(text):
+        if c=="[":
+            if not stack:
+                start=i+1
+            stack.append(c)
+        elif c=="]" and stack:
+            stack.pop()
+            if not stack and start is not None:
+                body=text[start:i]
+                parts=_split_top_commas(body)
+                if len(parts)==2 and re.fullmatch(r"%[-A-Za-z$._0-9]+", parts[1]):
+                    value_text=parts[0].strip()
+                    if value_text.startswith("getelementptr"):
+                        value=_const_gep_value(value_text, layout)
+                    else:
+                        value=_value(value_text)
+                    incoming.append((value, parts[1][1:]))
+                start=None
     if not incoming:
         raise ValueError(f"cannot parse phi: {inst.text}")
     return width, incoming
@@ -186,56 +247,63 @@ def _scalar_size(ty: str) -> int | None:
 
 def _parse_gep(inst: TextInst, layout: DataLayout):
     text = inst.text
-    m = re.match(
-        r"getelementptr(?:\s+inbounds)?\s+([^,]+),\s+ptr(?:\s+addrspace\(\d+\))?\s+([^,]+)(.*)$",
-        text,
-    )
-    if not m:
+    body=re.sub(r"^getelementptr(?:\s+inbounds)?\s+", "", text, count=1)
+    parts=_split_top_commas(body)
+    if len(parts) < 2:
         raise ValueError(f"cannot parse gep: {text}")
-    source_ty, base_text, rest = m.groups()
-    source_ty = source_ty.strip()
-    base = _value(base_text)
-    raw_indices = re.findall(r",\s+i(?:32|64)\s+([^,]+)", rest)
-    indices = [_value(x) for x in raw_indices]
+    source_ty=parts[0].strip()
+    pm=re.match(r"ptr(?:\s+addrspace\(\d+\))?\s+(.+)$", parts[1])
+    if not pm:
+        raise ValueError(f"cannot parse gep base: {text}")
+    base=_value(pm.group(1))
+    indices=[]
+    for raw in parts[2:]:
+        m=re.match(r"i(?:32|64)\s+(.+)$", raw)
+        if not m:
+            raise ValueError(f"cannot parse gep index: {raw} in {text}")
+        indices.append(_value(m.group(1)))
     if not indices:
-        return base, 0, []
+        return base,0,[]
 
-    constant_offset = 0
-    dynamic_terms: list[tuple[muir.Value, int]] = []
+    constant_offset=0
+    dynamic_terms: list[tuple[muir.Value,int]]=[]
 
-    info = layout.info(source_ty)
-    first_scale = ((info.size + info.align - 1) // info.align) * info.align
-    first = indices[0]
-    if isinstance(first, muir.Imm):
-        constant_offset += first.value * first_scale
+    info=layout.info(source_ty)
+    first_scale=((info.size+info.align-1)//info.align)*info.align
+    first=indices[0]
+    if isinstance(first,muir.Imm):
+        constant_offset += first.value*first_scale
     else:
-        dynamic_terms.append((first, first_scale))
+        dynamic_terms.append((first,first_scale))
 
-    current_ty = source_ty
+    current_ty=source_ty
     for index in indices[1:]:
-        info = layout.info(current_ty)
+        info=layout.info(current_ty)
         if info.fields is not None:
-            if not isinstance(index, muir.Imm):
-                raise LayoutError(f"dynamic struct GEP index in {current_ty}")
+            if not isinstance(index,muir.Imm):
+                raise LayoutError(f"dynamic struct GEP index in {current_ty}; inst={text}")
             assert info.field_offsets is not None
-            n = index.value
-            if n < 0 or n >= len(info.fields):
-                raise LayoutError(f"struct GEP index {n} out of range for {current_ty}")
+            n=index.value
+            if n<0 or n>=len(info.fields):
+                raise LayoutError(
+                    f"struct GEP index {n} out of range for {current_ty} "
+                    f"fields={len(info.fields)} inst={text}"
+                )
             constant_offset += info.field_offsets[n]
-            current_ty = info.fields[n]
+            current_ty=info.fields[n]
             continue
         if info.element is not None:
-            elem = layout.info(info.element)
-            scale = ((elem.size + elem.align - 1) // elem.align) * elem.align
-            if isinstance(index, muir.Imm):
-                constant_offset += index.value * scale
+            elem=layout.info(info.element)
+            scale=((elem.size+elem.align-1)//elem.align)*elem.align
+            if isinstance(index,muir.Imm):
+                constant_offset += index.value*scale
             else:
-                dynamic_terms.append((index, scale))
-            current_ty = info.element
+                dynamic_terms.append((index,scale))
+            current_ty=info.element
             continue
-        raise LayoutError(f"cannot descend GEP through scalar {current_ty}")
+        raise LayoutError(f"cannot descend GEP through scalar {current_ty}; inst={text}")
 
-    return base, constant_offset, dynamic_terms
+    return base,constant_offset,dynamic_terms
 
 
 def _call_args(text: str, callee_end: int) -> tuple[muir.Value, ...]:
@@ -358,7 +426,7 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
             if inst.result is None:
                 raise LegalizeError(fn.name, block.label, "phi", "phi has no result")
             try:
-                width, incoming = _parse_phi(inst)
+                width, incoming = _parse_phi(inst, layout)
             except ValueError as e:
                 raise LegalizeError(fn.name, block.label, "phi", str(e)) from e
             dst = _slot(inst.result)
@@ -453,36 +521,60 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     continue
 
                 if op == "load":
-                    m = re.search(r"load(?:\s+volatile)?\s+(i(?:1|8|16|32|64)|ptr)\s*,\s*ptr\s+([^,]+)", inst.text)
+                    m = re.search(r"load(?:\s+volatile)?\s+(i\d+|ptr)\s*,\s*ptr\s+([^,]+)", inst.text)
                     if not m or result is None:
                         raise ValueError(f"cannot parse load: {inst.text}")
-                    width = muir.Width.I64 if m.group(1) == "ptr" else _width(int(m.group(1)[1:]))
-                    ptr_text = m.group(2).strip()
-                    addr = aliases.get(ptr_text)
+                    ty=m.group(1)
+                    ptr_text=m.group(2).strip()
+                    addr=aliases.get(ptr_text)
                     if addr is None:
-                        addr = muir.Address(_value(ptr_text), 0)
+                        addr=muir.Address(_value(ptr_text),0)
                     else:
                         stats.folded_gep_mem += 1
-                    out.append(muir.Mov(width, result, muir.Mem(addr, width)))
+                    if ty=="ptr" or int(ty[1:]) in {1,8,16,32,64}:
+                        width=muir.Width.I64 if ty=="ptr" else _width(int(ty[1:]))
+                        out.append(muir.Mov(width,result,muir.Mem(addr,width)))
+                    else:
+                        bits=int(ty[1:])
+                        base=addr.base
+                        if addr.offset:
+                            temp_counter[0]+=1
+                            ap=muir.Slot(f"__odd_addr{temp_counter[0]}")
+                            frame_slots.add(ap.name)
+                            out.append(muir.Sub(muir.Width.I64,ap,base,muir.Imm(-addr.offset)))
+                            base=ap
+                        stats.temporary_helpers += 1
+                        out.append(muir.Helper(f"__mm_load_i{bits}",(base,),result))
                     continue
 
                 if op == "store":
-                    m = re.search(
-                        r"store(?:\s+volatile)?\s+(i(?:1|8|16|32|64)|ptr)\s+(.+?),\s*ptr\s+([^,]+)",
-                        inst.text,
-                    )
+                    m = re.search(r"store(?:\s+volatile)?\s+(i\d+|ptr)\s+(.+?),\s*ptr\s+([^,]+)", inst.text)
                     if not m:
                         raise ValueError(f"cannot parse store: {inst.text}")
-                    width = muir.Width.I64 if m.group(1) == "ptr" else _width(int(m.group(1)[1:]))
-                    src = _value(m.group(2))
-                    ptr_text = m.group(3).strip()
-                    addr = aliases.get(ptr_text)
+                    ty=m.group(1)
+                    src=_value(m.group(2))
+                    ptr_text=m.group(3).strip()
+                    addr=aliases.get(ptr_text)
                     if addr is None:
-                        addr = muir.Address(_value(ptr_text), 0)
+                        addr=muir.Address(_value(ptr_text),0)
                     else:
                         stats.folded_gep_mem += 1
-                    out.append(muir.Mov(width, muir.Mem(addr, width), src))
+                    if ty=="ptr" or int(ty[1:]) in {1,8,16,32,64}:
+                        width=muir.Width.I64 if ty=="ptr" else _width(int(ty[1:]))
+                        out.append(muir.Mov(width,muir.Mem(addr,width),src))
+                    else:
+                        bits=int(ty[1:])
+                        base=addr.base
+                        if addr.offset:
+                            temp_counter[0]+=1
+                            ap=muir.Slot(f"__odd_addr{temp_counter[0]}")
+                            frame_slots.add(ap.name)
+                            out.append(muir.Sub(muir.Width.I64,ap,base,muir.Imm(-addr.offset)))
+                            base=ap
+                        stats.temporary_helpers += 1
+                        out.append(muir.Helper(f"__mm_store_i{bits}",(base,src),None))
                     continue
+
 
                 if op == "icmp":
                     if inst.result and uses[inst.result] == 1:
@@ -502,6 +594,18 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                             raise ValueError(f"cannot parse unconditional br: {inst.text}")
                         t = muir.Target(label=labels[0])
                         out.append(muir.Br(muir.Width.I8, muir.Cond.EQ, muir.Imm(0), muir.Imm(0), t, t))
+                        continue
+                    cm = re.search(
+                        r"br\s+i1\s+icmp\s+([a-z]+)\s*\((.+?),\s*(.+?)\),\s*label",
+                        inst.text,
+                    )
+                    if cm and len(labels) == 2:
+                        pred = cm.group(1)
+                        lhs_text, rhs_text = cm.group(2), cm.group(3)
+                        width = _first_width(lhs_text, default_pointer=True)
+                        tt, ft = muir.Target(label=labels[0]), muir.Target(label=labels[1])
+                        out.append(_icmp_basis(pred, width, _value(lhs_text), _value(rhs_text), tt, ft))
+                        stats.fused_icmp_br += 1
                         continue
                     m = re.search(r"br\s+i1\s+(%[-A-Za-z$._0-9]+|true|false)", inst.text)
                     if not m or len(labels) != 2:
@@ -529,15 +633,27 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
 
                 if op in {"zext", "sext", "trunc"}:
                     m = re.search(
-                        rf"{op}(?:\s+\w+)*\s+(i(?:1|8|16|32|64))\s+(.+?)\s+to\s+(i(?:1|8|16|32|64))",
+                        rf"{op}(?:\s+\w+)*\s+(i\d+)\s+(.+?)\s+to\s+(i\d+)",
                         inst.text,
                     )
                     if not m or result is None:
                         raise ValueError(f"cannot parse {op}: {inst.text}")
-                    dst_width = _width(int(m.group(3)[1:]))
-                    mode = {"zext": "zext", "sext": "sext", "trunc": "trunc"}[op]
-                    out.append(muir.Mov(dst_width, result, _value(m.group(2)), extend=mode))
+                    src_bits=int(m.group(1)[1:])
+                    dst_bits=int(m.group(3)[1:])
+                    if src_bits in {1,8,16,32,64} and dst_bits in {1,8,16,32,64}:
+                        dst_width=_width(dst_bits)
+                        out.append(muir.Mov(dst_width,result,_value(m.group(2)),extend=op))
+                    else:
+                        stats.temporary_helpers += 1
+                        out.append(
+                            muir.Helper(
+                                f"__mm_{op}_{src_bits}_{dst_bits}",
+                                (_value(m.group(2)),),
+                                result,
+                            )
+                        )
                     continue
+
 
                 if op in {"ptrtoint", "inttoptr", "bitcast", "addrspacecast"}:
                     m = re.search(rf"{op}\s+(.+?)\s+to\s+(.+)$", inst.text)
@@ -596,14 +712,7 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     kind, symbol, args, callee_slot = _parse_call(inst)
                     if kind == "inline_asm":
                         stats.arch_escapes += 1
-                        stats.temporary_helpers += 1
-                        out.append(
-                            muir.Helper(
-                                "__mm_arch_inline_asm",
-                                (),
-                                result,
-                            )
-                        )
+                        out.append(muir.ArchEscape("inline_asm", inst.text))
                         continue
                     assert kind in {"direct", "indirect"}
                     if symbol and symbol.startswith(_DROP_INTRINSICS):
@@ -631,10 +740,10 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     if re.match(r"ret\s+void\b", inst.text):
                         out.append(muir.Ret(None))
                     else:
-                        m = re.match(r"ret\s+(?:i(?:1|8|16|32|64)|ptr)\s+(.+)$", inst.text)
-                        if not m:
-                            raise ValueError(f"cannot parse ret: {inst.text}")
-                        out.append(muir.Ret(_value(m.group(1))))
+                        try:
+                            out.append(muir.Ret(_value(inst.text)))
+                        except ValueError as e:
+                            raise ValueError(f"cannot parse ret: {inst.text}") from e
                     continue
 
                 if op == "unreachable":
@@ -650,8 +759,18 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     continue
 
                 if op in {"callbr", "indirectbr"}:
+                    labels = _LABEL_USE_RE.findall(inst.text)
+                    if not labels:
+                        raise ValueError(f"arch/control escape has no successor: {inst.text}")
                     stats.arch_escapes += 1
-                    raise ValueError(f"arch/control escape not yet lowered: {inst.text}")
+                    out.append(
+                        muir.ArchEscape(
+                            op,
+                            inst.text,
+                            tuple(muir.Target(label=x) for x in labels),
+                        )
+                    )
+                    continue
 
                 raise ValueError(f"opcode not handled: {op}")
 
@@ -676,7 +795,7 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
         if not block.instructions:
             raise LegalizeError(fn.name, pred, "phi", "predecessor has no terminator")
         term = block.instructions[-1]
-        if not isinstance(term, (muir.Br, muir.Ret, muir.Trap)):
+        if not isinstance(term, (muir.Br, muir.Ret, muir.Trap, muir.ArchEscape)):
             raise LegalizeError(fn.name, pred, "phi", "predecessor terminator is not lowered")
         moves = _parallel_copies(copies, temp_counter)
         for move in moves:
