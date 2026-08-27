@@ -136,14 +136,17 @@ def _icmp_basis(
 
 def _parse_icmp(inst: TextInst):
     m = re.search(
-        r"icmp\s+([a-z]+)\s+(i(?:1|8|16|32|64)|ptr)\s+(.+?),\s*(.+?)(?:,\s*!.*)?$",
+        r"icmp\s+([a-z]+)\s+(i\d+|ptr)\s+(.+?),\s*(.+?)(?:,\s*!.*)?$",
         inst.text,
     )
     if not m:
         raise ValueError(f"cannot parse icmp: {inst.text}")
     pred, ty, lhs, rhs = m.groups()
-    width = muir.Width.I64 if ty == "ptr" else _width(int(ty[1:]))
-    return pred, width, _value(lhs), _value(rhs)
+    if ty == "ptr":
+        return pred, 64, muir.Width.I64, _value(lhs), _value(rhs)
+    bits = int(ty[1:])
+    width = _width(bits) if bits in {1, 8, 16, 32, 64} else None
+    return pred, bits, width, _value(lhs), _value(rhs)
 
 
 def _use_counts(fn: TextFunction) -> Counter[str]:
@@ -577,14 +580,14 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
 
 
                 if op == "icmp":
-                    if inst.result and uses[inst.result] == 1:
-                        # The consuming conditional BR emits the fused compare.
-                        continue
                     if result is None:
                         raise ValueError("icmp has no result")
-                    pred, width, a, b = _parse_icmp(inst)
+                    pred, bits, width, a, b = _parse_icmp(inst)
+                    if inst.result and uses[inst.result] == 1 and width is not None:
+                        # The consuming conditional BR emits the fused compare.
+                        continue
                     stats.temporary_helpers += 1
-                    out.append(muir.Helper(f"__mm_icmp_{pred}_{width.value}", (a, b), result))
+                    out.append(muir.Helper(f"__mm_icmp_{pred}_{bits}", (a, b), result))
                     continue
 
                 if op == "br":
@@ -614,9 +617,23 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     tt, ft = muir.Target(label=labels[0]), muir.Target(label=labels[1])
                     cond_def = defs.get(cond_text)
                     if cond_def and cond_def.opcode == "icmp" and uses[cond_text] == 1:
-                        pred, width, a, b = _parse_icmp(cond_def)
-                        out.append(_icmp_basis(pred, width, a, b, tt, ft))
-                        stats.fused_icmp_br += 1
+                        pred, bits, width, a, b = _parse_icmp(cond_def)
+                        if width is not None:
+                            out.append(_icmp_basis(pred, width, a, b, tt, ft))
+                            stats.fused_icmp_br += 1
+                        else:
+                            # Odd-width compare was materialized by a helper.
+                            cond = _value(cond_text)
+                            out.append(
+                                muir.Br(
+                                    muir.Width.I8,
+                                    muir.Cond.EQ,
+                                    cond,
+                                    muir.Imm(0),
+                                    ft,
+                                    tt,
+                                )
+                            )
                     else:
                         cond = _value(cond_text)
                         out.append(
