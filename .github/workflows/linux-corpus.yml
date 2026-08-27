@@ -9,6 +9,14 @@ on:
       - scripts/select-corpus.py
       - scripts/export-corpus.py
       - .github/workflows/linux-corpus.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - configs/linux-6.6.143-riscv.env
+      - scripts/materialize-linux.sh
+      - scripts/select-corpus.py
+      - scripts/export-corpus.py
+      - .github/workflows/linux-corpus.yml
   workflow_dispatch:
 
 permissions:
