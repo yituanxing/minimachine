@@ -10,10 +10,14 @@ output=${2:-"$root/build/linux-$LINUX_VERSION-riscv/normalized"}
 jobs=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}
 
 opt="opt-$LLVM_MAJOR"
-command -v "$opt" >/dev/null 2>&1 || {
-    printf 'missing required tool: %s\n' "$opt" >&2
-    exit 2
-}
+llvm_dis="llvm-dis-$LLVM_MAJOR"
+llvm_as="llvm-as-$LLVM_MAJOR"
+for tool in "$opt" "$llvm_dis" "$llvm_as"; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        printf 'missing required tool: %s\n' "$tool" >&2
+        exit 2
+    }
+done
 
 manifest="$input/manifest.jsonl"
 test -s "$manifest" || {
@@ -38,6 +42,8 @@ export MM_INPUT="$input"
 export MM_OUTPUT="$output"
 export MM_MANIFEST="$manifest"
 export MM_OPT="$opt"
+export MM_LLVM_DIS="$llvm_dis"
+export MM_LLVM_AS="$llvm_as"
 export MM_LOWER_SWITCH="$lower_switch"
 export MM_JOBS="$jobs"
 
@@ -45,13 +51,17 @@ python3 - <<'PY'
 import concurrent.futures
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 src_root = Path(os.environ["MM_INPUT"])
 out_root = Path(os.environ["MM_OUTPUT"])
 manifest = Path(os.environ["MM_MANIFEST"])
 opt = os.environ["MM_OPT"]
+llvm_dis = os.environ["MM_LLVM_DIS"]
+llvm_as = os.environ["MM_LLVM_AS"]
 lower_switch = os.environ["MM_LOWER_SWITCH"]
 jobs = max(1, int(os.environ["MM_JOBS"]))
 
@@ -66,25 +76,80 @@ entries = [
 # such as .incbin, which must remain opaque during MiniMachine normalization.
 pipeline = f"default<O2>,{lower_switch}"
 
-def one(rel: str) -> str:
+def one(rel: str):
     src = src_root / rel
     dst = out_root / rel
     dst.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
+    first = subprocess.run(
         [opt, f"-passes={pipeline}", str(src), "-o", str(dst)],
-        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    return rel
+    if first.returncode == 0:
+        return rel, None
+
+    # Some kernel build TUs are primarily module-level assembler containers
+    # (for example kernel/configs.bc with .incbin kernel/config_data.gz).
+    # Keep them in the 2053-TU corpus, but make the build/arch escape explicit:
+    # strip only module asm in an analysis copy, then optimize any ordinary IR.
+    dis = subprocess.run(
+        [llvm_dis, "-o", "-", str(src)],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    lines = dis.stdout.splitlines()
+    module_asm = [line for line in lines if line.lstrip().startswith("module asm ")]
+    if not module_asm:
+        raise RuntimeError(
+            f"normalization failed for {rel}:\n{first.stderr}"
+        )
+
+    filtered = "\n".join(
+        line for line in lines if not line.lstrip().startswith("module asm ")
+    ) + "\n"
+
+    with tempfile.TemporaryDirectory(prefix="minimachine-normalize-") as td:
+        td = Path(td)
+        ll = td / "stripped.ll"
+        bc = td / "stripped.bc"
+        ll.write_text(filtered)
+        subprocess.run([llvm_as, str(ll), "-o", str(bc)], check=True)
+        subprocess.run(
+            [opt, f"-passes={pipeline}", str(bc), "-o", str(dst)],
+            check=True,
+        )
+
+    return rel, {
+        "file": rel,
+        "reason": "module_inline_asm",
+        "module_asm_lines": len(module_asm),
+    }
 
 print(f"NORMALIZE_START total={len(entries)} jobs={jobs} pipeline={pipeline}")
 with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
     futures = [pool.submit(one, rel) for rel in entries]
     done = 0
+    escapes = []
     for future in concurrent.futures.as_completed(futures):
-        future.result()
+        rel, escape = future.result()
+        if escape:
+            escapes.append(escape)
+            print(
+                f"NORMALIZE_ESCAPE file={rel} reason={escape['reason']} "
+                f"module_asm_lines={escape['module_asm_lines']}",
+                flush=True,
+            )
         done += 1
         if done % 25 == 0 or done == len(entries):
             print(f"NORMALIZE {done}/{len(entries)}", flush=True)
+
+(out_root / "normalization-escapes.jsonl").write_text(
+    "".join(json.dumps(x, sort_keys=True) + "\n" for x in sorted(escapes, key=lambda x: x["file"]))
+)
+print(f"NORMALIZE_ESCAPES {len(escapes)}", flush=True)
 PY
 
 cp "$manifest" "$output/manifest.jsonl"
