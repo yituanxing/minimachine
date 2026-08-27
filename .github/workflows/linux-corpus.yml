@@ -10,6 +10,7 @@ on:
       - scripts/export-corpus.py
       - scripts/normalize-corpus.sh
       - scripts/census.py
+      - scripts/pressure.py
       - .github/workflows/linux-corpus.yml
   workflow_dispatch:
 
@@ -108,6 +109,16 @@ jobs:
             --llvm-major 18 \
             --json build/reports/full500-census.json
 
+      - name: Measure P3 lowering pressure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/pressure.py \
+            build/linux-6.6.143-riscv/normalized \
+            --llvm-major 18 \
+            --jobs "$(nproc)" \
+            --json build/reports/full500-pressure.json
+
       - name: Emit progress summary
         if: always()
         shell: bash
@@ -121,7 +132,9 @@ jobs:
               print("PROGRESS census=missing")
               raise SystemExit(0)
           r = json.loads(p.read_text())
-          print(
+          pressure_path = Path("build/reports/full500-pressure.json")
+          pressure = json.loads(pressure_path.read_text()) if pressure_path.exists() else None
+          base = (
               "PROGRESS "
               f"linux_tus={r['files']}/500 "
               f"llvm_instructions={r['instructions']} "
@@ -130,6 +143,16 @@ jobs:
               f"indirect_calls={r['indirect_calls']} "
               f"atomic_ops={r['atomic_ops']}"
           )
+          if pressure:
+              cats = pressure["categories"]
+              base += (
+                  f" p3_native_or_fused={cats.get('p3_native_or_fused', 0)} "
+                  f"structured={cats.get('structured_lowering', 0)} "
+                  f"helper={cats.get('helper_expand', 0)} "
+                  f"arch_escape={cats.get('arch_escape', 0)} "
+                  f"unsupported={cats.get('unsupported', 0)}"
+              )
+          print(base)
           PY
 
       - name: Upload census report
@@ -139,6 +162,7 @@ jobs:
           name: minimachine-full500-census-${{ github.run_id }}
           path: |
             build/reports/full500-census.json
+            build/reports/full500-pressure.json
             build/linux-6.6.143-riscv/corpus/manifest.jsonl
           if-no-files-found: ignore
           retention-days: 14
