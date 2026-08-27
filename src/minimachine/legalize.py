@@ -6,6 +6,7 @@ import re
 
 from . import muir
 from .llvm_text import TextBlock, TextFunction, TextInst, parse_module
+from .layout import DataLayout, LayoutError
 
 
 _LOCAL_RE = re.compile(r"%[-A-Za-z$._0-9]+")
@@ -183,56 +184,58 @@ def _scalar_size(ty: str) -> int | None:
     return None
 
 
-def _parse_gep(inst: TextInst):
+def _parse_gep(inst: TextInst, layout: DataLayout):
     text = inst.text
-    # Named structs/complex literal aggregate types are deliberately surfaced
-    # as layout blockers in this first legalizer rather than guessed.
     m = re.match(
-        r"getelementptr(?:\s+inbounds)?\s+(.+?),\s+ptr(?:\s+addrspace\(\d+\))?\s+([^,]+)(.*)$",
+        r"getelementptr(?:\s+inbounds)?\s+([^,]+),\s+ptr(?:\s+addrspace\(\d+\))?\s+([^,]+)(.*)$",
         text,
     )
     if not m:
         raise ValueError(f"cannot parse gep: {text}")
     source_ty, base_text, rest = m.groups()
+    source_ty = source_ty.strip()
     base = _value(base_text)
     raw_indices = re.findall(r",\s+i(?:32|64)\s+([^,]+)", rest)
     indices = [_value(x) for x in raw_indices]
     if not indices:
-        return base, 0, None
+        return base, 0, []
 
-    # Common scalar pointer arithmetic: GEP iT, ptr base, idx.
-    scalar = _scalar_size(source_ty)
-    if scalar is not None and not source_ty.strip().startswith("["):
-        if len(indices) != 1:
-            raise ValueError(f"complex scalar gep indices: {text}")
-        idx = indices[0]
-        if isinstance(idx, muir.Imm):
-            return base, idx.value * scalar, None
-        return base, 0, (idx, scalar)
+    constant_offset = 0
+    dynamic_terms: list[tuple[muir.Value, int]] = []
 
-    # Common array form: GEP [N x iT], ptr base, 0, idx.
-    am = re.fullmatch(r"\[(\d+)\s+x\s+i(8|16|32|64)\]", source_ty.strip())
-    if am:
-        n = int(am.group(1))
-        elem = int(am.group(2)) // 8
-        if len(indices) == 1:
-            idx = indices[0]
-            scale = n * elem
-        elif len(indices) == 2 and isinstance(indices[0], muir.Imm) and indices[0].value == 0:
-            idx = indices[1]
-            scale = elem
-        else:
-            raise ValueError(f"complex array gep indices: {text}")
-        if isinstance(idx, muir.Imm):
-            return base, idx.value * scale, None
-        return base, 0, (idx, scale)
+    info = layout.info(source_ty)
+    first_scale = ((info.size + info.align - 1) // info.align) * info.align
+    first = indices[0]
+    if isinstance(first, muir.Imm):
+        constant_offset += first.value * first_scale
+    else:
+        dynamic_terms.append((first, first_scale))
 
-    # Zero-only GEP is representation-preserving even when the aggregate
-    # layout is not yet modeled.
-    if all(isinstance(i, muir.Imm) and i.value == 0 for i in indices):
-        return base, 0, None
+    current_ty = source_ty
+    for index in indices[1:]:
+        info = layout.info(current_ty)
+        if info.fields is not None:
+            if not isinstance(index, muir.Imm):
+                raise LayoutError(f"dynamic struct GEP index in {current_ty}")
+            assert info.field_offsets is not None
+            n = index.value
+            if n < 0 or n >= len(info.fields):
+                raise LayoutError(f"struct GEP index {n} out of range for {current_ty}")
+            constant_offset += info.field_offsets[n]
+            current_ty = info.fields[n]
+            continue
+        if info.element is not None:
+            elem = layout.info(info.element)
+            scale = ((elem.size + elem.align - 1) // elem.align) * elem.align
+            if isinstance(index, muir.Imm):
+                constant_offset += index.value * scale
+            else:
+                dynamic_terms.append((index, scale))
+            current_ty = info.element
+            continue
+        raise LayoutError(f"cannot descend GEP through scalar {current_ty}")
 
-    raise ValueError(f"aggregate layout required: {source_ty}")
+    return base, constant_offset, dynamic_terms
 
 
 def _call_args(text: str, callee_end: int) -> tuple[muir.Value, ...]:
@@ -336,7 +339,7 @@ def _parallel_copies(copies, temp_index: list[int]):
     return out
 
 
-def legalize_function(fn: TextFunction) -> tuple[muir.Function, LegalizeStats]:
+def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Function, LegalizeStats]:
     stats = LegalizeStats()
     uses = _use_counts(fn)
     defs = _result_defs(fn)
@@ -413,27 +416,40 @@ def legalize_function(fn: TextFunction) -> tuple[muir.Function, LegalizeStats]:
                 if op == "getelementptr":
                     if result is None:
                         raise ValueError("GEP has no result")
-                    base, offset, dynamic = _parse_gep(inst)
+                    base, offset, dynamic_terms = _parse_gep(inst, layout)
                     # Fold only when the GEP has exactly one use. The load/store
                     # legalizer consumes this alias as a memory operand.
-                    if uses[inst.result] == 1 and dynamic is None:
+                    if uses[inst.result] == 1 and not dynamic_terms:
                         aliases[inst.result] = muir.Address(base, offset)
                         continue
-                    if dynamic is None:
-                        if offset == 0:
-                            out.append(muir.Mov(muir.Width.I64, result, base))
+
+                    current: muir.Value = base
+                    if offset:
+                        temp_counter[0] += 1
+                        off_dst = result if not dynamic_terms else muir.Slot(f"__gep_off{temp_counter[0]}")
+                        frame_slots.add(off_dst.name)
+                        out.append(muir.Sub(muir.Width.I64, off_dst, current, muir.Imm(-offset)))
+                        current = off_dst
+
+                    for n, (idx, scale) in enumerate(dynamic_terms):
+                        last = n == len(dynamic_terms) - 1
+                        temp_counter[0] += 1
+                        dst = result if last else muir.Slot(f"__gep_dyn{temp_counter[0]}_{n}")
+                        frame_slots.add(dst.name)
+                        if scale == 1:
+                            neg = muir.Slot(f"__gep_neg{temp_counter[0]}")
+                            frame_slots.add(neg.name)
+                            out.append(muir.Sub(muir.Width.I64, neg, muir.Imm(0), idx))
+                            out.append(muir.Sub(muir.Width.I64, dst, current, neg))
                         else:
-                            out.append(muir.Sub(muir.Width.I64, result, base, muir.Imm(-offset)))
-                    else:
-                        idx, scale = dynamic
-                        stats.temporary_helpers += 1
-                        out.append(
-                            muir.Helper(
-                                f"__mm_ptr_add_scaled_{scale}",
-                                (base, idx),
-                                result,
-                            )
-                        )
+                            stats.temporary_helpers += 1
+                            out.append(muir.Helper(f"__mm_ptr_add_scaled_{scale}", (current, idx), dst))
+                        current = dst
+
+                    if not offset and not dynamic_terms:
+                        out.append(muir.Mov(muir.Width.I64, result, base))
+                    elif dynamic_terms and current != result:
+                        out.append(muir.Mov(muir.Width.I64, result, current))
                     continue
 
                 if op == "load":
@@ -648,9 +664,12 @@ def legalize_function(fn: TextFunction) -> tuple[muir.Function, LegalizeStats]:
     copies_by_pred: dict[str, list[tuple[muir.Slot, muir.Value, muir.Width]]] = defaultdict(list)
     for target, phis in phis_by_target.items():
         for dst, src, pred, width in phis:
-            if pred not in out_blocks:
+            resolved_pred = pred
+            if resolved_pred not in out_blocks and resolved_pred.isdigit() and "entry" in out_blocks:
+                resolved_pred = "entry"
+            if resolved_pred not in out_blocks:
                 raise LegalizeError(fn.name, target, "phi", f"unknown predecessor: {pred}")
-            copies_by_pred[pred].append((dst, src, width))
+            copies_by_pred[resolved_pred].append((dst, src, width))
 
     for pred, copies in copies_by_pred.items():
         block = out_blocks[pred]
@@ -673,10 +692,11 @@ def legalize_function(fn: TextFunction) -> tuple[muir.Function, LegalizeStats]:
 
 def legalize_module(text: str):
     functions = parse_module(text)
+    layout = DataLayout.from_module(text)
     out = []
     total = LegalizeStats()
     for fn in functions:
-        lowered, stats = legalize_function(fn)
+        lowered, stats = legalize_function(fn, layout)
         out.append(lowered)
         for key, value in stats.as_dict().items():
             setattr(total, key, getattr(total, key) + value)
