@@ -27,7 +27,6 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
       BUILD_ROOT: ${{ github.workspace }}/build/linux-6.6.143-riscv
       CACHE_ROOT: ${{ github.workspace }}/.cache/minimachine
-      JOBS: 4
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,6 +41,16 @@ jobs:
             flex bison bc libelf-dev libssl-dev \
             dwarves zstd xz-utils
 
+      - name: Resolve runner/toolchain identity
+        id: toolchain
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "nproc=$(nproc)"
+          clang-18 --version | head -n 1
+          key=$({ clang-18 --version | head -n 1; ld.lld-18 --version | head -n 1; } | sha256sum | cut -c1-16)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
       - name: Restore pinned Linux archive
         id: source-cache
         uses: actions/cache/restore@v4
@@ -54,7 +63,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/linux-6.6.143-riscv/corpus
-          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-full500-v1-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
+          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-${{ steps.toolchain.outputs.key }}-full500-v2-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
 
       - name: Materialize full Linux build and export full500
         if: steps.corpus-cache.outputs.cache-hit != 'true'
@@ -75,7 +84,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: build/linux-6.6.143-riscv/corpus
-          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-full500-v1-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
+          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-${{ steps.toolchain.outputs.key }}-full500-v2-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
 
       - name: Normalize full500 LLVM
         shell: bash
