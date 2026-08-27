@@ -8,6 +8,8 @@ on:
       - scripts/materialize-linux.sh
       - scripts/select-corpus.py
       - scripts/export-corpus.py
+      - scripts/normalize-corpus.sh
+      - scripts/census.py
       - .github/workflows/linux-corpus.yml
   workflow_dispatch:
 
