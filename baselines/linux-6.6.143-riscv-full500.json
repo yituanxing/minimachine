@@ -1,0 +1,27 @@
+{
+  "corpus": "linux-6.6.143-riscv-defconfig-full500",
+  "files": 500,
+  "instructions": 296128,
+  "opcode_kinds": 33,
+  "categories": {
+    "p3_native_or_fused": 175217,
+    "structured_lowering": 92440,
+    "helper_expand": 18573,
+    "arch_escape": 5136,
+    "drop": 4441,
+    "special_runtime": 321,
+    "unsupported": 0
+  },
+  "metrics": {
+    "icmp_total": 37818,
+    "icmp_fused_to_br": 30699,
+    "icmp_materialized": 7119,
+    "gep_total": 43698,
+    "gep_constant_indices": 39294,
+    "gep_foldable_into_mem": 27336,
+    "gep_dynamic_single_mem_use": 2614,
+    "direct_call": 22742,
+    "indirect_call": 1776,
+    "inline_asm": 4029
+  }
+}
