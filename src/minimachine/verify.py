@@ -31,7 +31,8 @@ def verify_muir(function: muir.Function) -> None:
                 _check_target(inst.true_target, labels)
                 _check_target(inst.false_target, labels)
             elif isinstance(inst, muir.Call):
-                _check_target(inst.callee, labels) if inst.callee.is_direct() else _check_target(inst.callee, labels)
+                if not (inst.callee.is_direct() or inst.callee.is_indirect()):
+                    raise VerifyError("callee must be exactly one of direct symbol or indirect slot")
                 if inst.continuation not in labels:
                     raise VerifyError(f"unknown call continuation: {inst.continuation}")
             elif isinstance(inst, muir.Helper):
