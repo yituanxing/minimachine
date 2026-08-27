@@ -1,0 +1,14 @@
+# Reproducible external/materialized state
+.cache/
+build/
+out/
+corpus/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
