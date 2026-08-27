@@ -6,6 +6,7 @@ on:
     paths:
       - src/minimachine/**
       - tests/test_ir_contract.py
+      - tests/test_legalizer.py
       - .github/workflows/core-ir-contract.yml
   workflow_dispatch:
 
@@ -18,4 +19,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run IR contract tests
-        run: python3 -m unittest discover -s tests -p 'test_ir_contract.py' -v
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
