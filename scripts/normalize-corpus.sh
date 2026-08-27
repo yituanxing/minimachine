@@ -9,14 +9,11 @@ input=${1:-"$root/build/linux-$LINUX_VERSION-riscv/corpus"}
 output=${2:-"$root/build/linux-$LINUX_VERSION-riscv/normalized"}
 jobs=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}
 
-clang="clang-$LLVM_MAJOR"
 opt="opt-$LLVM_MAJOR"
-for tool in "$clang" "$opt"; do
-    command -v "$tool" >/dev/null 2>&1 || {
-        printf 'missing required tool: %s\n' "$tool" >&2
-        exit 2
-    }
-done
+command -v "$opt" >/dev/null 2>&1 || {
+    printf 'missing required tool: %s\n' "$opt" >&2
+    exit 2
+}
 
 manifest="$input/manifest.jsonl"
 test -s "$manifest" || {
@@ -40,7 +37,6 @@ mkdir -p "$output"
 export MM_INPUT="$input"
 export MM_OUTPUT="$output"
 export MM_MANIFEST="$manifest"
-export MM_CLANG="$clang"
 export MM_OPT="$opt"
 export MM_LOWER_SWITCH="$lower_switch"
 export MM_JOBS="$jobs"
@@ -55,7 +51,6 @@ from pathlib import Path
 src_root = Path(os.environ["MM_INPUT"])
 out_root = Path(os.environ["MM_OUTPUT"])
 manifest = Path(os.environ["MM_MANIFEST"])
-clang = os.environ["MM_CLANG"]
 opt = os.environ["MM_OPT"]
 lower_switch = os.environ["MM_LOWER_SWITCH"]
 jobs = max(1, int(os.environ["MM_JOBS"]))
@@ -66,40 +61,22 @@ entries = [
     if line.strip()
 ]
 
+# Use LLVM's middle-end directly. This deliberately avoids Clang's backend and
+# integrated assembler: some real kernel TUs contain module-level inline asm
+# such as .incbin, which must remain opaque during MiniMachine normalization.
+pipeline = f"default<O2>,{lower_switch}"
+
 def one(rel: str) -> str:
     src = src_root / rel
     dst = out_root / rel
     dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(str(dst) + ".o2.tmp.bc")
-    try:
-        subprocess.run(
-            [
-                clang,
-                "--target=riscv64-linux-gnu",
-                "-mabi=lp64",
-                "-O2",
-                "-emit-llvm",
-                "-c",
-                "-x",
-                "ir",
-                str(src),
-                "-o",
-                str(tmp),
-            ],
-            check=True,
-        )
-        subprocess.run(
-            [opt, f"-passes={lower_switch}", str(tmp), "-o", str(dst)],
-            check=True,
-        )
-    finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+    subprocess.run(
+        [opt, f"-passes={pipeline}", str(src), "-o", str(dst)],
+        check=True,
+    )
     return rel
 
-print(f"NORMALIZE_START total={len(entries)} jobs={jobs}")
+print(f"NORMALIZE_START total={len(entries)} jobs={jobs} pipeline={pipeline}")
 with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
     futures = [pool.submit(one, rel) for rel in entries]
     done = 0
@@ -111,5 +88,5 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
 PY
 
 cp "$manifest" "$output/manifest.jsonl"
-printf 'NORMALIZED %s clang_o2=1 pass=%s jobs=%s\n' \
+printf 'NORMALIZED %s pipeline=default<O2>,%s jobs=%s\n' \
     "$(wc -l < "$manifest" | tr -d ' ')" "$lower_switch" "$jobs"
