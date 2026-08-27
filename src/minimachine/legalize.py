@@ -692,7 +692,7 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
 
                 if op in {"and", "or", "xor", "shl", "lshr", "ashr", "mul", "udiv", "sdiv", "urem", "srem"}:
                     m = re.search(
-                        rf"{op}(?:\s+\w+)*\s+(i(?:1|8|16|32|64))\s+(.+?),\s*(.+)$",
+                        rf"{op}(?:\s+\w+)*\s+(i\d+)\s+(.+?),\s*(.+)$",
                         inst.text,
                     )
                     if not m or result is None:
