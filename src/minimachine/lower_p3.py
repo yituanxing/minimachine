@@ -8,10 +8,19 @@ class MachineLoweringError(ValueError):
     pass
 
 
+def _lower_value(value: muir.Value) -> p3.Value:
+    if isinstance(value, muir.Arbitrary):
+        # LLVM backends may choose arbitrary concrete bits for undef/poison
+        # once execution reaches machine selection. Pick zero deterministically.
+        return muir.Imm(0)
+    return value
+
+
 def _lower_operand(op: muir.Operand) -> p3.Operand:
     if isinstance(op, muir.Mem):
-        return p3.Mem(op.address, op.width)
-    return op
+        address = muir.Address(_lower_value(op.address.base), op.address.offset)
+        return p3.Mem(address, op.width)
+    return _lower_value(op)
 
 
 def lower_function(function: muir.Function) -> p3.Function:
@@ -37,14 +46,14 @@ def lower_function(function: muir.Function) -> p3.Function:
                     )
                 )
             elif isinstance(inst, muir.Sub):
-                out.append(p3.Sub(inst.width, inst.dst, inst.a, inst.b))
+                out.append(p3.Sub(inst.width, inst.dst, _lower_value(inst.a), _lower_value(inst.b)))
             elif isinstance(inst, muir.Br):
                 out.append(
                     p3.Br(
                         inst.width,
                         inst.cond,
-                        inst.a,
-                        inst.b,
+                        _lower_value(inst.a),
+                        _lower_value(inst.b),
                         inst.true_target,
                         inst.false_target,
                     )
