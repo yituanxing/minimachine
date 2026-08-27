@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +24,7 @@ def parse_args():
     p.add_argument("--llvm-major", default="18")
     p.add_argument("--json", type=Path)
     p.add_argument("--strict", action="store_true")
+    p.add_argument("--jobs", type=int, default=0)
     return p.parse_args()
 
 
@@ -41,46 +44,47 @@ def main() -> int:
     records = []
     total_stats = {}
     pass_count = 0
+    jobs = args.jobs or max(1, os.cpu_count() or 1)
 
-    for index, path in enumerate(files, 1):
+    def one(path: Path):
+        rel = path.relative_to(args.input).as_posix() if args.input.is_dir() else path.name
         try:
-            p = subprocess.run(
+            proc = subprocess.run(
                 [llvm_dis, "-o", "-", str(path)],
                 check=True,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            functions, stats = legalize_module(p.stdout)
+            functions, stats = legalize_module(proc.stdout)
             for fn in functions:
                 verify_muir(fn)
-            pass_count += 1
-            sd = stats.as_dict()
-            for k, v in sd.items():
-                total_stats[k] = total_stats.get(k, 0) + v
-            records.append(
-                {
-                    "file": path.relative_to(args.input).as_posix()
-                    if args.input.is_dir()
-                    else path.name,
-                    "status": "PASS",
-                    "functions": len(functions),
-                    "stats": sd,
-                }
-            )
-            print(f"LEGALIZE {index}/{len(files)} PASS {path.name} functions={len(functions)}")
+            return {
+                "file": rel,
+                "status": "PASS",
+                "functions": len(functions),
+                "stats": stats.as_dict(),
+            }
         except (subprocess.CalledProcessError, LegalizeError, LLVMTextError, VerifyError, ValueError) as e:
-            detail = str(e)
-            records.append(
-                {
-                    "file": path.relative_to(args.input).as_posix()
-                    if args.input.is_dir()
-                    else path.name,
-                    "status": "FAIL",
-                    "error": detail,
-                }
-            )
-            print(f"LEGALIZE {index}/{len(files)} FAIL {path.name} :: {detail}")
+            return {"file": rel, "status": "FAIL", "error": str(e)}
+
+    print(f"LEGALIZE_START files={len(files)} jobs={jobs}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        future_map = {pool.submit(one, path): path for path in files}
+        done = 0
+        for future in concurrent.futures.as_completed(future_map):
+            rec = future.result()
+            records.append(rec)
+            done += 1
+            if rec["status"] == "PASS":
+                pass_count += 1
+                for k, v in rec["stats"].items():
+                    total_stats[k] = total_stats.get(k, 0) + v
+            if done % 25 == 0 or rec["status"] == "FAIL" or done == len(files):
+                tail = f" FAIL {rec['file']} :: {rec['error']}" if rec["status"] == "FAIL" else ""
+                print(f"LEGALIZE {done}/{len(files)} pass={pass_count} fail={done-pass_count}{tail}", flush=True)
+
+    records.sort(key=lambda x: x["file"])
 
     summary = {
         "files": len(files),
