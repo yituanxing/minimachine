@@ -1,0 +1,144 @@
+name: Analyze Linux Full-All
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - baselines/linux-6.6.143-riscv-full500.json
+      - scripts/normalize-corpus.sh
+      - scripts/census.py
+      - scripts/pressure.py
+      - scripts/static_forecast.py
+      - .github/workflows/linux-full-all-analysis.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minimachine-linux-full-all-analysis
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: linux-6.6.143-riscv-full-all-analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      BUILD_ROOT: ${{ github.workspace }}/build/linux-6.6.143-riscv-full-all
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install LLVM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 llvm-18 lld-18
+          echo "nproc=$(nproc)"
+          clang-18 --version | head -n 1
+
+      - name: Restore frozen full-all corpus
+        id: corpus-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/linux-6.6.143-riscv-full-all/full-all-corpus
+          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-full-all-v1-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
+          restore-keys: |
+            minimachine-linux-6.6.143-riscv-defconfig-llvm18-full-all-v1-
+
+      - name: Verify frozen corpus
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          corpus="$BUILD_ROOT/full-all-corpus"
+          test -s "$corpus/manifest.jsonl"
+          count=$(wc -l < "$corpus/manifest.jsonl" | tr -d ' ')
+          echo "FULL_ALL_TUS=$count"
+          test "$count" -eq 2053
+          bc_count=$(find "$corpus" -type f -name '*.bc' | wc -l | tr -d ' ')
+          echo "FULL_ALL_BC=$bc_count"
+          test "$bc_count" -eq 2053
+
+      - name: Normalize full-all LLVM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          JOBS="$(nproc)" bash scripts/normalize-corpus.sh \
+            "$BUILD_ROOT/full-all-corpus" \
+            "$BUILD_ROOT/normalized"
+
+      - name: Census full-all
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$BUILD_ROOT/reports"
+          python3 scripts/census.py \
+            "$BUILD_ROOT/normalized" \
+            --llvm-major 18 \
+            --json "$BUILD_ROOT/reports/full-all-census.json"
+
+      - name: Measure P3 pressure full-all
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/pressure.py \
+            "$BUILD_ROOT/normalized" \
+            --llvm-major 18 \
+            --jobs "$(nproc)" \
+            --json "$BUILD_ROOT/reports/full-all-pressure.json"
+
+      - name: Build static forecast
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/static_forecast.py \
+            --census "$BUILD_ROOT/reports/full-all-census.json" \
+            --pressure "$BUILD_ROOT/reports/full-all-pressure.json" \
+            --baseline baselines/linux-6.6.143-riscv-full500.json \
+            --json "$BUILD_ROOT/reports/full-all-forecast.json" \
+            --markdown "$BUILD_ROOT/reports/full-all-forecast.md"
+
+      - name: Emit compact summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path("build/linux-6.6.143-riscv-full-all/reports")
+          c=json.loads((root/"full-all-census.json").read_text())
+          p=json.loads((root/"full-all-pressure.json").read_text())
+          f=json.loads((root/"full-all-forecast.json").read_text())
+          g=f["growth_vs_baseline"]
+          cats=p["categories"]
+          print(
+              "FULL_ALL "
+              f"tus={c['files']} "
+              f"llvm={c['instructions']} "
+              f"opcode_kinds={c['opcode_kinds']} "
+              f"new_ops={','.join(g['opcode_kinds']['new']) or 'none'} "
+              f"direct={cats.get('p3_native_or_fused',0)} "
+              f"structured={cats.get('structured_lowering',0)} "
+              f"helper={cats.get('helper_expand',0)} "
+              f"arch={cats.get('arch_escape',0)} "
+              f"unsupported={cats.get('unsupported',0)} "
+              f"p3_proxy={f['static_p3_emission_proxy']['instructions_low']}-"
+              f"{f['static_p3_emission_proxy']['instructions_high']} "
+              f"core_loc={f['source_loc_forecast']['recommended_core']['low']}-"
+              f"{f['source_loc_forecast']['recommended_core']['high']}"
+          )
+          PY
+
+      - name: Upload full-all analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-full-all-analysis-${{ github.run_id }}
+          path: |
+            build/linux-6.6.143-riscv-full-all/reports/full-all-census.json
+            build/linux-6.6.143-riscv-full-all/reports/full-all-pressure.json
+            build/linux-6.6.143-riscv-full-all/reports/full-all-forecast.json
+            build/linux-6.6.143-riscv-full-all/reports/full-all-forecast.md
+          retention-days: 30
