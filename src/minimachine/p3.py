@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Union
 
-from .muir import Address, Cond, Imm, Slot, Target, Width
+from .muir import Address, Cond, Imm, Slot, Symbol, Target, Width
 
 
-Value = Union[Slot, Imm]
+Value = Union[Slot, Imm, Symbol]
 
 
 @dataclass(frozen=True)
