@@ -33,7 +33,18 @@ class Symbol:
     name: str
 
 
-Value = Union[Slot, Imm, Symbol]
+@dataclass(frozen=True)
+class Reloc:
+    symbol: str
+    addend: int = 0
+
+
+@dataclass(frozen=True)
+class Arbitrary:
+    kind: str  # "undef" or "poison"; machine lowering may choose concrete bits.
+
+
+Value = Union[Slot, Imm, Symbol, Reloc, Arbitrary]
 
 
 @dataclass(frozen=True)
@@ -125,7 +136,14 @@ class Trap:
     reason: str
 
 
-Instr = Union[Mov, Sub, Br, Call, Ret, Helper, Trap]
+@dataclass(frozen=True)
+class ArchEscape:
+    kind: str
+    text: str
+    targets: tuple[Target, ...] = ()
+
+
+Instr = Union[Mov, Sub, Br, Call, Ret, Helper, Trap, ArchEscape]
 
 
 @dataclass
