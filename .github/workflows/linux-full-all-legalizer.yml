@@ -1,0 +1,96 @@
+name: Linux Full-All Legalizer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/minimachine/**
+      - scripts/legalize_bc.py
+      - scripts/normalize-corpus.sh
+      - .github/workflows/linux-full-all-legalizer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minimachine-linux-full-all-legalizer
+  cancel-in-progress: true
+
+jobs:
+  full_all:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ROOT: ${{ github.workspace }}/build/legalizer-full-all
+      RAW: ${{ github.workspace }}/build/linux-6.6.143-riscv-full-all/full-all-corpus
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-18 clang-18
+          echo "nproc=$(nproc)"
+
+      - name: Restore frozen full-all corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: build/linux-6.6.143-riscv-full-all/full-all-corpus
+          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-full-all-v1-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
+          restore-keys: |
+            minimachine-linux-6.6.143-riscv-defconfig-llvm18-full-all-v1-
+
+      - name: Verify full-all
+        run: |
+          set -Eeuo pipefail
+          test -s "$RAW/manifest.jsonl"
+          test "$(find "$RAW" -type f -name '*.bc' | wc -l)" -eq 2053
+
+      - name: Normalize full-all
+        run: |
+          set -Eeuo pipefail
+          JOBS="$(nproc)" bash scripts/normalize-corpus.sh "$RAW" "$ROOT/normalized"
+
+      - name: Legalize full-all to μIR
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$ROOT/reports"
+          python3 scripts/legalize_bc.py "$ROOT/normalized" \
+            --llvm-major 18 \
+            --jobs "$(nproc)" \
+            --json "$ROOT/reports/legalize.json"
+
+      - name: Full-all summary
+        run: |
+          python3 - <<'PY'
+          import json
+          r=json.load(open("build/legalizer-full-all/reports/legalize.json"))
+          print(f"FULL_ALL_LEGALIZER pass={r['pass']}/2053 fail={r['fail']}")
+          groups={}
+          for x in r["records"]:
+              if x["status"]=="FAIL":
+                  e=x["error"]
+                  key=e.split(":",3)[-1].strip()
+                  groups[key]=groups.get(key,0)+1
+          for k,v in sorted(groups.items(), key=lambda x:(-x[1],x[0]))[:40]:
+              print(f"BLOCKER {v}x {k}")
+          s=r["stats"]
+          print(
+              "STATS "
+              f"llvm={s.get('llvm_instructions',0)} "
+              f"muir={s.get('muir_instructions',0)} "
+              f"fused_icmp_br={s.get('fused_icmp_br',0)} "
+              f"phi_edge_moves={s.get('phi_edge_moves',0)} "
+              f"folded_gep_mem={s.get('folded_gep_mem',0)} "
+              f"temporary_helpers={s.get('temporary_helpers',0)} "
+              f"arch_escapes={s.get('arch_escapes',0)}"
+          )
+          PY
+
+      - name: Upload full-all report
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-full-all-legalizer-${{ github.run_id }}
+          path: build/legalizer-full-all/reports/legalize.json
+          retention-days: 30
