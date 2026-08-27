@@ -58,7 +58,7 @@ for rel in "${entries[@]}"; do
     # Clang -save-temps=obj intentionally gives us pre-optimization bitcode.
     # Re-run only LLVM optimization on that frozen bitcode (no C frontend)
     # so our canonical corpus matches the -O2 shape used for machine design.
-    "$clang" --target=riscv64-linux-gnu -O2 -emit-llvm -c -x ir \
+    "$clang" --target=riscv64-linux-gnu -mabi=lp64 -O2 -emit-llvm -c -x ir \
         "$src" -o "$tmp"
 
     # Lower switch after O2 because switches may be introduced/canonicalized
