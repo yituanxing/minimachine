@@ -7,6 +7,7 @@ on:
       - src/minimachine/**
       - scripts/legalize_bc.py
       - scripts/normalize-corpus.sh
+      - scripts/subset_corpus.py
       - .github/workflows/linux-full500-legalizer.yml
   workflow_dispatch:
 
@@ -29,30 +30,43 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends llvm-18 clang-18
-          key=$({ clang-18 --version | head -n 1; ld.lld-18 --version | head -n 1; } | sha256sum | cut -c1-16)
-          echo "TOOLCHAIN_KEY=$key" >> "$GITHUB_ENV"
           echo "nproc=$(nproc)"
 
-      - name: Restore frozen full500 corpus
+      - name: Restore legalizer full500 cache
+        id: legalizer-cache
         uses: actions/cache/restore@v4
         with:
           path: build/full500/raw
-          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-${{ env.TOOLCHAIN_KEY }}-full500-v2-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
-          restore-keys: |
-            minimachine-linux-6.6.143-riscv-defconfig-llvm18-d2833d9ec4738db4-full500-v2-
-            minimachine-linux-6.6.143-riscv-defconfig-llvm18-full500-v1-
+          key: minimachine-legalizer-full500-v1-${{ hashFiles('scripts/subset_corpus.py', 'configs/linux-6.6.143-riscv.env') }}
 
-      - name: Rehome restored corpus if needed
-        shell: bash
+      - name: Restore full-all corpus
+        if: steps.legalizer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: build/linux-6.6.143-riscv-full-all/full-all-corpus
+          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-full-all-v1-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
+          restore-keys: |
+            minimachine-linux-6.6.143-riscv-defconfig-llvm18-full-all-v1-
+
+      - name: Derive full500
+        if: steps.legalizer-cache.outputs.cache-hit != 'true'
         run: |
           set -Eeuo pipefail
-          if test ! -s "$ROOT/raw/manifest.jsonl"; then
-            # actions/cache restores the path embedded in the original cache.
-            src="build/linux-6.6.143-riscv/corpus"
-            test -s "$src/manifest.jsonl"
-            mkdir -p "$ROOT"
-            mv "$src" "$ROOT/raw"
-          fi
+          python3 scripts/subset_corpus.py \
+            --input build/linux-6.6.143-riscv-full-all/full-all-corpus \
+            --output "$ROOT/raw" \
+            --count 500
+
+      - name: Save legalizer full500 cache
+        if: steps.legalizer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/full500/raw
+          key: minimachine-legalizer-full500-v1-${{ hashFiles('scripts/subset_corpus.py', 'configs/linux-6.6.143-riscv.env') }}
+
+      - name: Verify full500
+        run: |
+          set -Eeuo pipefail
           test "$(find "$ROOT/raw" -type f -name '*.bc' | wc -l)" -eq 500
 
       - name: Normalize full500
