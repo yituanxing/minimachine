@@ -1,0 +1,123 @@
+name: Linux LLVM Corpus
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minimachine-linux-corpus
+  cancel-in-progress: false
+
+jobs:
+  full500:
+    name: linux-6.6.143-riscv-full500
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      BUILD_ROOT: ${{ github.workspace }}/build/linux-6.6.143-riscv
+      CACHE_ROOT: ${{ github.workspace }}/.cache/minimachine
+      JOBS: 4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux and LLVM dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 llvm-18 lld-18 \
+            flex bison bc libelf-dev libssl-dev \
+            dwarves zstd xz-utils
+
+      - name: Restore pinned Linux archive
+        id: source-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/minimachine/source/linux-6.6.143.tar.xz
+          key: minimachine-linux-source-6.6.143-dace1f8dc9c0dbf5
+
+      - name: Restore frozen full500 corpus
+        id: corpus-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/linux-6.6.143-riscv/corpus
+          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-full500-v1-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
+
+      - name: Materialize full Linux build and export full500
+        if: steps.corpus-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          EXPORT_CORPUS=1 bash scripts/materialize-linux.sh
+
+      - name: Save pinned Linux archive
+        if: always() && steps.source-cache.outputs.cache-hit != 'true' && hashFiles('.cache/minimachine/source/linux-6.6.143.tar.xz') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/minimachine/source/linux-6.6.143.tar.xz
+          key: minimachine-linux-source-6.6.143-dace1f8dc9c0dbf5
+
+      - name: Save frozen full500 corpus
+        if: steps.corpus-cache.outputs.cache-hit != 'true' && hashFiles('build/linux-6.6.143-riscv/corpus/manifest.jsonl') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: build/linux-6.6.143-riscv/corpus
+          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-full500-v1-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
+
+      - name: Normalize full500 LLVM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/normalize-corpus.sh \
+            build/linux-6.6.143-riscv/corpus \
+            build/linux-6.6.143-riscv/normalized
+
+      - name: Census normalized full500
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p build/reports
+          python3 scripts/census.py \
+            build/linux-6.6.143-riscv/normalized \
+            --llvm-major 18 \
+            --json build/reports/full500-census.json
+
+      - name: Emit progress summary
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("build/reports/full500-census.json")
+          if not p.exists():
+              print("PROGRESS census=missing")
+              raise SystemExit(0)
+          r = json.loads(p.read_text())
+          print(
+              "PROGRESS "
+              f"linux_tus={r['files']}/500 "
+              f"llvm_instructions={r['instructions']} "
+              f"opcode_kinds={r['opcode_kinds']} "
+              f"inline_asm={r['inline_asm_calls']} "
+              f"indirect_calls={r['indirect_calls']} "
+              f"atomic_ops={r['atomic_ops']}"
+          )
+          PY
+
+      - name: Upload census report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-full500-census-${{ github.run_id }}
+          path: |
+            build/reports/full500-census.json
+            build/linux-6.6.143-riscv/corpus/manifest.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
