@@ -7,6 +7,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 input=${1:-"$root/build/linux-$LINUX_VERSION-riscv/corpus"}
 output=${2:-"$root/build/linux-$LINUX_VERSION-riscv/normalized"}
+jobs=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}
 
 clang="clang-$LLVM_MAJOR"
 opt="opt-$LLVM_MAJOR"
@@ -36,40 +37,79 @@ fi
 rm -rf "$output"
 mkdir -p "$output"
 
-mapfile -t entries < <(
-    python3 - "$manifest" <<'PY'
+export MM_INPUT="$input"
+export MM_OUTPUT="$output"
+export MM_MANIFEST="$manifest"
+export MM_CLANG="$clang"
+export MM_OPT="$opt"
+export MM_LOWER_SWITCH="$lower_switch"
+export MM_JOBS="$jobs"
+
+python3 - <<'PY'
+import concurrent.futures
 import json
-import sys
-for line in open(sys.argv[1]):
-    if line.strip():
-        print(json.loads(line)["bc"])
+import os
+import subprocess
+from pathlib import Path
+
+src_root = Path(os.environ["MM_INPUT"])
+out_root = Path(os.environ["MM_OUTPUT"])
+manifest = Path(os.environ["MM_MANIFEST"])
+clang = os.environ["MM_CLANG"]
+opt = os.environ["MM_OPT"]
+lower_switch = os.environ["MM_LOWER_SWITCH"]
+jobs = max(1, int(os.environ["MM_JOBS"]))
+
+entries = [
+    json.loads(line)["bc"]
+    for line in manifest.read_text().splitlines()
+    if line.strip()
+]
+
+def one(rel: str) -> str:
+    src = src_root / rel
+    dst = out_root / rel
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(str(dst) + ".o2.tmp.bc")
+    try:
+        subprocess.run(
+            [
+                clang,
+                "--target=riscv64-linux-gnu",
+                "-mabi=lp64",
+                "-O2",
+                "-emit-llvm",
+                "-c",
+                "-x",
+                "ir",
+                str(src),
+                "-o",
+                str(tmp),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [opt, f"-passes={lower_switch}", str(tmp), "-o", str(dst)],
+            check=True,
+        )
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+    return rel
+
+print(f"NORMALIZE_START total={len(entries)} jobs={jobs}")
+with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+    futures = [pool.submit(one, rel) for rel in entries]
+    done = 0
+    for future in concurrent.futures.as_completed(futures):
+        future.result()
+        done += 1
+        if done % 25 == 0 or done == len(entries):
+            print(f"NORMALIZE {done}/{len(entries)}", flush=True)
 PY
-)
-
-total=${#entries[@]}
-index=0
-for rel in "${entries[@]}"; do
-    index=$((index + 1))
-    src="$input/$rel"
-    dst="$output/$rel"
-    tmp="$dst.o2.tmp.bc"
-    mkdir -p "$(dirname -- "$dst")"
-
-    # Clang -save-temps=obj intentionally gives us pre-optimization bitcode.
-    # Re-run only LLVM optimization on that frozen bitcode (no C frontend)
-    # so our canonical corpus matches the -O2 shape used for machine design.
-    "$clang" --target=riscv64-linux-gnu -mabi=lp64 -O2 -emit-llvm -c -x ir \
-        "$src" -o "$tmp"
-
-    # Lower switch after O2 because switches may be introduced/canonicalized
-    # by optimization. Keep SSA/PHI: reg2mem was measured to be too costly.
-    "$opt" -passes="$lower_switch" "$tmp" -o "$dst"
-    rm -f "$tmp"
-
-    if test $((index % 25)) -eq 0 || test "$index" -eq "$total"; then
-        printf 'NORMALIZE %s/%s\n' "$index" "$total"
-    fi
-done
 
 cp "$manifest" "$output/manifest.jsonl"
-printf 'NORMALIZED %s clang_o2=1 pass=%s\n' "$total" "$lower_switch"
+printf 'NORMALIZED %s clang_o2=1 pass=%s jobs=%s\n' \
+    "$(wc -l < "$manifest" | tr -d ' ')" "$lower_switch" "$jobs"
