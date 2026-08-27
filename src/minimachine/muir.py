@@ -28,7 +28,12 @@ class Imm:
     value: int
 
 
-Value = Union[Slot, Imm]
+@dataclass(frozen=True)
+class Symbol:
+    name: str
+
+
+Value = Union[Slot, Imm, Symbol]
 
 
 @dataclass(frozen=True)
@@ -85,8 +90,20 @@ class Br:
 
 
 @dataclass(frozen=True)
+class Callee:
+    symbol: str | None = None
+    slot: Slot | None = None
+
+    def is_direct(self) -> bool:
+        return self.symbol is not None and self.slot is None
+
+    def is_indirect(self) -> bool:
+        return self.slot is not None and self.symbol is None
+
+
+@dataclass(frozen=True)
 class Call:
-    callee: Target
+    callee: Callee
     args: tuple[Value, ...]
     result: Slot | None
     continuation: str
