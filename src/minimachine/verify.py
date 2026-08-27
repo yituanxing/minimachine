@@ -33,14 +33,12 @@ def verify_muir(function: muir.Function) -> None:
             elif isinstance(inst, muir.Call):
                 if not (inst.callee.is_direct() or inst.callee.is_indirect()):
                     raise VerifyError("callee must be exactly one of direct symbol or indirect slot")
-                if inst.continuation not in labels:
-                    raise VerifyError(f"unknown call continuation: {inst.continuation}")
             elif isinstance(inst, muir.Helper):
                 if not inst.symbol:
                     raise VerifyError("HELPER requires a runtime symbol")
 
         terminator = block.instructions[-1]
-        if not isinstance(terminator, (muir.Br, muir.Call, muir.Ret, muir.Trap)):
+        if not isinstance(terminator, (muir.Br, muir.Ret, muir.Trap)):
             raise VerifyError(f"μIR block has no terminator: {block.label}")
 
 
