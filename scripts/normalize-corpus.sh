@@ -8,11 +8,14 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 input=${1:-"$root/build/linux-$LINUX_VERSION-riscv/corpus"}
 output=${2:-"$root/build/linux-$LINUX_VERSION-riscv/normalized"}
 
+clang="clang-$LLVM_MAJOR"
 opt="opt-$LLVM_MAJOR"
-command -v "$opt" >/dev/null 2>&1 || {
-    printf 'missing required tool: %s\n' "$opt" >&2
-    exit 2
-}
+for tool in "$clang" "$opt"; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        printf 'missing required tool: %s\n' "$tool" >&2
+        exit 2
+    }
+done
 
 manifest="$input/manifest.jsonl"
 test -s "$manifest" || {
@@ -33,19 +36,40 @@ fi
 rm -rf "$output"
 mkdir -p "$output"
 
-python3 - "$manifest" <<'PY' | while IFS= read -r rel; do
+mapfile -t entries < <(
+    python3 - "$manifest" <<'PY'
 import json
 import sys
 for line in open(sys.argv[1]):
     if line.strip():
         print(json.loads(line)["bc"])
 PY
+)
+
+total=${#entries[@]}
+index=0
+for rel in "${entries[@]}"; do
+    index=$((index + 1))
     src="$input/$rel"
     dst="$output/$rel"
+    tmp="$dst.o2.tmp.bc"
     mkdir -p "$(dirname -- "$dst")"
-    "$opt" -passes="$lower_switch" "$src" -o "$dst"
+
+    # Clang -save-temps=obj intentionally gives us pre-optimization bitcode.
+    # Re-run only LLVM optimization on that frozen bitcode (no C frontend)
+    # so our canonical corpus matches the -O2 shape used for machine design.
+    "$clang" --target=riscv64-linux-gnu -O2 -emit-llvm -c -x ir \
+        "$src" -o "$tmp"
+
+    # Lower switch after O2 because switches may be introduced/canonicalized
+    # by optimization. Keep SSA/PHI: reg2mem was measured to be too costly.
+    "$opt" -passes="$lower_switch" "$tmp" -o "$dst"
+    rm -f "$tmp"
+
+    if test $((index % 25)) -eq 0 || test "$index" -eq "$total"; then
+        printf 'NORMALIZE %s/%s\n' "$index" "$total"
+    fi
 done
 
 cp "$manifest" "$output/manifest.jsonl"
-count=$(find "$output" -type f -name '*.bc' | wc -l | tr -d ' ')
-printf 'NORMALIZED %s pass=%s\n' "$count" "$lower_switch"
+printf 'NORMALIZED %s clang_o2=1 pass=%s\n' "$total" "$lower_switch"
