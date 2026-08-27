@@ -26,7 +26,7 @@ OPCODES = {
 ASSIGN_RE = re.compile(r"^%[^=]+?=\s*(?:tail\s+|musttail\s+|notail\s+)?([a-z][a-z0-9_.]*)\b")
 BARE_RE = re.compile(r"^(?:tail\s+|musttail\s+|notail\s+)?([a-z][a-z0-9_.]*)\b")
 ICMP_RE = re.compile(r"\bicmp\s+([a-z]+)\b")
-WIDTH_RE = re.compile(r"\bi([1-9][0-9]*)\b")
+WIDTH_RE = re.compile(r"(?<![%@.$A-Za-z0-9_])i([1-9][0-9]*)(?![A-Za-z0-9_])")
 ADDRSPACE_RE = re.compile(r"\baddrspace\(([0-9]+)\)")
 INTRINSIC_RE = re.compile(r"@llvm\.([A-Za-z0-9_.]+)")
 
