@@ -79,6 +79,15 @@ def parse_module(text: str) -> list[TextFunction]:
             block = None
             continue
 
+        # llvm-dis prints callbr/asm-goto terminator successors on a
+        # continuation line beginning with "to label". Keep it attached to
+        # the callbr instruction instead of treating it as a new opcode.
+        if line.startswith("to label ") and block is not None and block.instructions:
+            prev = block.instructions[-1]
+            if prev.opcode == "callbr":
+                block.instructions[-1] = TextInst(prev.result, prev.opcode, prev.text + " " + line)
+                continue
+
         lm = _LABEL_RE.match(line)
         if lm:
             if block is not None:
