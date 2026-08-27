@@ -146,6 +146,8 @@ def main() -> int:
     }
 
     if baseline:
+        base_ops = set(baseline.get("opcodes", {}))
+        cur_ops = set(op)
         result["growth_vs_baseline"] = {
             "baseline_files": baseline["files"],
             "file_multiplier": round(census["files"] / baseline["files"], 3),
@@ -154,6 +156,8 @@ def main() -> int:
                 "baseline": baseline["opcode_kinds"],
                 "current": kinds,
                 "delta": kinds - baseline["opcode_kinds"],
+                "new": sorted(cur_ops - base_ops),
+                "removed": sorted(base_ops - cur_ops),
             },
             "unsupported": {
                 "baseline": baseline.get("categories", {}).get("unsupported", 0),
@@ -178,6 +182,8 @@ def main() -> int:
             f"- vs full500: files **{g['file_multiplier']}x**, instructions **{g['instruction_multiplier']}x**, "
             f"opcode kinds **{g['opcode_kinds']['baseline']} -> {g['opcode_kinds']['current']}**"
         )
+        md.append(f"- new opcode kinds vs full500: **{', '.join(g['opcode_kinds']['new']) or 'none'}**")
+        md.append(f"- removed opcode kinds vs full500: **{', '.join(g['opcode_kinds']['removed']) or 'none'}**")
     md.append("")
     md.append("## Lowering route")
     md.append("")
