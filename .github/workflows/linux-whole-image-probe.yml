@@ -45,10 +45,23 @@ jobs:
       - name: Report full500 duplicate symbols
         run: python3 scripts/duplicate_symbols.py "$ROOT/normalized" --llvm-major 18 --jobs "$(nproc)"
 
-      - name: Link full500 LLVM image
+      - name: Link full500 main-kernel LLVM domain
         run: |
           mkdir -p "$ROOT"
-          find "$ROOT/normalized" -type f -name '*.bc' -print0 | sort -z | xargs -0 llvm-link-18 -o "$ROOT/linked.bc"
+          mapfile -t all_files < <(find "$ROOT/normalized" -type f -name '*.bc' | sort)
+          main_files=()
+          for f in "${all_files[@]}"; do
+            rel="${f#"$ROOT/normalized/"}"
+            case "$rel" in
+              arch/riscv/kernel/pi/*|arch/riscv/purgatory/*|drivers/firmware/efi/libstub/*|arch/riscv/kernel/vdso/*|arch/riscv/kernel/compat_vdso/*)
+                ;;
+              *)
+                main_files+=("$f")
+                ;;
+            esac
+          done
+          echo "WHOLE_IMAGE_DOMAIN total=${#all_files[@]} main=${#main_files[@]} excluded=$((${#all_files[@]}-${#main_files[@]}))"
+          llvm-link-18 "${main_files[@]}" -o "$ROOT/linked.bc"
           opt-18 -passes=verify -disable-output "$ROOT/linked.bc"
           llvm-dis-18 "$ROOT/linked.bc" -o "$ROOT/linked.ll"
           echo "WHOLE_IMAGE_FULL500 bytes=$(stat -c%s "$ROOT/linked.bc") functions=$(grep -c '^define ' "$ROOT/linked.ll") globals=$(grep -c '^@.* = ' "$ROOT/linked.ll") declarations=$(grep -c '^declare ' "$ROOT/linked.ll")"
@@ -88,10 +101,23 @@ jobs:
       - name: Report full-all duplicate symbols
         run: python3 scripts/duplicate_symbols.py "$ROOT/normalized" --llvm-major 18 --jobs "$(nproc)"
 
-      - name: Link full-all LLVM image
+      - name: Link full-all main-kernel LLVM domain
         run: |
           mkdir -p "$ROOT"
-          find "$ROOT/normalized" -type f -name '*.bc' -print0 | sort -z | xargs -0 llvm-link-18 -o "$ROOT/linked.bc"
+          mapfile -t all_files < <(find "$ROOT/normalized" -type f -name '*.bc' | sort)
+          main_files=()
+          for f in "${all_files[@]}"; do
+            rel="${f#"$ROOT/normalized/"}"
+            case "$rel" in
+              arch/riscv/kernel/pi/*|arch/riscv/purgatory/*|drivers/firmware/efi/libstub/*|arch/riscv/kernel/vdso/*|arch/riscv/kernel/compat_vdso/*)
+                ;;
+              *)
+                main_files+=("$f")
+                ;;
+            esac
+          done
+          echo "WHOLE_IMAGE_DOMAIN total=${#all_files[@]} main=${#main_files[@]} excluded=$((${#all_files[@]}-${#main_files[@]}))"
+          llvm-link-18 "${main_files[@]}" -o "$ROOT/linked.bc"
           opt-18 -passes=verify -disable-output "$ROOT/linked.bc"
           llvm-dis-18 "$ROOT/linked.bc" -o "$ROOT/linked.ll"
           echo "WHOLE_IMAGE_FULL_ALL bytes=$(stat -c%s "$ROOT/linked.bc") functions=$(grep -c '^define ' "$ROOT/linked.ll") globals=$(grep -c '^@.* = ' "$ROOT/linked.ll") declarations=$(grep -c '^declare ' "$ROOT/linked.ll")"
