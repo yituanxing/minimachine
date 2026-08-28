@@ -270,19 +270,34 @@ def _fusable_icmp_results(
 
 
 def _split_top_commas(text: str) -> list[str]:
-    parts=[]
-    start=0
-    stack=[]
-    close_to_open={")":"(", "]":"[", "}":"{", ">":"<"}
-    for i,c in enumerate(text):
-        if c in "([{<":
+    parts = []
+    start = 0
+    stack = []
+    close_to_open = {")": "(", "]": "[", "}": "{", ">": "<"}
+    in_string = False
+    escape = False
+
+    for i, c in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            continue
+
+        if c == '"':
+            in_string = True
+        elif c in "([{<":
             stack.append(c)
         elif c in close_to_open:
             if stack and stack[-1] == close_to_open[c]:
                 stack.pop()
         elif c == "," and not stack:
             parts.append(text[start:i].strip())
-            start=i+1
+            start = i + 1
+
     parts.append(text[start:].strip())
     return [p for p in parts if p]
 
