@@ -369,6 +369,50 @@ class LegalizerTests(unittest.TestCase):
         self.assertEqual(sysops[0].args, (muir.Slot("p"), muir.Slot("x")))
         self.assertEqual(stats.lowered_system_atomic, 1)
 
+    def test_faultable_amo_uses_multi_result_system_contract(self):
+        fn, stats = self.lower_one(
+            """
+            define i32 @futex_add(ptr %p, i32 %x) {
+            entry:
+              %pair = call { i32, i32 } asm sideeffect "1: amoadd.w.aqrl $1,$3,$2;2:; .pushsection __ex_table", "=r,=&r,=*m,Jr,0,*m,~{memory}"(ptr elementtype(i32) %p, i32 %x, i32 0, ptr elementtype(i32) %p)
+              %err = extractvalue { i32, i32 } %pair, 0
+              %old = extractvalue { i32, i32 } %pair, 1
+              ret i32 %old
+            }
+            """
+        )
+        sysops = [i for b in fn.blocks for i in b.instructions if isinstance(i, muir.Sys)]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(sysops[0].op, "faultable_atomic_add_i32_acq_rel")
+        self.assertEqual(sysops[0].args, (muir.Slot("p"), muir.Slot("x")))
+        self.assertIsInstance(sysops[0].result, tuple)
+        self.assertEqual(len(sysops[0].result), 2)
+        self.assertEqual(stats.lowered_faultable_atomic, 1)
+
+    def test_faultable_cmpxchg_preserves_all_results(self):
+        fn, stats = self.lower_one(
+            """
+            define i32 @futex_cmpx(ptr %p, i64 %oldv, i32 %newv) {
+            entry:
+              %triple = call { i32, i32, i64 } asm sideeffect "1: lr.w.aqrl $1,$2; bne $1,$4,3f;2: sc.w.aqrl $3,$5,$2; bnez $3,1b;3:; .pushsection __ex_table", "=r,=&r,=*m,=&r,Jr,Jr,0,*m,~{memory}"(ptr elementtype(i32) %p, i64 %oldv, i32 %newv, i32 0, ptr elementtype(i32) %p)
+              %err = extractvalue { i32, i32, i64 } %triple, 0
+              %val = extractvalue { i32, i32, i64 } %triple, 1
+              %status = extractvalue { i32, i32, i64 } %triple, 2
+              ret i32 %val
+            }
+            """
+        )
+        sysops = [i for b in fn.blocks for i in b.instructions if isinstance(i, muir.Sys)]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(sysops[0].op, "faultable_atomic_cmpxchg_i32_acq_rel")
+        self.assertEqual(
+            sysops[0].args,
+            (muir.Slot("p"), muir.Slot("oldv"), muir.Slot("newv")),
+        )
+        self.assertIsInstance(sysops[0].result, tuple)
+        self.assertEqual(len(sysops[0].result), 3)
+        self.assertEqual(stats.lowered_faultable_atomic, 1)
+
     def test_bitwise_routes_to_explicit_helper(self):
         fn, stats = self.lower_one(
             """
