@@ -60,11 +60,52 @@ def _escape_key(inst: muir.ArchEscape) -> str:
     return f"{inst.kind}|<control>"
 
 
-def _has_system_escape(fn: muir.Function) -> tuple[int, int, Counter[str], Counter[str]]:
+def _escape_family(inst: muir.ArchEscape) -> str:
+    if inst.kind == "indirectbr":
+        return "indirect_control"
+    template = _asm_template(inst.text)
+    t = template.lower().strip()
+
+    if inst.kind == "callbr":
+        if "__jump_table" in t:
+            return "jump_label"
+        if ".alternative" in t or ".altinstructions" in t:
+            return "alternative_patch"
+        return "asm_goto_other"
+
+    if t == "<unparsed-asm>":
+        return "unparsed"
+    if re.search(r"(^|[;\s])(amo\w*|lr\.[wd]|sc\.[wd])\b", t):
+        return "atomic"
+    if re.search(r"(^|[;\s])fence(?:\.i)?\b", t):
+        return "fence"
+    if "sfence.vma" in t or "sinval.vma" in t:
+        return "tlb_vm"
+    if re.search(r"(^|[;\s])csr(?:r|w|s|c|rw|rs|rc)\b", t) or "sstatus" in t or "satp" in t:
+        return "csr_privilege"
+    if "ecall" in t:
+        return "ecall"
+    if "ebreak" in t:
+        return "debug_trap"
+    if t == "pause" or t == "nop":
+        return "hint"
+    if "__ex_table" in t or ".fixup" in t or ".l__gpr_num_" in t or ".irp" in t:
+        return "faultable_access"
+    if re.match(r"^(?:l[bhwdu]|s[bhwd])\b", t):
+        return "plain_memory"
+    if re.match(r"^(?:div|rem|mul)\b", t):
+        return "integer_arch"
+    if not t:
+        return "empty_asm"
+    return "other"
+
+
+def _has_system_escape(fn: muir.Function) -> tuple[int, int, Counter[str], Counter[str], Counter[str]]:
     traps = 0
     arch = 0
     kinds: Counter[str] = Counter()
     groups: Counter[str] = Counter()
+    families: Counter[str] = Counter()
     for block in fn.blocks:
         for inst in block.instructions:
             if isinstance(inst, muir.Trap):
@@ -73,7 +114,8 @@ def _has_system_escape(fn: muir.Function) -> tuple[int, int, Counter[str], Count
                 arch += 1
                 kinds[inst.kind] += 1
                 groups[_escape_key(inst)] += 1
-    return traps, arch, kinds, groups
+                families[_escape_family(inst)] += 1
+    return traps, arch, kinds, groups, families
 
 
 def main() -> int:
@@ -110,6 +152,7 @@ def main() -> int:
             p3_instructions = 0
             escape_kinds: Counter[str] = Counter()
             escape_groups: Counter[str] = Counter()
+            escape_families: Counter[str] = Counter()
 
             for fn in functions:
                 verify_muir(fn)
@@ -117,11 +160,12 @@ def main() -> int:
                 for key, value in stats.as_dict().items():
                     abi_stats[key] += value
 
-                traps, arch, kinds, groups = _has_system_escape(expanded)
+                traps, arch, kinds, groups, families = _has_system_escape(expanded)
                 trap_sites += traps
                 arch_sites += arch
                 escape_kinds.update(kinds)
                 escape_groups.update(groups)
+                escape_families.update(families)
 
                 if traps or arch:
                     p3_skip_escape += 1
@@ -145,6 +189,7 @@ def main() -> int:
                 "p3_instructions": p3_instructions,
                 "escape_kinds": dict(escape_kinds),
                 "escape_groups": dict(escape_groups),
+                "escape_families": dict(escape_families),
             }
         except (
             subprocess.CalledProcessError,
@@ -173,6 +218,7 @@ def main() -> int:
         "p3_instructions": 0,
         "escape_kinds": {},
         "escape_groups": {},
+        "escape_families": {},
     }
 
     print(f"ABI_START files={len(files)} jobs={jobs}")
@@ -200,6 +246,8 @@ def main() -> int:
                     totals["escape_kinds"][key] = totals["escape_kinds"].get(key, 0) + value
                 for key, value in rec["escape_groups"].items():
                     totals["escape_groups"][key] = totals["escape_groups"].get(key, 0) + value
+                for key, value in rec["escape_families"].items():
+                    totals["escape_families"][key] = totals["escape_families"].get(key, 0) + value
 
             if done % 25 == 0 or rec["status"] == "FAIL" or done == len(files):
                 tail = f" FAIL {rec['file']} :: {rec['error']}" if rec["status"] == "FAIL" else ""
@@ -234,6 +282,9 @@ def main() -> int:
     )
     print("ESCAPE_KINDS " + " ".join(
         f"{k}={v}" for k, v in sorted(totals["escape_kinds"].items(), key=lambda x: (-x[1], x[0]))
+    ))
+    print("ESCAPE_FAMILIES " + " ".join(
+        f"{k}={v}" for k, v in sorted(totals["escape_families"].items(), key=lambda x: (-x[1], x[0]))
     ))
     for key, value in sorted(totals["escape_groups"].items(), key=lambda x: (-x[1], x[0]))[:30]:
         print(f"ESCAPE_GROUP {value}x {key}")
