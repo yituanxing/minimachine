@@ -523,6 +523,34 @@ def system_callback(op: str):
             return vm.ecall_handler(vm, args)
         return ecall
 
+    if op == "vector_state_snapshot":
+        def vector_snapshot(vm: VM, args: tuple[int, ...]):
+            if args:
+                raise VMError("vector_state_snapshot expects no arguments")
+            return vm.vector_state
+        return vector_snapshot
+
+    if op == "vector_state_restore":
+        def vector_restore(vm: VM, args: tuple[int, ...]):
+            if len(args) != 4:
+                raise VMError("vector_state_restore expects vstart,vtype,vl,vcsr")
+            vm.vector_state = (
+                args[0] & MASK64,
+                args[1] & MASK64,
+                args[2] & MASK64,
+                args[3] & MASK64,
+                vm.vector_state[4],
+            )
+            return None
+        return vector_restore
+
+    if op == "vector_length_bytes":
+        def vector_length(vm: VM, args: tuple[int, ...]):
+            if args:
+                raise VMError("vector_length_bytes expects no arguments")
+            return vm.vector_state[4]
+        return vector_length
+
     if op in {"fence", "icache_sync"} or op.startswith("tlb_flush_"):
         def ordering(vm: VM, args: tuple[int, ...]):
             # The reference VM is single-threaded and executes memory accesses
