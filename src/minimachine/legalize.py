@@ -42,6 +42,8 @@ class LegalizeStats:
     dropped_pause_hints: int = 0
     lowered_counter_reads: int = 0
     lowered_plain_asm_memory: int = 0
+    lowered_identity_asm: int = 0
+    lowered_divzero_constant: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -58,6 +60,8 @@ class LegalizeStats:
             "dropped_pause_hints": self.dropped_pause_hints,
             "lowered_counter_reads": self.lowered_counter_reads,
             "lowered_plain_asm_memory": self.lowered_plain_asm_memory,
+            "lowered_identity_asm": self.lowered_identity_asm,
+            "lowered_divzero_constant": self.lowered_divzero_constant,
         }
 
 
@@ -419,6 +423,21 @@ def _scan_quoted(text: str, start: int) -> int:
             return i
         i += 1
     raise ValueError("unterminated quoted inline-asm string")
+
+
+def _inline_asm_constraints(text: str) -> str:
+    asm = re.search(r"\basm\b", text)
+    if not asm:
+        raise ValueError("inline asm marker missing")
+    q1 = text.find('"', asm.end())
+    if q1 < 0:
+        raise ValueError("inline asm template missing")
+    q1e = _scan_quoted(text, q1)
+    q2 = text.find('"', q1e + 1)
+    if q2 < 0:
+        raise ValueError("inline asm constraints missing")
+    q2e = _scan_quoted(text, q2)
+    return text[q2 + 1 : q2e]
 
 
 def _inline_asm_args(text: str, layout: DataLayout) -> tuple[muir.Value, ...]:
@@ -974,6 +993,20 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                             # reordering, so no runtime instruction is required.
                             stats.dropped_compiler_barriers += 1
                             continue
+                        if result is not None and template is not None and not template.strip():
+                            constraints = _inline_asm_constraints(inst.text)
+                            args = _inline_asm_args(inst.text, layout)
+                            if constraints == "=r,0" and len(args) == 1:
+                                stats.lowered_identity_asm += 1
+                                out.append(muir.Mov(muir.Width.I64, result, args[0]))
+                                continue
+                        if result is not None and template is not None and _normalize_inline_asm(template) == "div $0, $0, zero":
+                            constraints = _inline_asm_constraints(inst.text)
+                            args = _inline_asm_args(inst.text, layout)
+                            if constraints == "=r" and not args:
+                                stats.lowered_divzero_constant += 1
+                                out.append(muir.Mov(muir.Width.I32, result, muir.Imm(-1)))
+                                continue
                         if result is None and template is not None and _normalize_inline_asm(template) == "pause":
                             stats.dropped_pause_hints += 1
                             continue
