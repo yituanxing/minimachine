@@ -1,0 +1,98 @@
+name: Linux Whole-Image Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/linux-whole-image-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minimachine-linux-whole-image-probe
+  cancel-in-progress: true
+
+jobs:
+  full500:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      ROOT: ${{ github.workspace }}/build/whole-image-full500
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-18 clang-18
+          echo "nproc=$(nproc)"
+
+      - name: Restore full500
+        uses: actions/cache/restore@v4
+        with:
+          path: build/full500/raw
+          key: minimachine-legalizer-full500-v1-${{ hashFiles('scripts/subset_corpus.py', 'configs/linux-6.6.143-riscv.env') }}
+
+      - name: Verify full500
+        run: test "$(find build/full500/raw -type f -name '*.bc' | wc -l)" -eq 500
+
+      - name: Normalize full500
+        run: JOBS="$(nproc)" bash scripts/normalize-corpus.sh build/full500/raw "$ROOT/normalized"
+
+      - name: Link full500 LLVM image
+        run: |
+          mkdir -p "$ROOT"
+          find "$ROOT/normalized" -type f -name '*.bc' -print0 | sort -z | xargs -0 llvm-link-18 -o "$ROOT/linked.bc"
+          opt-18 -passes=verify -disable-output "$ROOT/linked.bc"
+          llvm-dis-18 "$ROOT/linked.bc" -o "$ROOT/linked.ll"
+          echo "WHOLE_IMAGE_FULL500 bytes=$(stat -c%s "$ROOT/linked.bc") functions=$(grep -c '^define ' "$ROOT/linked.ll") globals=$(grep -c '^@.* = ' "$ROOT/linked.ll") declarations=$(grep -c '^declare ' "$ROOT/linked.ll")"
+
+  full_all:
+    needs: full500
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ROOT: ${{ github.workspace }}/build/whole-image-full-all
+      RAW: ${{ github.workspace }}/build/linux-6.6.143-riscv-full-all/full-all-corpus
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-18 clang-18
+          echo "nproc=$(nproc)"
+
+      - name: Restore full-all corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: build/linux-6.6.143-riscv-full-all/full-all-corpus
+          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-full-all-v1-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
+          restore-keys: |
+            minimachine-linux-6.6.143-riscv-defconfig-llvm18-full-all-v1-
+
+      - name: Verify full-all
+        run: |
+          test -s "$RAW/manifest.jsonl"
+          test "$(find "$RAW" -type f -name '*.bc' | wc -l)" -eq 2053
+
+      - name: Normalize full-all
+        run: JOBS="$(nproc)" bash scripts/normalize-corpus.sh "$RAW" "$ROOT/normalized"
+
+      - name: Link full-all LLVM image
+        run: |
+          mkdir -p "$ROOT"
+          find "$ROOT/normalized" -type f -name '*.bc' -print0 | sort -z | xargs -0 llvm-link-18 -o "$ROOT/linked.bc"
+          opt-18 -passes=verify -disable-output "$ROOT/linked.bc"
+          llvm-dis-18 "$ROOT/linked.bc" -o "$ROOT/linked.ll"
+          echo "WHOLE_IMAGE_FULL_ALL bytes=$(stat -c%s "$ROOT/linked.bc") functions=$(grep -c '^define ' "$ROOT/linked.ll") globals=$(grep -c '^@.* = ' "$ROOT/linked.ll") declarations=$(grep -c '^declare ' "$ROOT/linked.ll")"
+
+      - name: Upload linked-module probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-whole-image-probe-${{ github.run_id }}
+          path: |
+            build/whole-image-full-all/linked.bc
+          retention-days: 7
