@@ -77,3 +77,7 @@ require_line 'CONFIG_BINFMT_FLAT=y'
 
 config_sha=$(sha256sum "$config" | awk '{print $1}')
 printf 'TARGET_KCONFIG_PASS arch=%s bits=64 mmu=0 smp=0 nr_cpus=1 flat=1 config_sha256=%s\n'     "$ARCH" "$config_sha"
+
+printf 'TARGET_PREPARE start ARCH=%s\n' "$ARCH"
+make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR" CLANG_TARGET_FLAGS="$LLVM_CARRIER_TRIPLE"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     prepare
+printf 'TARGET_PREPARE_PASS arch=%s\n' "$ARCH"
