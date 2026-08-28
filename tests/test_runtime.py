@@ -741,6 +741,47 @@ class RuntimeTests(unittest.TestCase):
             b"aabcd",
         )
 
+    def test_objectsize_unknown_fallback_executes(self):
+        functions, _ = legalize_module(
+            """
+            declare i64 @llvm.objectsize.i64.p0(ptr, i1, i1, i1)
+
+            define i64 @obj_max(ptr %p) {
+            entry:
+              %r = call i64 @llvm.objectsize.i64.p0(
+                ptr %p, i1 false, i1 true, i1 false)
+              ret i64 %r
+            }
+
+            define i64 @obj_min(ptr %p) {
+            entry:
+              %r = call i64 @llvm.objectsize.i64.p0(
+                ptr %p, i1 true, i1 true, i1 false)
+              ret i64 %r
+            }
+
+            define i64 @obj_null() {
+            entry:
+              %r = call i64 @llvm.objectsize.i64.p0(
+                ptr null, i1 false, i1 false, i1 false)
+              ret i64 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("obj_max", (0x4000,)),
+            ((1 << 64) - 1,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function("obj_min", (0x4000,)),
+            (0,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function("obj_null"),
+            (0,),
+        )
+
     def test_expect_and_is_constant_intrinsics_execute(self):
         functions, _ = legalize_module(
             """
