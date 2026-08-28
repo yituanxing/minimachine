@@ -55,6 +55,7 @@ class BlockAddr:
 
 
 Value = Union[Slot, Imm, Symbol, Reloc, Arbitrary, BlockAddr, Special]
+Result = Union[Slot, tuple[Slot, ...], None]
 
 
 @dataclass(frozen=True)
@@ -145,7 +146,7 @@ class Callee:
 class Call:
     callee: Callee
     args: tuple[Value, ...]
-    result: Slot | None
+    result: Result
 
 
 @dataclass(frozen=True)
@@ -157,14 +158,14 @@ class Ret:
 class Helper:
     symbol: str
     args: tuple[Value, ...]
-    result: Slot | None
+    result: Result
 
 
 @dataclass(frozen=True)
 class Sys:
     op: str
     args: tuple[Value, ...]
-    result: Slot | None
+    result: Result
 
 
 @dataclass(frozen=True)
