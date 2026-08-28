@@ -1156,7 +1156,7 @@ def _register_metadata(text: str) -> dict[int, str]:
         ident = left.strip()[1:]
         if not ident.isdigit():
             continue
-        marker = '!{"'
+        marker = '!{!"'
         if marker not in right:
             continue
         start_quote = right.find(marker) + len(marker)
