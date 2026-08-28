@@ -158,8 +158,16 @@ def main() -> int:
             escape_groups: Counter[str] = Counter()
             escape_families: Counter[str] = Counter()
             escape_samples: dict[str, str] = {}
+            helper_symbols: Counter[str] = Counter()
+            system_ops_used: Counter[str] = Counter()
 
             for fn in functions:
+                for block in fn.blocks:
+                    for inst in block.instructions:
+                        if isinstance(inst, muir.Helper):
+                            helper_symbols[inst.symbol] += 1
+                        elif isinstance(inst, muir.Sys):
+                            system_ops_used[inst.op] += 1
                 verify_muir(fn)
                 expanded, stats = expand_function(fn)
                 for key, value in stats.as_dict().items():
@@ -198,6 +206,8 @@ def main() -> int:
                 "escape_groups": dict(escape_groups),
                 "escape_families": dict(escape_families),
                 "escape_samples": escape_samples,
+                "helper_symbols": dict(helper_symbols),
+                "system_ops_used": dict(system_ops_used),
             }
         except (
             subprocess.CalledProcessError,
@@ -229,6 +239,8 @@ def main() -> int:
         "escape_groups": {},
         "escape_families": {},
         "escape_samples": {},
+        "helper_symbols": {},
+        "system_ops_used": {},
     }
 
     print(f"ABI_START files={len(files)} jobs={jobs}")
@@ -260,6 +272,10 @@ def main() -> int:
                     totals["escape_families"][key] = totals["escape_families"].get(key, 0) + value
                 for key, sample in rec["escape_samples"].items():
                     totals["escape_samples"].setdefault(key, sample)
+                for key, value in rec["helper_symbols"].items():
+                    totals["helper_symbols"][key] = totals["helper_symbols"].get(key, 0) + value
+                for key, value in rec["system_ops_used"].items():
+                    totals["system_ops_used"][key] = totals["system_ops_used"].get(key, 0) + value
 
             if done % 25 == 0 or rec["status"] == "FAIL" or done == len(files):
                 tail = f" FAIL {rec['file']} :: {rec['error']}" if rec["status"] == "FAIL" else ""
@@ -299,6 +315,14 @@ def main() -> int:
     print("ESCAPE_FAMILIES " + " ".join(
         f"{k}={v}" for k, v in sorted(totals["escape_families"].items(), key=lambda x: (-x[1], x[0]))
     ))
+    print(
+        f"RUNTIME_SURFACE helper_kinds={len(totals['helper_symbols'])} "
+        f"system_op_kinds={len(totals['system_ops_used'])}"
+    )
+    for key, value in sorted(totals["helper_symbols"].items(), key=lambda x: (-x[1], x[0]))[:40]:
+        print(f"HELPER_KIND {value}x {key}")
+    for key, value in sorted(totals["system_ops_used"].items(), key=lambda x: (-x[1], x[0]))[:40]:
+        print(f"SYS_KIND {value}x {key}")
     for key, value in sorted(totals["escape_groups"].items(), key=lambda x: (-x[1], x[0]))[:30]:
         print(f"ESCAPE_GROUP {value}x {key}")
 
