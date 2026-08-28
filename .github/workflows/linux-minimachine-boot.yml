@@ -5,20 +5,8 @@ on:
     branches: [main]
     paths:
       - configs/linux-6.6.143-minimachine.env
-      - configs/linux-6.6.143-minimachine-linker.json
       - linux-overlay/arch/minimachine/**
-      - src/minimachine/abi.py
-      - src/minimachine/image.py
-      - src/minimachine/legalize.py
-      - src/minimachine/linker.py
-      - src/minimachine/lower_p3.py
-      - src/minimachine/muir.py
-      - src/minimachine/p3.py
-      - src/minimachine/runtime.py
-      - src/minimachine/verify.py
-      - src/minimachine/vm.py
       - scripts/check-minimachine-boot.sh
-      - scripts/run-minimachine-linux.py
       - .github/workflows/linux-minimachine-boot.yml
   workflow_dispatch:
 
