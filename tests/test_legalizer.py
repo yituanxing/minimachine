@@ -166,6 +166,40 @@ class LegalizerTests(unittest.TestCase):
         self.assertEqual(entry[1].false_target.label, "taken")
         self.assertEqual(stats.lowered_static_branch, 1)
 
+    def test_aggregate_ecall_uses_multi_result_sysop(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @sbi(i64 %a0, i64 %a1) {
+            entry:
+              %pair = call { i64, i64 } asm sideeffect "ecall", "={x10},={x11},{x10},{x11}"(i64 %a0, i64 %a1)
+              %lo = extractvalue { i64, i64 } %pair, 0
+              %hi = extractvalue { i64, i64 } %pair, 1
+              %sum = add i64 %lo, %hi
+              ret i64 %sum
+            }
+            """
+        )
+        entry = fn.blocks[0].instructions
+        sysops = [i for i in entry if isinstance(i, muir.Sys)]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(sysops[0].op, "ecall")
+        self.assertIsInstance(sysops[0].result, tuple)
+        self.assertEqual(len(sysops[0].result), 2)
+        self.assertEqual(stats.lowered_system_ecall, 1)
+
+        extracted = [
+            i for i in entry
+            if isinstance(i, muir.Mov)
+            and i.dst in {muir.Slot("lo"), muir.Slot("hi")}
+        ]
+        self.assertEqual(len(extracted), 2)
+        self.assertFalse(
+            any(
+                isinstance(i, muir.Helper) and i.symbol == "__mm_extractvalue"
+                for i in entry
+            )
+        )
+
     def test_bitwise_routes_to_explicit_helper(self):
         fn, stats = self.lower_one(
             """
