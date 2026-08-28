@@ -563,6 +563,44 @@ class RuntimeTests(unittest.TestCase):
             (16,),
         )
 
+    def test_inline_icmp_gep_branch_and_phi_execute(self):
+        llvm = """
+            %struct.sched_class = type { i64, i64 }
+            @classes = global [2 x %struct.sched_class] zeroinitializer, align 8
+
+            define i64 @inline_sched_class_checks() {
+            entry:
+              br i1 icmp eq (
+                ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1),
+                ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1)
+              ), label %ok, label %bad
+
+            ok:
+              br label %join
+
+            bad:
+              br label %join
+
+            join:
+              %same = phi i1 [
+                icmp eq (
+                  ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1),
+                  ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1)
+                ), %ok
+              ], [ false, %bad ]
+              %result = zext i1 %same to i64
+              ret i64 %result
+            }
+        """
+        functions, _ = legalize_module(llvm)
+        program = executable(functions)
+        install_module_image(program, parse_module_image(llvm))
+
+        self.assertEqual(
+            program.new_vm().run_function("inline_sched_class_checks"),
+            (1,),
+        )
+
     def test_nested_linker_symbol_constant_expression_executes(self):
         llvm = """
             @endmarker = external global i8

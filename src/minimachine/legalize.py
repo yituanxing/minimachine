@@ -109,6 +109,14 @@ def _slot(name: str) -> muir.Slot:
     return muir.Slot(name[1:] if name.startswith("%") else name)
 
 
+@dataclass(frozen=True)
+class _DeferredIcmp:
+    pred: str
+    bits: int
+    a: muir.Value
+    b: muir.Value
+
+
 def _width(bits: int) -> muir.Width:
     if bits == 1:
         # Materialized i1 values are represented as 0/1 bytes. Fused compares
@@ -212,19 +220,32 @@ def _icmp_basis(
     raise ValueError(f"unsupported icmp predicate: {pred}")
 
 
-def _parse_icmp(inst: TextInst):
-    m = re.search(
-        r"icmp\s+([a-z]+)\s+(i\d+|ptr)\s+(.+?),\s*(.+?)(?:,\s*!.*)?$",
-        inst.text,
-    )
+def _parse_icmp(inst: TextInst, layout: DataLayout):
+    text = inst.text.strip()
+    m = re.match(r"icmp\s+([a-z]+)\s+(.+)$", text)
     if not m:
         raise ValueError(f"cannot parse icmp: {inst.text}")
-    pred, ty, lhs, rhs = m.groups()
-    if ty == "ptr":
-        return pred, 64, muir.Width.I64, _value(lhs), _value(rhs)
-    bits = int(ty[1:])
+
+    pred, body = m.groups()
+    parts = _split_top_commas(body)
+    if len(parts) < 2:
+        raise ValueError(f"cannot parse icmp operands: {inst.text}")
+
+    ty, lhs_text = _split_typed_value(parts[0])
+    rhs_text = parts[1].strip()
+
+    lhs = _const_scalar_value(lhs_text, layout)
+    rhs = _const_scalar_value(rhs_text, layout)
+
+    if ty == "ptr" or ty.startswith("ptr addrspace("):
+        return pred, 64, muir.Width.I64, lhs, rhs
+
+    mty = re.fullmatch(r"i(\d+)", ty)
+    if not mty:
+        raise ValueError(f"unsupported icmp type {ty}: {inst.text}")
+    bits = int(mty.group(1))
     width = _width(bits) if bits in {1, 8, 16, 32, 64} else None
-    return pred, bits, width, _value(lhs), _value(rhs)
+    return pred, bits, width, lhs, rhs
 
 
 def _parse_switch(inst: TextInst):
@@ -458,6 +479,11 @@ def _parse_phi(inst: TextInst, layout: DataLayout):
                     value_text=parts[0].strip()
                     if value_text.startswith("getelementptr"):
                         value=_const_gep_value(value_text, layout)
+                    elif value_text.startswith("icmp "):
+                        pred, bits, _cmp_width, a, b = _parse_inline_icmp(
+                            value_text, layout
+                        )
+                        value=_DeferredIcmp(pred, bits, a, b)
                     else:
                         value=_value(value_text)
                     incoming.append((value, parts[1][1:]))
@@ -1320,6 +1346,41 @@ def _split_typed_value(text: str) -> tuple[str, str]:
     return m.group(1).strip(), m.group(2).strip()
 
 
+def _parse_inline_icmp(
+    text: str,
+    layout: DataLayout,
+) -> tuple[str, int, muir.Width | None, muir.Value, muir.Value]:
+    raw = text.strip()
+    m = re.fullmatch(r"icmp\s+([a-z]+)\s*\((.*)\)", raw)
+    if not m:
+        raise ValueError(f"cannot parse inline icmp: {text}")
+
+    pred, body = m.groups()
+    parts = _split_top_commas(body)
+    if len(parts) != 2:
+        raise ValueError(f"cannot parse inline icmp operands: {text}")
+
+    lhs_ty, lhs_text = _split_typed_value(parts[0])
+    rhs_ty, rhs_text = _split_typed_value(parts[1])
+    if lhs_ty != rhs_ty:
+        raise ValueError(
+            f"inline icmp type mismatch {lhs_ty} vs {rhs_ty}: {text}"
+        )
+
+    a = _const_scalar_value(lhs_text, layout)
+    b = _const_scalar_value(rhs_text, layout)
+
+    if lhs_ty == "ptr" or lhs_ty.startswith("ptr addrspace("):
+        return pred, 64, muir.Width.I64, a, b
+
+    mty = re.fullmatch(r"i(\d+)", lhs_ty)
+    if not mty:
+        raise ValueError(f"unsupported inline icmp type {lhs_ty}: {text}")
+    bits = int(mty.group(1))
+    width = _width(bits) if bits in {1, 8, 16, 32, 64} else None
+    return pred, bits, width, a, b
+
+
 def _typed_aggregate_operand(text: str) -> tuple[str, muir.Value]:
     ty, value_text = _split_typed_value(text)
     if value_text.startswith(("[", "{", "<")):
@@ -1948,7 +2009,7 @@ def legalize_function(
                 if op == "icmp":
                     if result is None:
                         raise ValueError("icmp has no result")
-                    pred, bits, width, a, b = _parse_icmp(inst)
+                    pred, bits, width, a, b = _parse_icmp(inst, layout)
                     if inst.result and inst.result in fusable_icmps and width is not None:
                         # Only an actual one-use conditional BR owns this
                         # fusion. Other consumers need a materialized i1.
@@ -2076,16 +2137,43 @@ def legalize_function(
                         t = muir.Target(label=labels[0])
                         out.append(muir.Br(muir.Width.I8, muir.Cond.EQ, muir.Imm(0), muir.Imm(0), t, t))
                         continue
-                    cm = re.search(
-                        r"br\s+i1\s+icmp\s+([a-z]+)\s*\((.+?),\s*(.+?)\),\s*label",
-                        inst.text,
+                    branch_parts = _split_top_commas(
+                        inst.text[len("br i1 ") :]
                     )
-                    if cm and len(labels) == 2:
-                        pred = cm.group(1)
-                        lhs_text, rhs_text = cm.group(2), cm.group(3)
-                        width = _first_width(lhs_text, default_pointer=True)
-                        tt, ft = muir.Target(label=labels[0]), muir.Target(label=labels[1])
-                        out.append(_icmp_basis(pred, width, _value(lhs_text), _value(rhs_text), tt, ft))
+                    if (
+                        len(branch_parts) == 3
+                        and branch_parts[0].strip().startswith("icmp ")
+                        and len(labels) == 2
+                    ):
+                        pred, bits, width, a, b = _parse_inline_icmp(
+                            branch_parts[0].strip(), layout
+                        )
+                        tt = muir.Target(label=labels[0])
+                        ft = muir.Target(label=labels[1])
+                        if width is not None:
+                            out.append(_icmp_basis(pred, width, a, b, tt, ft))
+                        else:
+                            temp_counter[0] += 1
+                            cond = muir.Slot(f"__inline_icmp{temp_counter[0]}")
+                            frame_slots.add(cond.name)
+                            out.append(
+                                muir.Helper(
+                                    f"__mm_icmp_{pred}_{bits}",
+                                    (a, b),
+                                    cond,
+                                )
+                            )
+                            out.append(
+                                muir.Br(
+                                    muir.Width.I8,
+                                    muir.Cond.EQ,
+                                    cond,
+                                    muir.Imm(0),
+                                    ft,
+                                    tt,
+                                )
+                            )
+                            stats.temporary_helpers += 1
                         stats.fused_icmp_br += 1
                         continue
                     m = re.search(r"br\s+i1\s+(%[-A-Za-z$._0-9]+|true|false)", inst.text)
@@ -2095,7 +2183,7 @@ def legalize_function(
                     tt, ft = muir.Target(label=labels[0]), muir.Target(label=labels[1])
                     cond_def = defs.get(cond_text)
                     if cond_def and cond_def.opcode == "icmp" and cond_text in fusable_icmps:
-                        pred, bits, width, a, b = _parse_icmp(cond_def)
+                        pred, bits, width, a, b = _parse_icmp(cond_def, layout)
                         if width is not None:
                             out.append(_icmp_basis(pred, width, a, b, tt, ft))
                             stats.fused_icmp_br += 1
@@ -2787,11 +2875,33 @@ def legalize_function(
         term = block.instructions[-1]
         if not isinstance(term, (muir.Br, muir.Ret, muir.Trap, muir.ArchEscape)):
             raise LegalizeError(fn.name, pred, "phi", "predecessor terminator is not lowered")
-        moves = _parallel_copies(copies, temp_counter)
+
+        prelude: list[muir.Instr] = []
+        normalized_copies: list[
+            tuple[muir.Slot, muir.Value, muir.Width]
+        ] = []
+        for dst, src, width in copies:
+            if isinstance(src, _DeferredIcmp):
+                temp_counter[0] += 1
+                value = muir.Slot(f"__phi_icmp{temp_counter[0]}")
+                frame_slots.add(value.name)
+                prelude.append(
+                    muir.Helper(
+                        f"__mm_icmp_{src.pred}_{src.bits}",
+                        (src.a, src.b),
+                        value,
+                    )
+                )
+                normalized_copies.append((dst, value, width))
+                stats.temporary_helpers += 1
+            else:
+                normalized_copies.append((dst, src, width))
+
+        moves = _parallel_copies(normalized_copies, temp_counter)
         for move in moves:
             if isinstance(move.dst, muir.Slot):
                 frame_slots.add(move.dst.name)
-        block.instructions[-1:-1] = moves
+        block.instructions[-1:-1] = prelude + moves
         stats.phi_edge_moves += len(moves)
 
     ordered_blocks: list[muir.Block] = []
