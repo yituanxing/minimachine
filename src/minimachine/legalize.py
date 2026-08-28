@@ -542,58 +542,114 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     continue
 
                 if op == "load":
-                    m = re.search(r"load(?:\s+volatile)?\s+(i\d+|ptr)\s*,\s*ptr\s+([^,]+)", inst.text)
-                    if not m or result is None:
+                    body=inst.text[len("load "):]
+                    parts=_split_top_commas(body)
+                    if len(parts) < 2 or result is None:
                         raise ValueError(f"cannot parse load: {inst.text}")
-                    ty=m.group(1)
-                    ptr_text=m.group(2).strip()
-                    addr=aliases.get(ptr_text)
-                    if addr is None:
-                        addr=muir.Address(_value(ptr_text),0)
+                    ty=parts[0].strip()
+                    ptr_part=parts[1].strip()
+                    pm=re.match(r"ptr(?:\s+addrspace\(\d+\))?\s+(.+)$",ptr_part)
+                    if not pm:
+                        raise ValueError(f"cannot parse load pointer: {inst.text}")
+                    ptr_text=pm.group(1).strip()
+                    if ptr_text.startswith("getelementptr"):
+                        cv=_const_gep_value(ptr_text,layout)
+                        if isinstance(cv,muir.Reloc):
+                            addr=muir.Address(muir.Symbol(cv.symbol),cv.addend)
+                        else:
+                            addr=muir.Address(cv,0)
                     else:
-                        stats.folded_gep_mem += 1
-                    if ty=="ptr" or int(ty[1:]) in {1,8,16,32,64}:
-                        width=muir.Width.I64 if ty=="ptr" else _width(int(ty[1:]))
-                        out.append(muir.Mov(width,result,muir.Mem(addr,width)))
+                        addr=aliases.get(ptr_text)
+                        if addr is None:
+                            addr=muir.Address(_value(ptr_text),0)
+                        else:
+                            stats.folded_gep_mem += 1
+
+                    if ty=="ptr" or re.fullmatch(r"i\d+",ty):
+                        if ty=="ptr":
+                            width=muir.Width.I64
+                            out.append(muir.Mov(width,result,muir.Mem(addr,width)))
+                        else:
+                            bits=int(ty[1:])
+                            if bits in {1,8,16,32,64}:
+                                width=_storage_width(bits)
+                                out.append(muir.Mov(width,result,muir.Mem(addr,width)))
+                            else:
+                                base=addr.base
+                                if addr.offset:
+                                    temp_counter[0]+=1
+                                    ap=muir.Slot(f"__odd_addr{temp_counter[0]}")
+                                    frame_slots.add(ap.name)
+                                    out.append(muir.Sub(muir.Width.I64,ap,base,muir.Imm(-addr.offset)))
+                                    base=ap
+                                stats.temporary_helpers += 1
+                                out.append(muir.Helper(f"__mm_load_i{bits}",(base,),result))
                     else:
-                        bits=int(ty[1:])
+                        stats.temporary_helpers += 1
                         base=addr.base
                         if addr.offset:
                             temp_counter[0]+=1
-                            ap=muir.Slot(f"__odd_addr{temp_counter[0]}")
+                            ap=muir.Slot(f"__agg_addr{temp_counter[0]}")
                             frame_slots.add(ap.name)
                             out.append(muir.Sub(muir.Width.I64,ap,base,muir.Imm(-addr.offset)))
                             base=ap
-                        stats.temporary_helpers += 1
-                        out.append(muir.Helper(f"__mm_load_i{bits}",(base,),result))
+                        out.append(muir.Helper("__mm_load_aggregate",(base,),result))
                     continue
 
                 if op == "store":
-                    m = re.search(r"store(?:\s+volatile)?\s+(i\d+|ptr)\s+(.+?),\s*ptr\s+([^,]+)", inst.text)
-                    if not m:
+                    body=inst.text[len("store "):]
+                    parts=_split_top_commas(body)
+                    if len(parts) < 2:
                         raise ValueError(f"cannot parse store: {inst.text}")
-                    ty=m.group(1)
-                    src=_value(m.group(2))
-                    ptr_text=m.group(3).strip()
-                    addr=aliases.get(ptr_text)
-                    if addr is None:
-                        addr=muir.Address(_value(ptr_text),0)
+                    vm=re.match(r"(.+?)\s+(.+)$",parts[0].strip())
+                    pm=re.match(r"ptr(?:\s+addrspace\(\d+\))?\s+(.+)$",parts[1].strip())
+                    if not vm or not pm:
+                        raise ValueError(f"cannot parse store operands: {inst.text}")
+                    ty=vm.group(1).strip()
+                    src=_value(vm.group(2))
+                    ptr_text=pm.group(1).strip()
+                    if ptr_text.startswith("getelementptr"):
+                        cv=_const_gep_value(ptr_text,layout)
+                        if isinstance(cv,muir.Reloc):
+                            addr=muir.Address(muir.Symbol(cv.symbol),cv.addend)
+                        else:
+                            addr=muir.Address(cv,0)
                     else:
-                        stats.folded_gep_mem += 1
-                    if ty=="ptr" or int(ty[1:]) in {1,8,16,32,64}:
-                        width=muir.Width.I64 if ty=="ptr" else _width(int(ty[1:]))
-                        out.append(muir.Mov(width,muir.Mem(addr,width),src))
+                        addr=aliases.get(ptr_text)
+                        if addr is None:
+                            addr=muir.Address(_value(ptr_text),0)
+                        else:
+                            stats.folded_gep_mem += 1
+
+                    if ty=="ptr" or re.fullmatch(r"i\d+",ty):
+                        if ty=="ptr":
+                            width=muir.Width.I64
+                            out.append(muir.Mov(width,muir.Mem(addr,width),src))
+                        else:
+                            bits=int(ty[1:])
+                            if bits in {1,8,16,32,64}:
+                                width=_storage_width(bits)
+                                out.append(muir.Mov(width,muir.Mem(addr,width),src))
+                            else:
+                                base=addr.base
+                                if addr.offset:
+                                    temp_counter[0]+=1
+                                    ap=muir.Slot(f"__odd_addr{temp_counter[0]}")
+                                    frame_slots.add(ap.name)
+                                    out.append(muir.Sub(muir.Width.I64,ap,base,muir.Imm(-addr.offset)))
+                                    base=ap
+                                stats.temporary_helpers += 1
+                                out.append(muir.Helper(f"__mm_store_i{bits}",(base,src),None))
                     else:
-                        bits=int(ty[1:])
                         base=addr.base
                         if addr.offset:
                             temp_counter[0]+=1
-                            ap=muir.Slot(f"__odd_addr{temp_counter[0]}")
+                            ap=muir.Slot(f"__agg_addr{temp_counter[0]}")
                             frame_slots.add(ap.name)
                             out.append(muir.Sub(muir.Width.I64,ap,base,muir.Imm(-addr.offset)))
                             base=ap
                         stats.temporary_helpers += 1
-                        out.append(muir.Helper(f"__mm_store_i{bits}",(base,src),None))
+                        out.append(muir.Helper("__mm_store_aggregate",(base,src),None))
                     continue
 
 
