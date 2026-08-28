@@ -76,6 +76,126 @@ class RuntimeTests(unittest.TestCase):
             (0x92,),
         )
 
+    def test_atomic_add_mutates_memory_and_returns_old(self):
+        fn = muir.Function(
+            "atomic_user",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Sys(
+                            "atomic_add_i32_relaxed",
+                            (muir.Slot("p"), muir.Slot("v")),
+                            muir.Slot("old"),
+                        ),
+                        muir.Ret(muir.Slot("old")),
+                    ],
+                )
+            ],
+            {"p", "v", "old"},
+            ("p", "v"),
+        )
+        program = executable([fn])
+        vm = program.new_vm()
+        vm.memory.write(0x2000, 32, 5)
+        self.assertEqual(vm.run_function("atomic_user", (0x2000, 3)), (5,))
+        self.assertEqual(vm.memory.read(0x2000, 32), 8)
+
+    def test_faultable_load_returns_error_then_value(self):
+        fn = muir.Function(
+            "uget",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Sys(
+                            "faultable_load_i32",
+                            (muir.Slot("p"), muir.Imm(0)),
+                            (muir.Slot("err"), muir.Slot("value")),
+                        ),
+                        muir.Ret(muir.Slot("value")),
+                    ],
+                )
+            ],
+            {"p", "err", "value"},
+            ("p",),
+        )
+        program = executable([fn])
+        vm = program.new_vm()
+        vm.memory.write(0x3000, 32, 0x12345678)
+        self.assertEqual(vm.run_function("uget", (0x3000,)), (0x12345678,))
+
+    def test_static_key_controls_real_p3_branch(self):
+        fn = muir.Function(
+            "static_user",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Sys(
+                            "static_branch",
+                            (muir.Slot("key"),),
+                            muir.Slot("enabled"),
+                        ),
+                        muir.Br(
+                            muir.Width.I8,
+                            muir.Cond.EQ,
+                            muir.Slot("enabled"),
+                            muir.Imm(0),
+                            muir.Target(label="off"),
+                            muir.Target(label="on"),
+                        ),
+                    ],
+                ),
+                muir.Block("off", [muir.Ret(muir.Imm(10))]),
+                muir.Block("on", [muir.Ret(muir.Imm(20))]),
+            ],
+            {"key", "enabled"},
+            ("key",),
+        )
+        program = executable([fn])
+
+        off_vm = program.new_vm()
+        self.assertEqual(off_vm.run_function("static_user", (7,)), (10,))
+
+        on_vm = program.new_vm()
+        on_vm.static_keys[7] = 1
+        self.assertEqual(on_vm.run_function("static_user", (7,)), (20,))
+
+    def test_ecall_requires_explicit_handler(self):
+        fn = muir.Function(
+            "ecall_user",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Sys(
+                            "ecall",
+                            (muir.Slot("x"),),
+                            (muir.Slot("a"), muir.Slot("b")),
+                        ),
+                        muir.Sub(
+                            muir.Width.I64,
+                            muir.Slot("d"),
+                            muir.Slot("b"),
+                            muir.Slot("a"),
+                        ),
+                        muir.Ret(muir.Slot("d")),
+                    ],
+                )
+            ],
+            {"x", "a", "b", "d"},
+            ("x",),
+        )
+        program = executable([fn])
+        vm = program.new_vm()
+        with self.assertRaisesRegex(Exception, "ecall reached without"):
+            vm.run_function("ecall_user", (9,))
+
+        vm = program.new_vm()
+        vm.ecall_handler = lambda _vm, args: (args[0], args[0] + 4)
+        self.assertEqual(vm.run_function("ecall_user", (9,)), (4,))
+
     def test_pointer_scaled_helper_executes(self):
         fn = muir.Function(
             "ptr",
