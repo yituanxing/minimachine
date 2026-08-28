@@ -288,7 +288,241 @@ def _state_key(op: str) -> str:
     return op
 
 
+
+def _expected_results(vm: VM) -> int:
+    from .abi import RESULT_COUNT
+    return vm.memory.read(vm.sp + RESULT_COUNT, 64)
+
+
+def _atomic_result(vm: VM, old: int, status: int = 0):
+    count = _expected_results(vm)
+    if count == 0:
+        return None
+    if count == 1:
+        return old
+    if count == 2:
+        return (old, status)
+    raise VMError(f"atomic service expects unsupported result count: {count}")
+
+
+def _atomic_callback(op: str):
+    m = re.fullmatch(
+        r"atomic_(add|or|and|xor|swap)_i(32|64)_(.+)",
+        op,
+    )
+    if m:
+        kind, bits_text, ordering = m.groups()
+        bits = int(bits_text)
+        mask = _mask(bits)
+
+        def amo(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError(f"{op} expects address,value")
+            address, value = args
+            old = vm.memory.read(address, bits)
+            rhs = value & mask
+            if kind == "add":
+                new = (old + rhs) & mask
+            elif kind == "or":
+                new = old | rhs
+            elif kind == "and":
+                new = old & rhs
+            elif kind == "xor":
+                new = old ^ rhs
+            else:
+                new = rhs
+            vm.memory.write(address, bits, new)
+            return _atomic_result(vm, old)
+
+        return amo
+
+    m = re.fullmatch(
+        r"atomic_cmpxchg_i(32|64)_(.+)",
+        op,
+    )
+    if m:
+        bits = int(m.group(1))
+        mask = _mask(bits)
+
+        def cmpxchg(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError(f"{op} expects address,expected,desired")
+            address, expected, desired = args
+            old = vm.memory.read(address, bits)
+            success = (old & mask) == (expected & mask)
+            if success:
+                vm.memory.write(address, bits, desired)
+            # LR/SC status is 0 on store success; use 1 for the compare-fail
+            # path so the multi-result contract remains deterministic.
+            return _atomic_result(vm, old, 0 if success else 1)
+
+        return cmpxchg
+
+    m = re.fullmatch(
+        r"atomic_(add_unless|dec_if_positive|add1_if_nonnegative|sub1_if_nonpositive)_i(32|64)_(.+)",
+        op,
+    )
+    if m:
+        kind, bits_text, ordering = m.groups()
+        bits = int(bits_text)
+        mask = _mask(bits)
+
+        def conditional(vm: VM, args: tuple[int, ...]):
+            if not args:
+                raise VMError(f"{op} missing address")
+            address = args[0]
+            old = vm.memory.read(address, bits)
+            sold = _signed(old, bits)
+            changed = False
+            new = old
+
+            if kind == "add_unless":
+                if len(args) != 3:
+                    raise VMError(f"{op} expects address,delta,unless")
+                delta, unless = args[1], args[2]
+                if old != (unless & mask):
+                    new = (old + delta) & mask
+                    changed = True
+            elif kind == "dec_if_positive":
+                if old != 0 and sold > 0:
+                    new = (old - 1) & mask
+                    changed = True
+            elif kind == "add1_if_nonnegative":
+                if sold >= 0:
+                    new = (old + 1) & mask
+                    changed = True
+            elif kind == "sub1_if_nonpositive":
+                if sold <= 0:
+                    new = (old - 1) & mask
+                    changed = True
+
+            if changed:
+                vm.memory.write(address, bits, new)
+            return _atomic_result(vm, old, 0 if changed else 1)
+
+        return conditional
+
+    return None
+
+
+def _faultable_callback(op: str):
+    m = re.fullmatch(r"faultable_(load|store)_i(8|16|32|64)", op)
+    if m:
+        kind, bits_text = m.groups()
+        bits = int(bits_text)
+
+        if kind == "load":
+            def load(vm: VM, args: tuple[int, ...]):
+                if len(args) < 1:
+                    raise VMError(f"{op} missing address")
+                value = vm.memory.read(args[0], bits)
+                count = _expected_results(vm)
+                if count == 2:
+                    return (0, value)
+                if count == 1:
+                    return value
+                raise VMError(f"{op} unexpected result count: {count}")
+            return load
+
+        def store(vm: VM, args: tuple[int, ...]):
+            if len(args) < 2:
+                raise VMError(f"{op} expects address,value[,error_init]")
+            vm.memory.write(args[0], bits, args[1])
+            count = _expected_results(vm)
+            if count == 0:
+                return None
+            if count == 1:
+                return 0
+            raise VMError(f"{op} unexpected result count: {count}")
+        return store
+
+    m = re.fullmatch(
+        r"faultable_atomic_(add|and|or|xor|swap|cmpxchg)_i(32|64)_(.+)",
+        op,
+    )
+    if not m:
+        return None
+    kind, bits_text, ordering = m.groups()
+    bits = int(bits_text)
+    mask = _mask(bits)
+
+    def fault_atomic(vm: VM, args: tuple[int, ...]):
+        if not args:
+            raise VMError(f"{op} missing address")
+        address = args[0]
+        old = vm.memory.read(address, bits)
+        status = 0
+
+        if kind == "cmpxchg":
+            if len(args) != 3:
+                raise VMError(f"{op} expects address,expected,desired")
+            expected, desired = args[1], args[2]
+            success = old == (expected & mask)
+            if success:
+                vm.memory.write(address, bits, desired)
+            status = 0 if success else 1
+        else:
+            if len(args) != 2:
+                raise VMError(f"{op} expects address,value")
+            value = args[1] & mask
+            if kind == "add":
+                new = (old + value) & mask
+            elif kind == "and":
+                new = old & value
+            elif kind == "or":
+                new = old | value
+            elif kind == "xor":
+                new = old ^ value
+            else:
+                new = value
+            vm.memory.write(address, bits, new)
+
+        count = _expected_results(vm)
+        if count == 2:
+            # Linux futex AMO aggregate is {error, old}.
+            return (0, old)
+        if count == 3:
+            # Linux futex cmpxchg aggregate is {error, old, sc_status}.
+            return (0, old, status)
+        if count == 1:
+            return old
+        if count == 0:
+            return None
+        raise VMError(f"{op} unexpected result count: {count}")
+
+    return fault_atomic
+
+
 def system_callback(op: str):
+    atomic = _atomic_callback(op)
+    if atomic is not None:
+        return atomic
+
+    faultable = _faultable_callback(op)
+    if faultable is not None:
+        return faultable
+
+    if op == "static_branch":
+        def static_branch(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError("static_branch expects key")
+            return int(bool(vm.static_keys.get(args[0], 0)))
+        return static_branch
+
+    if op == "cpu_feature":
+        def cpu_feature(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError("cpu_feature expects feature id")
+            return int(args[0] in vm.cpu_features)
+        return cpu_feature
+
+    if op == "ecall":
+        def ecall(vm: VM, args: tuple[int, ...]):
+            if vm.ecall_handler is None:
+                raise VMError("ecall reached without a configured handler")
+            return vm.ecall_handler(vm, args)
+        return ecall
+
     if op in {"fence", "icache_sync"} or op.startswith("tlb_flush_"):
         def ordering(vm: VM, args: tuple[int, ...]):
             # The reference VM is single-threaded and executes memory accesses
