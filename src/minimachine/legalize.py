@@ -1697,12 +1697,16 @@ def legalize_function(
                     if len(parts) < 2:
                         raise ValueError(f"cannot parse store: {inst.text}")
                     value_part = _strip_memory_qualifiers(parts[0])
-                    vm=re.match(r"(.+?)\s+(.+)$",value_part)
+                    try:
+                        ty, value_text = _split_typed_value(value_part)
+                    except ValueError as e:
+                        raise ValueError(
+                            f"cannot parse store value: {inst.text}"
+                        ) from e
                     pm=re.match(r"ptr(?:\s+addrspace\(\d+\))?\s+(.+)$",parts[1].strip())
-                    if not vm or not pm:
-                        raise ValueError(f"cannot parse store operands: {inst.text}")
-                    ty=vm.group(1).strip()
-                    src=_value(vm.group(2))
+                    if not pm:
+                        raise ValueError(f"cannot parse store pointer: {inst.text}")
+                    src=_value(value_text)
                     ptr_text=pm.group(1).strip()
                     if ptr_text.startswith("getelementptr"):
                         cv=_const_gep_value(ptr_text,layout)
@@ -2503,7 +2507,8 @@ def legalize_function(
                         address = _value(address_text)
                         if not isinstance(address, muir.Slot):
                             raise ValueError(
-                                "dynamic indirectbr address must be a local SSA value"
+                                "dynamic indirectbr address must be a local SSA value: "
+                                + address_text
                             )
                         target = muir.Target(slot=address)
 
