@@ -2069,6 +2069,36 @@ def legalize_function(
                     assert kind in {"direct", "indirect"}
                     if symbol and symbol.startswith(_DROP_INTRINSICS):
                         continue
+                    if symbol == "llvm.va_start":
+                        stats.temporary_helpers += 1
+                        out.append(
+                            muir.Helper(
+                                "__mm_llvm_va_start",
+                                args + (muir.Imm(len(fn.args)),),
+                                None,
+                            )
+                        )
+                        continue
+                    if symbol == "llvm.va_copy":
+                        stats.temporary_helpers += 1
+                        out.append(
+                            muir.Helper(
+                                "__mm_llvm_va_copy",
+                                args,
+                                None,
+                            )
+                        )
+                        continue
+                    if symbol == "llvm.va_end":
+                        stats.temporary_helpers += 1
+                        out.append(
+                            muir.Helper(
+                                "__mm_llvm_va_end",
+                                args,
+                                None,
+                            )
+                        )
+                        continue
                     if symbol and symbol.startswith("llvm."):
                         stats.temporary_helpers += 1
                         out.append(
