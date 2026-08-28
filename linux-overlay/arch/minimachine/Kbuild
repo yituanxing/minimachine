@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Keep the architecture-owned runtime surface explicit and small.
+obj-y += kernel/
