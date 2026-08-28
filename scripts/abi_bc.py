@@ -40,13 +40,13 @@ def files_under(path: Path):
 
 
 def _asm_template(text: str) -> str:
-    m = re.search(r'\\basm\\b(?:\\s+\\w+)*\\s+"((?:\\\\.|[^"])*)"', text)
+    m = re.search(r'\basm\b(?:\s+\w+)*\s+"((?:\\.|[^"])*)"', text)
     if not m:
         return "<unparsed-asm>"
     template = m.group(1)
-    template = template.replace(r"\\0A", ";").replace(r"\\09", " ")
-    template = re.sub(r"\\$\\{?\\d+(?::[^}]*)?\\}?", "$N", template)
-    template = re.sub(r"\\s+", " ", template).strip()
+    template = template.replace(r"\0A", ";").replace(r"\09", " ")
+    template = re.sub(r"\$\{?\d+(?::[^}]*)?\}?", "$N", template)
+    template = re.sub(r"\s+", " ", template).strip()
     return template[:240]
 
 
