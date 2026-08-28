@@ -1194,127 +1194,133 @@ def _typed_aggregate_operand(text: str) -> tuple[str, muir.Value]:
     return ty, _value(value_text)
 
 
-def _literal_is_zero(layout: DataLayout, ty: str, value_text: str) -> bool:
-    value = value_text.strip()
-    if value in {"0", "false", "null", "zeroinitializer"}:
-        return True
-    if value in {"poison", "undef"}:
-        return False
-
-    info = layout.info(ty)
-    if info.fields is not None:
-        if not (value.startswith("{") and value.endswith("}")):
-            return False
-        fields = _split_top_commas(value[1:-1].strip())
-        if len(fields) != len(info.fields):
-            return False
-        for field_ty, field_text in zip(info.fields, fields):
-            parsed_ty, parsed_value = _split_typed_value(field_text)
-            if parsed_ty != field_ty:
-                return False
-            if not _literal_is_zero(layout, field_ty, parsed_value):
-                return False
-        return True
-
-    if info.element is not None:
-        if not (
-            (value.startswith("[") and value.endswith("]"))
-            or (value.startswith("<") and value.endswith(">"))
-        ):
-            return False
-        items = _split_top_commas(value[1:-1].strip())
-        if info.count is None or len(items) != info.count:
-            return False
-        for item in items:
-            parsed_ty, parsed_value = _split_typed_value(item)
-            if parsed_ty != info.element:
-                return False
-            if not _literal_is_zero(layout, info.element, parsed_value):
-                return False
-        return True
-
-    return False
-
-
-def _literal_zero_outside_insert_path(
+def _literal_initializers(
     layout: DataLayout,
     ty: str,
     value_text: str,
-    indices: tuple[int, ...],
-) -> bool:
+    overwrite_path: tuple[int, ...] | None,
+    base_offset: int = 0,
+) -> list[tuple[int, int, muir.Value]]:
     value = value_text.strip()
+
+    # Empty path means this entire subtree is replaced by insertvalue.
+    if overwrite_path == ():
+        return []
     if value == "zeroinitializer":
-        return True
-    if not indices:
-        # The whole value is overwritten by insertvalue, so its old content is
-        # semantically irrelevant, including poison/undef.
-        return True
+        return []
+    if value in {"poison", "undef"}:
+        if overwrite_path is not None:
+            raise ValueError("poison/undef survives insertvalue")
+        raise ValueError("live poison/undef aggregate literal")
 
     info = layout.info(ty)
-    index = indices[0]
-    rest = indices[1:]
 
     if info.fields is not None:
-        if index < 0 or index >= len(info.fields):
-            return False
         if not (value.startswith("{") and value.endswith("}")):
-            return False
+            raise ValueError(f"expected struct literal for {ty}: {value_text}")
         fields = _split_top_commas(value[1:-1].strip())
         if len(fields) != len(info.fields):
-            return False
+            raise ValueError(f"struct literal field count mismatch: {value_text}")
+        assert info.field_offsets is not None
+        out: list[tuple[int, int, muir.Value]] = []
+        selected = overwrite_path[0] if overwrite_path is not None else None
+        rest = overwrite_path[1:] if overwrite_path is not None else None
         for i, (field_ty, field_text) in enumerate(zip(info.fields, fields)):
             parsed_ty, parsed_value = _split_typed_value(field_text)
             if parsed_ty != field_ty:
-                return False
-            if i == index:
-                if not _literal_zero_outside_insert_path(
-                    layout, field_ty, parsed_value, rest
-                ):
-                    return False
-            elif not _literal_is_zero(layout, field_ty, parsed_value):
-                return False
-        return True
+                raise ValueError(
+                    f"struct literal type mismatch: expected {field_ty}, got {parsed_ty}"
+                )
+            child_path = rest if selected == i else None
+            out.extend(
+                _literal_initializers(
+                    layout,
+                    field_ty,
+                    parsed_value,
+                    child_path,
+                    base_offset + info.field_offsets[i],
+                )
+            )
+        return out
 
     if info.element is not None:
-        if info.count is None or index < 0 or index >= info.count:
-            return False
         if not (
             (value.startswith("[") and value.endswith("]"))
             or (value.startswith("<") and value.endswith(">"))
         ):
-            return False
+            raise ValueError(f"expected aggregate literal for {ty}: {value_text}")
         items = _split_top_commas(value[1:-1].strip())
-        if len(items) != info.count:
-            return False
+        if info.count is None or len(items) != info.count:
+            raise ValueError(f"aggregate literal item count mismatch: {value_text}")
+        _, scale, _ = layout.gep_step(ty, 0)
+        out: list[tuple[int, int, muir.Value]] = []
+        selected = overwrite_path[0] if overwrite_path is not None else None
+        rest = overwrite_path[1:] if overwrite_path is not None else None
         for i, item in enumerate(items):
             parsed_ty, parsed_value = _split_typed_value(item)
             if parsed_ty != info.element:
-                return False
-            if i == index:
-                if not _literal_zero_outside_insert_path(
-                    layout, info.element, parsed_value, rest
-                ):
-                    return False
-            elif not _literal_is_zero(layout, info.element, parsed_value):
-                return False
-        return True
+                raise ValueError(
+                    f"aggregate literal type mismatch: expected {info.element}, got {parsed_ty}"
+                )
+            child_path = rest if selected == i else None
+            out.extend(
+                _literal_initializers(
+                    layout,
+                    info.element,
+                    parsed_value,
+                    child_path,
+                    base_offset + scale * i,
+                )
+            )
+        return out
 
-    return False
+    # Scalar leaf outside the overwritten path must be concrete.
+    scalar = _value(value)
+    if isinstance(scalar, muir.Arbitrary):
+        raise ValueError("live poison/undef scalar in aggregate literal")
+    if info.size > 8:
+        raise ValueError(
+            f"wide scalar aggregate literal needs explicit blob encoding: {ty}"
+        )
+    if isinstance(scalar, muir.Imm) and scalar.value == 0:
+        return []
+    return [(base_offset, info.size, scalar)]
 
 
 def _insert_base_operand(
     layout: DataLayout,
     typed_text: str,
     indices: tuple[int, ...],
-) -> tuple[str, muir.Value]:
+    temp_counter: list[int],
+    frame_slots: set[str],
+) -> tuple[str, muir.Value, list[muir.Instr]]:
     ty, value_text = _split_typed_value(typed_text)
-    if value_text.startswith(("[", "{", "<")):
-        if _literal_zero_outside_insert_path(layout, ty, value_text, indices):
-            return ty, muir.Imm(0)
-        raise ValueError(
-            f"aggregate literal contains live nonzero/poison data: {typed_text}"
-        )
-    return ty, _value(value_text)
+    if not value_text.startswith(("[", "{", "<")):
+        return ty, _value(value_text), []
+
+    initializers = _literal_initializers(
+        layout,
+        ty,
+        value_text,
+        indices,
+    )
+    if not initializers:
+        return ty, muir.Imm(0), []
+
+    total_size = layout.info(ty).size
+    temp_counter[0] += 1
+    dst = muir.Slot(f"__agg_literal{temp_counter[0]}")
+    frame_slots.add(dst.name)
+
+    args: list[muir.Value] = [muir.Imm(total_size)]
+    for offset, size, value in initializers:
+        args.extend((muir.Imm(offset), value, muir.Imm(size)))
+
+    return (
+        ty,
+        dst,
+        [muir.Helper("__mm_aggregate_literal", tuple(args), dst)],
+    )
 
 
 def _aggregate_index_layout(
@@ -2113,9 +2119,14 @@ def legalize_function(
                         indices = tuple(int(x.strip(), 0) for x in parts[2:])
                     except ValueError as e:
                         raise ValueError(f"non-constant insertvalue index: {inst.text}") from e
-                    aggregate_ty, aggregate_value = _insert_base_operand(
-                        layout, parts[0], indices
+                    aggregate_ty, aggregate_value, base_prelude = _insert_base_operand(
+                        layout,
+                        parts[0],
+                        indices,
+                        temp_counter,
+                        frame_slots,
                     )
+                    out.extend(base_prelude)
                     _, inserted_value = _typed_aggregate_operand(parts[1])
 
                     aggregate_size = layout.info(aggregate_ty).size
