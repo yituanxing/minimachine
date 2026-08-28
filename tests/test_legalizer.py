@@ -200,6 +200,64 @@ class LegalizerTests(unittest.TestCase):
             )
         )
 
+    def test_faultable_load_uses_multi_result_system_contract(self):
+        fn, stats = self.lower_one(
+            """
+            define i32 @uget(ptr %p) {
+            entry:
+              %pair = call { i64, i32 } asm sideeffect "1:; lw $1, $2;2:; .pushsection __ex_table", "=r,=&r,*m,0"(ptr elementtype(i32) %p, i64 0)
+              %err = extractvalue { i64, i32 } %pair, 0
+              %val = extractvalue { i64, i32 } %pair, 1
+              ret i32 %val
+            }
+            """
+        )
+        sysops = [
+            i for b in fn.blocks for i in b.instructions
+            if isinstance(i, muir.Sys)
+        ]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(sysops[0].op, "faultable_load_i32")
+        self.assertEqual(sysops[0].args, (muir.Slot("p"), muir.Imm(0)))
+        self.assertIsInstance(sysops[0].result, tuple)
+        self.assertEqual(len(sysops[0].result), 2)
+        self.assertEqual(stats.lowered_system_faultable, 1)
+        self.assertFalse(
+            any(
+                isinstance(i, muir.Helper) and i.symbol == "__mm_extractvalue"
+                for b in fn.blocks for i in b.instructions
+            )
+        )
+
+    def test_lrsc_cmpxchg_uses_multi_result_system_contract(self):
+        fn, stats = self.lower_one(
+            """
+            define i32 @cmpx(ptr %p, i64 %expected, i32 %desired) {
+            entry:
+              %pair = call { i32, i32 } asm sideeffect "0: lr.w $0, $2; bne $0, $3, 1f; sc.w.rl $1, $4, $2; bnez $1, 0b; fence rw, rw;1:;", "=&r,=&r,=*A,rJ,rJ,*A,~{memory}"(ptr elementtype(i32) %p, i64 %expected, i32 %desired, ptr elementtype(i32) %p)
+              %old = extractvalue { i32, i32 } %pair, 0
+              %status = extractvalue { i32, i32 } %pair, 1
+              ret i32 %old
+            }
+            """
+        )
+        sysops = [
+            i for b in fn.blocks for i in b.instructions
+            if isinstance(i, muir.Sys)
+        ]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(
+            sysops[0].op,
+            "atomic_cmpxchg_i32_release_post_full_fence",
+        )
+        self.assertEqual(
+            sysops[0].args,
+            (muir.Slot("p"), muir.Slot("expected"), muir.Slot("desired")),
+        )
+        self.assertIsInstance(sysops[0].result, tuple)
+        self.assertEqual(len(sysops[0].result), 2)
+        self.assertEqual(stats.lowered_system_lrsc, 1)
+
     def test_bitwise_routes_to_explicit_helper(self):
         fn, stats = self.lower_one(
             """
