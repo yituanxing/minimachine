@@ -111,11 +111,27 @@ class ImageTests(unittest.TestCase):
             groups=(
                 SectionGroup("init0", (".initcall0.init",), 8),
                 SectionGroup("init1", (".initcall1.init",), 8),
+                SectionGroup(
+                    "empty_after_init1",
+                    (".missing.init",),
+                    8,
+                    "init1",
+                ),
             ),
             boundaries=(
                 BoundarySymbol("__initcall0_start", "init0", "start"),
                 BoundarySymbol("__initcall1_start", "init1", "start"),
                 BoundarySymbol("__initcall_end", "init1", "end"),
+                BoundarySymbol(
+                    "__empty_start",
+                    "empty_after_init1",
+                    "start",
+                ),
+                BoundarySymbol(
+                    "__empty_end",
+                    "empty_after_init1",
+                    "end",
+                ),
             ),
         )
 
@@ -141,6 +157,14 @@ class ImageTests(unittest.TestCase):
         self.assertEqual(
             program.symbol_addresses["__initcall_end"],
             program.symbol_addresses["init1"] + 8,
+        )
+        self.assertEqual(
+            program.symbol_addresses["__empty_start"],
+            program.symbol_addresses["__initcall_end"],
+        )
+        self.assertEqual(
+            program.symbol_addresses["__empty_end"],
+            program.symbol_addresses["__initcall_end"],
         )
         self.assertEqual(
             program.new_vm().memory.read(
