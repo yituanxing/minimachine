@@ -379,9 +379,37 @@ def main() -> int:
 
     original_step = vm.step
     next_progress = args.progress_every
+    last_milestone_function = None
+    milestone_functions = {
+        "sched_init",
+        "early_irq_init",
+        "init_IRQ",
+        "tick_init",
+        "init_timers",
+        "srcu_init",
+        "hrtimers_init",
+        "softirq_init",
+        "timekeeping_init",
+        "time_init",
+        "console_init",
+        "arch_call_rest_init",
+        "rest_init",
+        "kernel_init",
+        "kernel_init_freeable",
+    }
 
     def traced_step():
-        nonlocal next_progress
+        nonlocal next_progress, last_milestone_function
+        if (
+            vm.current_function in milestone_functions
+            and vm.current_function != last_milestone_function
+        ):
+            print(
+                "BOOT_EXEC_MILESTONE "
+                f"steps={vm.steps} function={vm.current_function}",
+                flush=True,
+            )
+            last_milestone_function = vm.current_function
         if args.progress_every > 0 and vm.steps >= next_progress:
             print(
                 "BOOT_EXEC_PROGRESS "
