@@ -41,6 +41,7 @@ class LegalizeStats:
     lowered_linux_bug: int = 0
     dropped_pause_hints: int = 0
     lowered_counter_reads: int = 0
+    lowered_plain_asm_memory: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -56,6 +57,7 @@ class LegalizeStats:
             "lowered_linux_bug": self.lowered_linux_bug,
             "dropped_pause_hints": self.dropped_pause_hints,
             "lowered_counter_reads": self.lowered_counter_reads,
+            "lowered_plain_asm_memory": self.lowered_plain_asm_memory,
         }
 
 
@@ -404,6 +406,105 @@ def _counter_read_helper(template: str) -> str | None:
         "csrr $0, instret": "__mm_sys_read_instret",
     }
     return mapping.get(normalized)
+
+
+def _scan_quoted(text: str, start: int) -> int:
+    assert text[start] == '"'
+    i = start + 1
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == '"':
+            return i
+        i += 1
+    raise ValueError("unterminated quoted inline-asm string")
+
+
+def _inline_asm_args(text: str, layout: DataLayout) -> tuple[muir.Value, ...]:
+    asm = re.search(r"\basm\b", text)
+    if not asm:
+        raise ValueError("inline asm marker missing")
+    q1 = text.find('"', asm.end())
+    if q1 < 0:
+        raise ValueError("inline asm template missing")
+    q1e = _scan_quoted(text, q1)
+    q2 = text.find('"', q1e + 1)
+    if q2 < 0:
+        raise ValueError("inline asm constraints missing")
+    q2e = _scan_quoted(text, q2)
+    open_paren = text.find("(", q2e + 1)
+    if open_paren < 0:
+        raise ValueError("inline asm argument list missing")
+
+    depth = 0
+    close = None
+    for i in range(open_paren, len(text)):
+        c = text[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                close = i
+                break
+    if close is None:
+        raise ValueError("unterminated inline asm argument list")
+
+    body = text[open_paren + 1 : close].strip()
+    if not body:
+        return ()
+    args = []
+    for segment in _split_top_commas(body):
+        if "getelementptr" in segment:
+            pos = segment.find("getelementptr")
+            args.append(_const_gep_value(segment[pos:], layout))
+        else:
+            args.append(_value(segment))
+    return tuple(args)
+
+
+_PLAIN_ASM_LOADS = {
+    "lb $0, 0($1)": muir.Width.I8,
+    "lh $0, 0($1)": muir.Width.I16,
+    "lw $0, 0($1)": muir.Width.I32,
+    "ld $0, 0($1)": muir.Width.I64,
+}
+_PLAIN_ASM_STORES = {
+    "sb $0, 0($1)": muir.Width.I8,
+    "sh $0, 0($1)": muir.Width.I16,
+    "sw $0, 0($1)": muir.Width.I32,
+    "sd $0, 0($1)": muir.Width.I64,
+}
+
+
+def _lower_plain_asm_memory(
+    template: str,
+    text: str,
+    result: muir.Slot | None,
+    layout: DataLayout,
+) -> muir.Mov | None:
+    normalized = _normalize_inline_asm(template)
+    if normalized in _PLAIN_ASM_LOADS:
+        if result is None:
+            return None
+        args = _inline_asm_args(text, layout)
+        if len(args) != 1:
+            return None
+        width = _PLAIN_ASM_LOADS[normalized]
+        return muir.Mov(width, result, muir.Mem(muir.Address(args[0], 0), width))
+
+    if normalized in _PLAIN_ASM_STORES:
+        if result is not None:
+            return None
+        args = _inline_asm_args(text, layout)
+        if len(args) != 2:
+            return None
+        width = _PLAIN_ASM_STORES[normalized]
+        value, address = args
+        return muir.Mov(width, muir.Mem(muir.Address(address, 0), width), value)
+
+    return None
 
 
 def _parse_call(inst: TextInst, layout: DataLayout):
@@ -881,6 +982,12 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                             if helper_symbol is not None:
                                 stats.lowered_counter_reads += 1
                                 out.append(muir.Helper(helper_symbol, (), result))
+                                continue
+                        if template is not None:
+                            plain_mem = _lower_plain_asm_memory(template, inst.text, result, layout)
+                            if plain_mem is not None:
+                                stats.lowered_plain_asm_memory += 1
+                                out.append(plain_mem)
                                 continue
                         if result is None and template is not None and _is_linux_bug_asm(template):
                             # Linux BUG() is a deliberate non-returning trap.
