@@ -114,6 +114,7 @@ def main() -> int:
 
     strict_source = []
     p3_functions = []
+    blocked_functions: list[tuple[str, int]] = []
     reasons: set[str] = set()
 
     for function in functions:
@@ -122,11 +123,8 @@ def main() -> int:
         expanded, _abi_stats = expand_function(function)
         escapes = arch_escapes(expanded)
         if escapes:
-            print(
-                "BOOT_EXEC_BLOCKED "
-                f"stage=arch_escape function={function.name} sites={len(escapes)}"
-            )
-            return 1
+            blocked_functions.append((function.name, len(escapes)))
+            continue
         lowered = lower_function(expanded)
         verify_p3(lowered)
         strict_source.append(function)
@@ -160,6 +158,8 @@ def main() -> int:
     print(
         "BOOT_EXEC_START "
         f"entry={args.entry} functions={len(p3_functions)} "
+        f"blocked_functions={len(blocked_functions)} "
+        f"arch_escape_sites={sum(sites for _, sites in blocked_functions)} "
         f"image_objects={len(image.objects)} image_bytes={image.byte_size} "
         f"linker_boundaries={len(linker_contract.active_boundary_symbols(image_sections))}"
     )
