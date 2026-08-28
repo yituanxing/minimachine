@@ -73,6 +73,17 @@ jobs:
           for x in r["records"]:
               if x["status"]=="FAIL":
                   print(f"FAIL {x['file']} :: {x['error']}")
+
+          # Frozen compiler/system-contract boundary. Remaining escapes are
+          # intentionally RISC-V arch implementation details to be replaced
+          # by arch/minimachine, not silently absorbed into the Legalizer.
+          assert r["pass"] == 2053 and r["fail"] == 0
+          assert t["p3_function_pass"] >= 39799
+          assert t["p3_function_skip_escape"] <= 95
+          assert t["arch_escape_sites"] <= 165
+          assert t["escape_families"].get("atomic", 0) == 0
+          assert t["escape_families"].get("faultable_access", 0) == 0
+          assert t["escape_families"].get("ecall", 0) == 0
           PY
 
       - name: Upload full-all ABI report
