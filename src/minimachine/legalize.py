@@ -920,7 +920,12 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
         block.instructions[-1:-1] = moves
         stats.phi_edge_moves += len(moves)
 
-    result_fn = muir.Function(fn.name, [out_blocks[b.label] for b in fn.blocks], frame_slots)
+    result_fn = muir.Function(
+        fn.name,
+        [out_blocks[b.label] for b in fn.blocks],
+        frame_slots,
+        tuple(arg[1:] if arg.startswith("%") else arg for arg in fn.args),
+    )
     stats.muir_instructions = sum(len(b.instructions) for b in result_fn.blocks)
     return result_fn, stats
 
