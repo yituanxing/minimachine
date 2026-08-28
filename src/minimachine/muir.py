@@ -161,6 +161,13 @@ class Helper:
 
 
 @dataclass(frozen=True)
+class Sys:
+    op: str
+    args: tuple[Value, ...]
+    result: Slot | None
+
+
+@dataclass(frozen=True)
 class Trap:
     reason: str
 
@@ -172,7 +179,7 @@ class ArchEscape:
     targets: tuple[Target, ...] = ()
 
 
-Instr = Union[Mov, Sub, Br, Call, Ret, Helper, Trap, ArchEscape]
+Instr = Union[Mov, Sub, Br, Call, Ret, Helper, Sys, Trap, ArchEscape]
 
 
 @dataclass
