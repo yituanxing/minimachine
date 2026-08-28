@@ -1415,7 +1415,50 @@ def legalize_function(
                     continue
 
                 if op == "alloca":
-                    # Frame object details are refined by the ABI/frame pass.
+                    if result is None:
+                        raise ValueError("alloca has no result")
+                    body = inst.text[len("alloca "):]
+                    parts = _split_top_commas(body)
+                    if not parts:
+                        raise ValueError(f"cannot parse alloca: {inst.text}")
+
+                    ty = parts[0].strip()
+                    for prefix in ("inalloca ", "swifterror "):
+                        if ty.startswith(prefix):
+                            ty = ty[len(prefix):].strip()
+
+                    info = layout.info(ty)
+                    count: muir.Value = muir.Imm(1)
+                    align = info.align
+
+                    for part in parts[1:]:
+                        item = part.strip()
+                        am = re.fullmatch(r"align\s+(\d+)", item)
+                        if am:
+                            align = int(am.group(1))
+                            continue
+                        if item.startswith("addrspace("):
+                            # MiniMachine v1 currently has a flat address space.
+                            continue
+                        count_ty, count_text = _split_typed_value(item)
+                        if not re.fullmatch(r"i\d+", count_ty):
+                            raise ValueError(
+                                f"alloca count is not integer typed: {item}"
+                            )
+                        count = _value(count_text)
+
+                    stats.temporary_helpers += 1
+                    out.append(
+                        muir.Helper(
+                            "__mm_alloca",
+                            (
+                                muir.Imm(info.size),
+                                count,
+                                muir.Imm(align),
+                            ),
+                            result,
+                        )
+                    )
                     continue
 
                 if op == "sub":
