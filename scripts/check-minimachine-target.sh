@@ -81,3 +81,12 @@ printf 'TARGET_KCONFIG_PASS arch=%s bits=64 mmu=0 smp=0 nr_cpus=1 flat=1 config_
 printf 'TARGET_PREPARE start ARCH=%s\n' "$ARCH"
 make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR" CLANG_TARGET_FLAGS="$LLVM_CARRIER_TRIPLE"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     prepare
 printf 'TARGET_PREPARE_PASS arch=%s\n' "$ARCH"
+
+printf 'TARGET_FIRST_TU start source=init/main.c\n'
+make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR" CLANG_TARGET_FLAGS="$LLVM_CARRIER_TRIPLE"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     KCFLAGS="-save-temps=obj" init/main.o
+
+first_bc="$out/init/main.bc"
+test -s "$first_bc"
+python3 "$root/scripts/legalize_bc.py" "$first_bc" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/init-main-legalize.json"
+python3 "$root/scripts/abi_bc.py" "$first_bc" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/init-main-abi.json"
+printf 'TARGET_FIRST_TU_PASS source=init/main.c bitcode=%s\n' "$first_bc"
