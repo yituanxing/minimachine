@@ -354,6 +354,23 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(vm.memory.read(dest + 4, 32), 0)
         self.assertEqual(vm.memory.read(dest + 8, 32), 0x11223344)
 
+    def test_insertvalue_preserves_nonzero_literal_field(self):
+        functions, _ = legalize_module(
+            """
+            define i64 @replace_poison(i64 %x) {
+            entry:
+              %v = insertvalue [2 x i64] [i64 1, i64 poison], i64 %x, 1
+              %r = extractvalue [2 x i64] %v, 0
+              ret i64 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("replace_poison", (99,)),
+            (1,),
+        )
+
     def test_pointer_scaled_helper_executes(self):
         fn = muir.Function(
             "ptr",
