@@ -154,5 +154,37 @@ class VMTests(unittest.TestCase):
         )
 
 
+    def test_llvm_indirectbr_executes_through_p3_target_slot(self):
+        functions, stats = legalize_module(
+            """
+            define i64 @jump(ptr %target) {
+            entry:
+              indirectbr ptr %target, [label %left, label %right]
+
+            left:
+              ret i64 11
+
+            right:
+              ret i64 22
+            }
+            """
+        )
+        self.assertEqual(stats.lowered_indirectbr, 1)
+        self.assertEqual(stats.arch_escapes, 0)
+
+        program = Program([machine(functions[0])])
+        left = program.block_code[("jump", "left")]
+        right = program.block_code[("jump", "right")]
+
+        self.assertEqual(
+            program.new_vm().run_function("jump", (left,)),
+            (11,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function("jump", (right,)),
+            (22,),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
