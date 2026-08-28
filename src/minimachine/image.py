@@ -8,6 +8,7 @@ from typing import Iterable
 from . import muir
 from .layout import DataLayout, LayoutError
 from .legalize import _const_gep_value, _split_top_commas, _split_typed_value
+from .linker import LinkerContract
 from .vm import MASK64, Program, VMError
 
 
@@ -593,27 +594,92 @@ def _resolve_target(program: Program, target: SymbolExpr | BlockExpr) -> int:
     return (base + target.addend) & MASK64
 
 
+def _define_absolute_symbol(program: Program, name: str, address: int) -> None:
+    value = address & MASK64
+    if name in program.symbol_addresses:
+        if program.symbol_addresses[name] != value:
+            raise VMError(f"linker symbol conflicts with existing symbol: {name}")
+        return
+    program.symbol_addresses[name] = value
+
+
 def install_module_image(
     program: Program,
     image: ModuleImage,
     *,
     external_symbols: dict[str, int] | None = None,
     symbol_aliases: dict[str, str] | None = None,
+    linker_contract: LinkerContract | None = None,
 ) -> None:
     external_symbols = external_symbols or {}
-    symbol_aliases = symbol_aliases or {}
+    symbol_aliases = dict(symbol_aliases or {})
+    if linker_contract is not None:
+        for name, target in linker_contract.aliases.items():
+            previous = symbol_aliases.get(name)
+            if previous is not None and previous != target:
+                raise VMError(
+                    f"linker alias conflicts with explicit alias: {name}"
+                )
+            symbol_aliases[name] = target
 
     for name, address in external_symbols.items():
-        if name in program.symbol_addresses:
-            if program.symbol_addresses[name] != (address & MASK64):
-                raise VMError(f"external symbol conflicts with existing symbol: {name}")
-            continue
-        program.symbol_addresses[name] = address & MASK64
+        _define_absolute_symbol(program, name, address)
 
-    # Allocate all storage before applying relocations so self- and
-    # cross-references are resolvable.
+    # Allocate target linker section groups first.  Linux iterates many tables
+    # by linker-generated [start,end) symbols, so members of one logical table
+    # must be contiguous in the MiniMachine data image even when llvm-link
+    # presented the globals in a different module order.
     object_addresses: dict[str, int] = {}
-    for obj in image.objects:
+    claimed: set[int] = set()
+    group_spans: dict[str, tuple[int, int]] = {}
+
+    if linker_contract is not None:
+        for group in linker_contract.groups:
+            members: list[tuple[int, ImageObject]] = []
+            for section in group.sections:
+                for index, obj in enumerate(image.objects):
+                    if index in claimed or obj.section != section:
+                        continue
+                    members.append((index, obj))
+
+            if not members:
+                continue
+
+            start_address: int | None = None
+            end_address = 0
+            for member_index, (index, obj) in enumerate(members):
+                align = obj.align
+                if member_index == 0:
+                    align = max(align, group.align)
+                address = program.define_data_symbol(
+                    obj.name,
+                    obj.data,
+                    align=align,
+                )
+                object_addresses[obj.name] = address
+                claimed.add(index)
+                if start_address is None:
+                    start_address = address
+                end_address = max(end_address, address + obj.size)
+
+            assert start_address is not None
+            group_spans[group.name] = (start_address, end_address)
+
+        for boundary in linker_contract.boundaries:
+            span = group_spans.get(boundary.group)
+            if span is None:
+                # A linker output section with no input members is intentionally
+                # not synthesized yet: its exact zero-length position depends
+                # on surrounding output-section ordering.
+                continue
+            address = span[0] if boundary.edge == "start" else span[1]
+            _define_absolute_symbol(program, boundary.symbol, address)
+
+    # Remaining objects preserve llvm-link order.  Only objects claimed by a
+    # target section group are reordered.
+    for index, obj in enumerate(image.objects):
+        if index in claimed:
+            continue
         address = program.define_data_symbol(
             obj.name,
             obj.data,
@@ -623,7 +689,7 @@ def install_module_image(
 
     # Aliases may chain. Resolve until fixed point.  Linker-defined aliases
     # (for example Linux's jiffies = jiffies_64) use the same relocation
-    # machinery as LLVM aliases, but are supplied by the target link contract.
+    # machinery as LLVM aliases.
     pending = list(image.aliases)
     pending.extend(
         ImageAlias(name, SymbolExpr(target))
@@ -637,11 +703,17 @@ def install_module_image(
             if target.symbol not in program.symbol_addresses:
                 next_pending.append(alias)
                 continue
-            if alias.name in program.symbol_addresses:
-                raise VMError(f"duplicate image alias symbol: {alias.name}")
-            program.symbol_addresses[alias.name] = (
+            value = (
                 program.symbol_addresses[target.symbol] + target.addend
             ) & MASK64
+            if alias.name in program.symbol_addresses:
+                if program.symbol_addresses[alias.name] != value:
+                    raise VMError(
+                        f"duplicate image alias symbol: {alias.name}"
+                    )
+                progress = True
+                continue
+            program.symbol_addresses[alias.name] = value
             progress = True
         if not progress:
             missing = ", ".join(
