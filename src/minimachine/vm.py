@@ -173,6 +173,9 @@ class VM:
         self.static_keys: dict[int, int] = {}
         self.cpu_features: set[int] = set()
         self.ecall_handler = None
+        # Abstract vector architectural state used by the system contract:
+        # (vstart, vtype, vl, vcsr, vlenb)
+        self.vector_state = (0, 0, 0, 0, 0)
 
     @staticmethod
     def _mask(bits: int) -> int:
