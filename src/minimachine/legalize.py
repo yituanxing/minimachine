@@ -1148,12 +1148,22 @@ def _parallel_copies(copies, temp_index: list[int]):
 
 def _register_metadata(text: str) -> dict[int, str]:
     out: dict[int, str] = {}
-    pattern = re.compile(
-        r'^\\s*!(\\d+)\\s*=\\s*!\\{\\s*!["]([^"]+)["]\\s*\\}\\s*$',
-        flags=re.MULTILINE,
-    )
-    for match in pattern.finditer(text):
-        out[int(match.group(1))] = match.group(2)
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("!") or " = !{!" not in line:
+            continue
+        left, right = line.split("=", 1)
+        ident = left.strip()[1:]
+        if not ident.isdigit():
+            continue
+        marker = '!{"'
+        if marker not in right:
+            continue
+        start_quote = right.find(marker) + len(marker)
+        end_quote = right.find('"', start_quote)
+        if end_quote < 0:
+            continue
+        out[int(ident)] = right[start_quote:end_quote]
     return out
 
 
