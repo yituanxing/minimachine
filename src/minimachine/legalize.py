@@ -1479,6 +1479,64 @@ def _aggregate_index_layout(
     return offset, current, info.size, is_blob
 
 
+def _materialize_scalar_value(
+    text: str,
+    layout: DataLayout,
+    out: list[muir.Instr],
+    temp_counter: list[int],
+    frame_slots: set[str],
+) -> muir.Value:
+    """Parse a scalar operand, emitting µIR when a linker expression is dynamic.
+
+    LLVM constant expressions can contain differences between two linker
+    symbols.  Such a value cannot be represented as a single relocation
+    because both addresses are assigned only when the MiniMachine image is
+    installed.  Materialize those expressions as ordinary machine arithmetic.
+    """
+
+    text = text.strip()
+    try:
+        return _const_scalar_value(text, layout)
+    except ValueError:
+        pass
+
+    binary = re.match(r"^(add|sub)(?:\s+\w+)*\s*\((.*)\)$", text)
+    if not binary:
+        raise ValueError(f"cannot materialize scalar expression: {text}")
+
+    parts = _split_top_commas(binary.group(2))
+    if len(parts) != 2:
+        raise ValueError(f"cannot parse scalar expression operands: {text}")
+
+    _lhs_ty, lhs_text = _split_typed_value(parts[0])
+    _rhs_ty, rhs_text = _split_typed_value(parts[1])
+    lhs = _materialize_scalar_value(
+        lhs_text, layout, out, temp_counter, frame_slots
+    )
+    rhs = _materialize_scalar_value(
+        rhs_text, layout, out, temp_counter, frame_slots
+    )
+
+    temp_counter[0] += 1
+    dst = muir.Slot(f"__constexpr{temp_counter[0]}")
+    frame_slots.add(dst.name)
+
+    if binary.group(1) == "sub":
+        out.append(muir.Sub(muir.Width.I64, dst, lhs, rhs))
+        return dst
+
+    if isinstance(rhs, muir.Imm):
+        out.append(muir.Sub(muir.Width.I64, dst, lhs, muir.Imm(-rhs.value)))
+        return dst
+
+    temp_counter[0] += 1
+    neg = muir.Slot(f"__constexpr_neg{temp_counter[0]}")
+    frame_slots.add(neg.name)
+    out.append(muir.Sub(muir.Width.I64, neg, muir.Imm(0), rhs))
+    out.append(muir.Sub(muir.Width.I64, dst, lhs, neg))
+    return dst
+
+
 def _materialize_wide_value(
     value: muir.Value,
     bits: int,
@@ -1650,8 +1708,20 @@ def legalize_function(
                         muir.Sub(
                             width,
                             result,
-                            _const_scalar_value(operands[0], layout),
-                            _const_scalar_value(operands[1], layout),
+                            _materialize_scalar_value(
+                                operands[0],
+                                layout,
+                                out,
+                                temp_counter,
+                                frame_slots,
+                            ),
+                            _materialize_scalar_value(
+                                operands[1],
+                                layout,
+                                out,
+                                temp_counter,
+                                frame_slots,
+                            ),
                         )
                     )
                     continue
@@ -1664,8 +1734,12 @@ def legalize_function(
                     if len(operands) != 2:
                         raise ValueError(f"cannot parse add operands: {inst.text}")
                     bits = int(m.group(1)[1:])
-                    a = _const_scalar_value(operands[0], layout)
-                    b = _const_scalar_value(operands[1], layout)
+                    a = _materialize_scalar_value(
+                        operands[0], layout, out, temp_counter, frame_slots
+                    )
+                    b = _materialize_scalar_value(
+                        operands[1], layout, out, temp_counter, frame_slots
+                    )
                     if bits > 64:
                         a = _materialize_wide_value(
                             a, bits, out, temp_counter, frame_slots
@@ -2184,8 +2258,12 @@ def legalize_function(
                             f"cannot parse helper operands {op}: {inst.text}"
                         )
                     width = int(m.group(1)[1:])
-                    lhs = _const_scalar_value(operands[0], layout)
-                    rhs = _const_scalar_value(operands[1], layout)
+                    lhs = _materialize_scalar_value(
+                        operands[0], layout, out, temp_counter, frame_slots
+                    )
+                    rhs = _materialize_scalar_value(
+                        operands[1], layout, out, temp_counter, frame_slots
+                    )
                     if width > 64:
                         lhs = _materialize_wide_value(
                             lhs, width, out, temp_counter, frame_slots

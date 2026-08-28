@@ -539,6 +539,30 @@ class RuntimeTests(unittest.TestCase):
             (base + 1,),
         )
 
+    def test_linker_symbol_difference_materializes_at_runtime(self):
+        llvm = """
+            @begin = external global i8
+            @end = external global i8
+
+            define i64 @symbol_distance() {
+            entry:
+              %distance = sdiv i64 sub (i64 ptrtoint (ptr @end to i64), i64 ptrtoint (ptr @begin to i64)), 8
+              ret i64 %distance
+            }
+        """
+        functions, _ = legalize_module(llvm)
+        program = executable(functions)
+        install_module_image(
+            program,
+            parse_module_image(llvm),
+            external_symbols={"begin": 0x12000, "end": 0x12080},
+        )
+
+        self.assertEqual(
+            program.new_vm().run_function("symbol_distance"),
+            (16,),
+        )
+
     def test_nested_linker_symbol_constant_expression_executes(self):
         llvm = """
             @endmarker = external global i8
