@@ -449,7 +449,7 @@ class LegalizerTests(unittest.TestCase):
         self.assertTrue(any(i.symbol == "__mm_extractvalue" for i in helpers))
 
     def test_insertvalue_rejects_live_poison_literal_field(self):
-        with self.assertRaisesRegex(ValueError, "live nonzero/poison"):
+        with self.assertRaisesRegex(ValueError, "live poison/undef"):
             legalize_module(
                 """
                 define i64 @bad(i64 %x) {
