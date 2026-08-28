@@ -140,3 +140,15 @@ printf 'TARGET_LIB_CLUSTER_BUILD_PASS path=lib/\n'
 python3 "$root/scripts/legalize_bc.py" "$out/lib" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/lib-cluster-legalize.json"
 python3 "$root/scripts/abi_bc.py" "$out/lib" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/lib-cluster-abi.json"
 printf 'TARGET_LIB_CLUSTER_PASS path=lib/\n'
+
+printf 'TARGET_FS_CLUSTER start path=fs/\n'
+fs_build_log="$build_root/fs-build.log"
+if ! make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR" CLANG_TARGET_FLAGS="$LLVM_CARRIER_TRIPLE"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     KCFLAGS="-save-temps=obj" fs/ >"$fs_build_log" 2>&1; then
+    printf 'TARGET_FS_CLUSTER_BUILD_FAIL log=%s\n' "$fs_build_log"
+    tail -n 200 "$fs_build_log"
+    exit 1
+fi
+printf 'TARGET_FS_CLUSTER_BUILD_PASS path=fs/\n'
+python3 "$root/scripts/legalize_bc.py" "$out/fs" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/fs-cluster-legalize.json"
+python3 "$root/scripts/abi_bc.py" "$out/fs" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/fs-cluster-abi.json"
+printf 'TARGET_FS_CLUSTER_PASS path=fs/\n'
