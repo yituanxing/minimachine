@@ -504,6 +504,36 @@ class RuntimeTests(unittest.TestCase):
             (0xAABBCCDD,),
         )
 
+    def test_word_varargs_start_copy_end_execute(self):
+        functions, _ = legalize_module(
+            """
+            declare void @llvm.va_start(ptr)
+            declare void @llvm.va_copy(ptr, ptr)
+            declare void @llvm.va_end(ptr)
+
+            define i64 @first_vararg(i64 %fixed, ...) {
+            entry:
+              %ap = alloca ptr, align 8
+              %cp = alloca ptr, align 8
+              call void @llvm.va_start(ptr %ap)
+              call void @llvm.va_copy(ptr %cp, ptr %ap)
+              %cursor = load ptr, ptr %cp
+              %value = load i64, ptr %cursor
+              call void @llvm.va_end(ptr %cp)
+              call void @llvm.va_end(ptr %ap)
+              ret i64 %value
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function(
+                "first_vararg",
+                (0x1111, 0x2222333344445555),
+            ),
+            (0x2222333344445555,),
+        )
+
     def test_pointer_scaled_helper_executes(self):
         fn = muir.Function(
             "ptr",
