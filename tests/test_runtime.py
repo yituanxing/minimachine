@@ -678,9 +678,9 @@ class RuntimeTests(unittest.TestCase):
         vm = program.new_vm()
         a = 0xA000
         b = 0xA100
-        for i, byte in enumerate(b"mini\\0"):
+        for i, byte in enumerate(b"mini" + bytes([0])):
             vm.memory.write(a + i, 8, byte)
-        for i, byte in enumerate(b"mino\\0"):
+        for i, byte in enumerate(b"mino" + bytes([0])):
             vm.memory.write(b + i, 8, byte)
 
         self.assertEqual(vm.run_function("runtime_strlen", (a,)), (4,))
@@ -707,7 +707,7 @@ class RuntimeTests(unittest.TestCase):
         program = executable(functions)
         vm = program.new_vm()
         address = 0xB000
-        for i, byte in enumerate(b"abcd\\0"):
+        for i, byte in enumerate(b"abcd" + bytes([0])):
             vm.memory.write(address + i, 8, byte)
 
         self.assertEqual(
