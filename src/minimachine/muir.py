@@ -18,6 +18,10 @@ class Cond(Enum):
     ULT = "ult"
 
 
+class Special(Enum):
+    SP = "sp"
+
+
 @dataclass(frozen=True)
 class Slot:
     name: str
@@ -44,7 +48,13 @@ class Arbitrary:
     kind: str  # "undef" or "poison"; machine lowering may choose concrete bits.
 
 
-Value = Union[Slot, Imm, Symbol, Reloc, Arbitrary]
+@dataclass(frozen=True)
+class BlockAddr:
+    function: str
+    label: str
+
+
+Value = Union[Slot, Imm, Symbol, Reloc, Arbitrary, BlockAddr, Special]
 
 
 @dataclass(frozen=True)
@@ -66,12 +76,13 @@ Operand = Union[Value, Mem]
 class Target:
     label: str | None = None
     slot: Slot | None = None
+    address: Address | None = None
 
     def is_direct(self) -> bool:
-        return self.label is not None and self.slot is None
+        return self.label is not None and self.slot is None and self.address is None
 
     def is_indirect(self) -> bool:
-        return self.slot is not None and self.label is None
+        return self.label is None and ((self.slot is not None) ^ (self.address is not None))
 
 
 @dataclass(frozen=True)
@@ -157,3 +168,4 @@ class Function:
     name: str
     blocks: list[Block]
     frame_slots: set[str]
+    args: tuple[str, ...] = ()
