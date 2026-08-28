@@ -81,6 +81,7 @@ jobs:
         run: |
           python3 scripts/executable_probe.py "$ROOT/linked.ll" \
             --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --json "$ROOT/executable.json" \
             --require-runtime-closed
 
   full_all:
@@ -146,6 +147,7 @@ jobs:
         run: |
           python3 scripts/executable_probe.py "$ROOT/linked.ll" \
             --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --json "$ROOT/executable.json" \
             --max-blocked-functions 94 \
             --max-arch-escape-sites 164 \
             --require-runtime-closed
@@ -156,4 +158,5 @@ jobs:
           name: minimachine-whole-image-probe-${{ github.run_id }}
           path: |
             build/whole-image-full-all/linked.bc
+            build/whole-image-full-all/executable.json
           retention-days: 7
