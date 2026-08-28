@@ -563,6 +563,35 @@ class RuntimeTests(unittest.TestCase):
             (16,),
         )
 
+    def test_inline_icmp_materializes_linker_symbol_difference(self):
+        llvm = """
+            @begin = external global i8
+            @end = external global i8
+
+            define i64 @inline_symbol_distance_check() {
+            entry:
+              br i1 icmp eq (i64 sub (i64 ptrtoint (ptr @end to i64), i64 ptrtoint (ptr @begin to i64)), i64 128), label %yes, label %no
+
+            yes:
+              ret i64 1
+
+            no:
+              ret i64 0
+            }
+        """
+        functions, _ = legalize_module(llvm)
+        program = executable(functions)
+        install_module_image(
+            program,
+            parse_module_image(llvm),
+            external_symbols={"begin": 0x12000, "end": 0x12080},
+        )
+
+        self.assertEqual(
+            program.new_vm().run_function("inline_symbol_distance_check"),
+            (1,),
+        )
+
     def test_inline_icmp_gep_branch_and_phi_execute(self):
         llvm = """
             %struct.sched_class = type { i64, i64 }

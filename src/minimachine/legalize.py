@@ -1349,6 +1349,10 @@ def _split_typed_value(text: str) -> tuple[str, str]:
 def _parse_inline_icmp(
     text: str,
     layout: DataLayout,
+    *,
+    out: list[muir.Instr] | None = None,
+    temp_counter: list[int] | None = None,
+    frame_slots: set[str] | None = None,
 ) -> tuple[str, int, muir.Width | None, muir.Value, muir.Value]:
     raw = text.strip()
     m = re.fullmatch(r"icmp\s+([a-z]+)\s*\((.*)\)", raw)
@@ -1367,8 +1371,18 @@ def _parse_inline_icmp(
             f"inline icmp type mismatch {lhs_ty} vs {rhs_ty}: {text}"
         )
 
-    a = _const_scalar_value(lhs_text, layout)
-    b = _const_scalar_value(rhs_text, layout)
+    if out is None:
+        a = _const_scalar_value(lhs_text, layout)
+        b = _const_scalar_value(rhs_text, layout)
+    else:
+        if temp_counter is None or frame_slots is None:
+            raise ValueError("inline icmp materialization state is incomplete")
+        a = _materialize_scalar_value(
+            lhs_text, layout, out, temp_counter, frame_slots
+        )
+        b = _materialize_scalar_value(
+            rhs_text, layout, out, temp_counter, frame_slots
+        )
 
     if lhs_ty == "ptr" or lhs_ty.startswith("ptr addrspace("):
         return pred, 64, muir.Width.I64, a, b
@@ -2146,7 +2160,11 @@ def legalize_function(
                         and len(labels) == 2
                     ):
                         pred, bits, width, a, b = _parse_inline_icmp(
-                            branch_parts[0].strip(), layout
+                            branch_parts[0].strip(),
+                            layout,
+                            out=out,
+                            temp_counter=temp_counter,
+                            frame_slots=frame_slots,
                         )
                         tt = muir.Target(label=labels[0])
                         ft = muir.Target(label=labels[1])
