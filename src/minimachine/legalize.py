@@ -271,6 +271,35 @@ def _use_counts(fn: TextFunction) -> Counter[str]:
     return counts
 
 
+def _load_store_address_uses(fn: TextFunction) -> set[str]:
+    """Results whose only use is a load/store memory address.
+
+    Constant GEP folding is only valid when the GEP value is consumed as the
+    address operand itself.  A pointer stored *as data* must still be
+    materialized; otherwise the store reads an uninitialized frame slot.
+    """
+
+    addresses: set[str] = set()
+    for block in fn.blocks:
+        for inst in block.instructions:
+            if inst.opcode not in {"load", "store"}:
+                continue
+
+            body = inst.text[len(inst.opcode) :].lstrip()
+            parts = _split_top_commas(body)
+            if len(parts) < 2:
+                continue
+
+            pm = re.match(
+                r"ptr(?:\s+addrspace\(\d+\))?\s+(%[-A-Za-z$._0-9]+)\s*$",
+                parts[1].strip(),
+            )
+            if pm:
+                addresses.add(pm.group(1))
+
+    return addresses
+
+
 def _result_defs(fn: TextFunction) -> dict[str, TextInst]:
     return {
         inst.result: inst
@@ -1456,6 +1485,7 @@ def legalize_function(
     stats = LegalizeStats()
     register_metadata = register_metadata or {}
     uses = _use_counts(fn)
+    load_store_address_uses = _load_store_address_uses(fn)
     defs = _result_defs(fn)
     fusable_icmps = _fusable_icmp_results(fn, uses, defs)
     frame_slots = {arg[1:] for arg in fn.args}
@@ -1598,7 +1628,11 @@ def legalize_function(
                     base, offset, dynamic_terms = _parse_gep(inst, layout)
                     # Fold only when the GEP has exactly one use. The load/store
                     # legalizer consumes this alias as a memory operand.
-                    if uses[inst.result] == 1 and not dynamic_terms:
+                    if (
+                        uses[inst.result] == 1
+                        and inst.result in load_store_address_uses
+                        and not dynamic_terms
+                    ):
                         aliases[inst.result] = muir.Address(base, offset)
                         continue
 
