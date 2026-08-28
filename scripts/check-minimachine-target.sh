@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# shellcheck source=/dev/null
+. "$root/configs/linux-6.6.143-minimachine.env"
+
+cache_root=${CACHE_ROOT:-"$root/.cache/minimachine"}
+build_root=${BUILD_ROOT:-"$root/build/linux-$LINUX_VERSION-minimachine-target"}
+archive="$cache_root/source/$LINUX_ARCHIVE"
+source_root="$build_root/source"
+src="$source_root/linux-$LINUX_VERSION"
+out="$build_root/kconfig"
+
+need() {
+    command -v "$1" >/dev/null 2>&1 || {
+        printf 'missing required tool: %s\n' "$1" >&2
+        exit 2
+    }
+}
+
+need curl
+need sha256sum
+need tar
+need make
+need "clang-$LLVM_MAJOR"
+need "ld.lld-$LLVM_MAJOR"
+
+mkdir -p "$cache_root/source" "$build_root"
+
+if test -s "$archive" &&
+   printf '%s  %s\n' "$LINUX_SHA256" "$archive" | sha256sum -c - >/dev/null 2>&1; then
+    printf 'TARGET_SOURCE_ARCHIVE hit %s\n' "$archive"
+else
+    rm -f "$archive" "$archive.tmp"
+    printf 'TARGET_SOURCE_ARCHIVE fill %s\n' "$archive"
+    curl -fsSL "$LINUX_URL" -o "$archive.tmp"
+    printf '%s  %s\n' "$LINUX_SHA256" "$archive.tmp" | sha256sum -c -
+    mv "$archive.tmp" "$archive"
+fi
+printf '%s  %s\n' "$LINUX_SHA256" "$archive" | sha256sum -c -
+
+rm -rf "$source_root" "$out"
+mkdir -p "$source_root" "$out"
+tar -xJf "$archive" -C "$source_root"
+
+if test ! -d "$root/linux-overlay/arch/minimachine"; then
+    printf 'missing linux-overlay/arch/minimachine\n' >&2
+    exit 2
+fi
+mkdir -p "$src/arch/minimachine"
+cp -a "$root/linux-overlay/arch/minimachine/." "$src/arch/minimachine/"
+
+printf 'TARGET_KCONFIG start ARCH=%s LLVM=%s target=%s\n'     "$ARCH" "$LLVM_MAJOR" "$KCONFIG_TARGET"
+
+make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     "$KCONFIG_TARGET"
+
+# Re-resolve defaults once. This catches target Kconfig symbols that only
+# become visible after the initial defconfig merge.
+make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     olddefconfig
+
+config="$out/.config"
+
+require_line() {
+    grep -Fxq "$1" "$config" || {
+        printf 'TARGET_KCONFIG missing: %s\n' "$1" >&2
+        exit 1
+    }
+}
+
+require_line 'CONFIG_64BIT=y'
+require_line 'CONFIG_MINIMACHINE=y'
+require_line '# CONFIG_MMU is not set'
+require_line '# CONFIG_SMP is not set'
+require_line 'CONFIG_NR_CPUS=1'
+require_line 'CONFIG_BINFMT_FLAT=y'
+
+config_sha=$(sha256sum "$config" | awk '{print $1}')
+printf 'TARGET_KCONFIG_PASS arch=%s bits=64 mmu=0 smp=0 nr_cpus=1 flat=1 config_sha256=%s\n'     "$ARCH" "$config_sha"
