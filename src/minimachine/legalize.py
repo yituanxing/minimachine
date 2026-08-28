@@ -37,6 +37,8 @@ class LegalizeStats:
     temporary_helpers: int = 0
     regular_calls: int = 0
     arch_escapes: int = 0
+    dropped_compiler_barriers: int = 0
+    lowered_linux_bug: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -48,6 +50,8 @@ class LegalizeStats:
             "temporary_helpers": self.temporary_helpers,
             "regular_calls": self.regular_calls,
             "arch_escapes": self.arch_escapes,
+            "dropped_compiler_barriers": self.dropped_compiler_barriers,
+            "lowered_linux_bug": self.lowered_linux_bug,
         }
 
 
@@ -366,6 +370,19 @@ def _call_args(text: str, callee_end: int, layout: DataLayout) -> tuple[muir.Val
         else:
             part.append(c)
     return tuple(args)
+
+
+def _inline_asm_template(text: str) -> str | None:
+    m = re.search(r'\basm\b(?:\s+\w+)*\s+"((?:\\.|[^"])*)"', text)
+    if not m:
+        return None
+    template = m.group(1)
+    template = template.replace(r"\0A", "\n").replace(r"\09", "\t")
+    return template
+
+
+def _is_linux_bug_asm(template: str) -> bool:
+    return "ebreak" in template and "__bug_table" in template
 
 
 def _parse_call(inst: TextInst, layout: DataLayout):
@@ -827,6 +844,21 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                 if op == "call":
                     kind, symbol, args, callee_slot = _parse_call(inst, layout)
                     if kind == "inline_asm":
+                        template = _inline_asm_template(inst.text)
+                        if result is None and template is not None and not template.strip():
+                            # LLVM's empty sideeffect asm with a memory clobber
+                            # is a compiler barrier. O2 has already observed it,
+                            # and MiniMachine's P3 backend performs no memory-op
+                            # reordering, so no runtime instruction is required.
+                            stats.dropped_compiler_barriers += 1
+                            continue
+                        if result is None and template is not None and _is_linux_bug_asm(template):
+                            # Linux BUG() is a deliberate non-returning trap.
+                            # Preserve the runtime fault, not the RISC-V ebreak
+                            # encoding or __bug_table assembler metadata.
+                            stats.lowered_linux_bug += 1
+                            out.append(muir.Trap("linux_bug"))
+                            continue
                         stats.arch_escapes += 1
                         out.append(muir.ArchEscape("inline_asm", inst.text))
                         continue
@@ -863,6 +895,8 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     continue
 
                 if op == "unreachable":
+                    if out and isinstance(out[-1], muir.Trap):
+                        continue
                     out.append(muir.Trap("llvm.unreachable"))
                     continue
 
