@@ -162,6 +162,14 @@
         "__param"
       ],
       "align": 8
+    },
+    {
+      "name": "exception_table",
+      "sections": [
+        "__ex_table"
+      ],
+      "align": 8,
+      "empty_after": "kernel_params"
     }
   ],
   "boundaries": [
@@ -318,6 +326,16 @@
     {
       "symbol": "__stop___param",
       "group": "kernel_params",
+      "edge": "end"
+    },
+    {
+      "symbol": "__start___ex_table",
+      "group": "exception_table",
+      "edge": "start"
+    },
+    {
+      "symbol": "__stop___ex_table",
+      "group": "exception_table",
       "edge": "end"
     }
   ],
