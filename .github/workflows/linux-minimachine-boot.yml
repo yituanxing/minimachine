@@ -39,8 +39,23 @@ jobs:
           path: .cache/minimachine/source/linux-6.6.143.tar.xz
           key: minimachine-linux-source-6.6.143-dace1f8dc9c0dbf5
 
+      - name: Restore incremental boot objects
+        uses: actions/cache/restore@v4
+        with:
+          path: build/linux-6.6.143-minimachine-boot/out
+          key: minimachine-linux-boot-out-v1-${{ github.sha }}
+          restore-keys: |
+            minimachine-linux-boot-out-v1-
+
       - name: Build native MiniMachine vmlinux
         run: bash scripts/check-minimachine-boot.sh
+
+      - name: Save incremental boot objects
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: build/linux-6.6.143-minimachine-boot/out
+          key: minimachine-linux-boot-out-v1-${{ github.sha }}
 
       - name: Save pinned Linux archive
         if: always() && steps.source-cache.outputs.cache-hit != 'true' && hashFiles('.cache/minimachine/source/linux-6.6.143.tar.xz') != ''
