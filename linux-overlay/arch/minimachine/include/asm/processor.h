@@ -4,8 +4,15 @@
 #ifndef __ASSEMBLY__
 
 #include <asm/barrier.h>
+#include <asm/page.h>
+#include <asm/ptrace.h>
 
 struct task_struct;
+
+#define TASK_SIZE		(~0UL)
+#define STACK_TOP		TASK_SIZE
+#define STACK_TOP_MAX		STACK_TOP
+#define TASK_UNMAPPED_BASE	0UL
 
 /*
  * Minimal saved kernel execution state.  P3 has no architectural register
@@ -18,6 +25,12 @@ struct thread_struct {
 };
 
 #define INIT_THREAD { }
+
+#define task_pt_regs(task) \
+	((struct pt_regs *)(task_stack_page(task) + THREAD_SIZE) - 1)
+
+#define KSTK_EIP(task)	(task_pt_regs(task)->pc)
+#define KSTK_ESP(task)	(task_pt_regs(task)->sp)
 
 #define cpu_relax() barrier()
 
