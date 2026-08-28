@@ -41,6 +41,8 @@ static inline s64 arch_atomic64_fetch_##op(s64 i, atomic64_t *v)       \
 	return ret;                                                        \
 }
 
+#define ATOMIC64_INIT(i)                { (i) }
+
 #define arch_atomic64_read(v)          READ_ONCE((v)->counter)
 #define arch_atomic64_set(v, i)        WRITE_ONCE((v)->counter, (i))
 
