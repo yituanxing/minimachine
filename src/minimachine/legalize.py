@@ -226,6 +226,33 @@ def _result_defs(fn: TextFunction) -> dict[str, TextInst]:
     }
 
 
+def _fusable_icmp_results(
+    fn: TextFunction,
+    uses: Counter[str],
+    defs: dict[str, TextInst],
+) -> set[str]:
+    fused: set[str] = set()
+    for block in fn.blocks:
+        for inst in block.instructions:
+            if inst.opcode != "br":
+                continue
+            m = re.search(
+                r"br\s+i1\s+(%[-A-Za-z$._0-9]+)\s*,\s*label",
+                inst.text,
+            )
+            if not m:
+                continue
+            cond = m.group(1)
+            defined = defs.get(cond)
+            if (
+                uses[cond] == 1
+                and defined is not None
+                and defined.opcode == "icmp"
+            ):
+                fused.add(cond)
+    return fused
+
+
 def _split_top_commas(text: str) -> list[str]:
     parts=[]
     start=0
@@ -1119,6 +1146,7 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
     stats = LegalizeStats()
     uses = _use_counts(fn)
     defs = _result_defs(fn)
+    fusable_icmps = _fusable_icmp_results(fn, uses, defs)
     frame_slots = {arg[1:] for arg in fn.args}
     aliases: dict[str, muir.Address] = {}
     aggregate_results: dict[str, tuple[tuple[muir.Slot, muir.Width], ...]] = {}
@@ -1347,8 +1375,9 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     if result is None:
                         raise ValueError("icmp has no result")
                     pred, bits, width, a, b = _parse_icmp(inst)
-                    if inst.result and uses[inst.result] == 1 and width is not None:
-                        # The consuming conditional BR emits the fused compare.
+                    if inst.result and inst.result in fusable_icmps and width is not None:
+                        # Only an actual one-use conditional BR owns this
+                        # fusion. Other consumers need a materialized i1.
                         continue
                     stats.temporary_helpers += 1
                     out.append(muir.Helper(f"__mm_icmp_{pred}_{bits}", (a, b), result))
@@ -1380,7 +1409,7 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     cond_text = m.group(1)
                     tt, ft = muir.Target(label=labels[0]), muir.Target(label=labels[1])
                     cond_def = defs.get(cond_text)
-                    if cond_def and cond_def.opcode == "icmp" and uses[cond_text] == 1:
+                    if cond_def and cond_def.opcode == "icmp" and cond_text in fusable_icmps:
                         pred, bits, width, a, b = _parse_icmp(cond_def)
                         if width is not None:
                             out.append(_icmp_basis(pred, width, a, b, tt, ft))
