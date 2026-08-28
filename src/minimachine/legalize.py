@@ -57,6 +57,7 @@ class LegalizeStats:
     lowered_system_icache: int = 0
     lowered_system_vector: int = 0
     lowered_alternative_tlb: int = 0
+    lowered_generic_csr: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -88,6 +89,7 @@ class LegalizeStats:
             "lowered_system_icache": self.lowered_system_icache,
             "lowered_system_vector": self.lowered_system_vector,
             "lowered_alternative_tlb": self.lowered_alternative_tlb,
+            "lowered_generic_csr": self.lowered_generic_csr,
         }
 
 
@@ -532,6 +534,53 @@ def _lower_simple_state_sys(
     return None
 
 
+def _eval_csr_const(expr: str) -> int | None:
+    expr = expr.strip()
+    if not re.fullmatch(r"(?:0x[0-9A-Fa-f]+|[0-9]+)(?:\s*\+\s*(?:0x[0-9A-Fa-f]+|[0-9]+))*", expr):
+        return None
+    return sum(int(part.strip(), 0) for part in expr.split("+"))
+
+
+def _lower_generic_csr_sys(
+    template: str,
+    text: str,
+    result: muir.Slot | None,
+    layout: DataLayout,
+) -> muir.Sys | None:
+    normalized = _normalize_inline_asm(template).rstrip(";").strip()
+    args = _inline_asm_args(text, layout)
+
+    m = re.fullmatch(r"csrr\s+\$0,\s*(.+)", normalized)
+    if m and result is not None and not args:
+        csr = _eval_csr_const(m.group(1))
+        if csr is not None:
+            return muir.Sys("csr_read", (muir.Imm(csr),), result)
+
+    for mnemonic, op in (
+        ("csrw", "csr_write"),
+        ("csrs", "csr_set"),
+        ("csrc", "csr_clear"),
+    ):
+        m = re.fullmatch(rf"{mnemonic}\s+(.+?),\s*\$0", normalized)
+        if m and result is None and len(args) == 1:
+            csr = _eval_csr_const(m.group(1))
+            if csr is not None:
+                return muir.Sys(op, (muir.Imm(csr), args[0]), None)
+
+    for mnemonic, op in (
+        ("csrrw", "csr_swap"),
+        ("csrrs", "csr_read_set"),
+        ("csrrc", "csr_read_clear"),
+    ):
+        m = re.fullmatch(rf"{mnemonic}\s+\$0,\s*(.+?),\s*\$1", normalized)
+        if m and result is not None and len(args) == 1:
+            csr = _eval_csr_const(m.group(1))
+            if csr is not None:
+                return muir.Sys(op, (muir.Imm(csr), args[0]), result)
+
+    return None
+
+
 def _lower_simple_tlb_sys(
     template: str,
     text: str,
@@ -560,7 +609,13 @@ def _lower_simple_atomic_sys(
     result: muir.Slot | None,
     layout: DataLayout,
 ) -> muir.Sys | None:
-    normalized = _normalize_inline_asm(template).rstrip(";").strip()
+    normalized = _normalize_inline_asm(template).strip().rstrip(";").strip()
+    post_acquire_fence = False
+    m_fence = re.fullmatch(r"(.+?);\s*fence\s+r\s*,\s*rw", normalized)
+    if m_fence:
+        normalized = m_fence.group(1).strip()
+        post_acquire_fence = True
+
     m = re.fullmatch(
         r"amo(add|or|and|xor|swap)\.(w|d)(?:\.(aqrl|aq|rl))?\s+"
         r"(zero|\$\d+),\s*\$\d+,\s*\$\d+",
@@ -588,6 +643,9 @@ def _lower_simple_atomic_sys(
         "rl": "release",
         "aqrl": "acq_rel",
     }[ordering]
+    if post_acquire_fence:
+        order = order + "_post_acquire_fence"
+
     return muir.Sys(
         f"atomic_{kind}_i{bits}_{order}",
         (address, value),
@@ -620,13 +678,30 @@ def _faultable_sys_spec(template: str) -> tuple[str, int] | None:
 
 
 def _lrsc_sys_spec(template: str) -> tuple[str, int, str] | None:
-    normalized = _normalize_inline_asm(template)
-    m = re.match(r"0:\s*(?:;)?\s*lr\.(w|d)\b", normalized)
+    normalized = _normalize_inline_asm(template).strip()
+    pre_release = False
+    if re.match(r"fence\s+rw\s*,\s*w\s*;", normalized):
+        pre_release = True
+        normalized = re.sub(r"^fence\s+rw\s*,\s*w\s*;\s*", "", normalized, count=1)
+
+    m = re.match(r"0:\s*;?\s*lr\.(w|d)\b", normalized)
     if not m:
         return None
     bits = 32 if m.group(1) == "w" else 64
 
-    if re.search(r"\bbne\b", normalized) and re.search(r"\bsc\.[wd]", normalized):
+    if (
+        re.search(r"\bbltz\b", normalized)
+        and re.search(r"addi\s+\$1,\s*\$0,\s*1\b", normalized)
+        and re.search(r"\bsc\.[wd]", normalized)
+    ):
+        kind = "add1_if_nonnegative"
+    elif (
+        re.search(r"\bbgtz\b", normalized)
+        and re.search(r"addi\s+\$1,\s*\$0,\s*-1\b", normalized)
+        and re.search(r"\bsc\.[wd]", normalized)
+    ):
+        kind = "sub1_if_nonpositive"
+    elif re.search(r"\bbne\b", normalized) and re.search(r"\bsc\.[wd]", normalized):
         kind = "cmpxchg"
     elif re.search(r"\bbeq\b", normalized) and re.search(r"\badd\b", normalized):
         kind = "add_unless"
@@ -637,6 +712,8 @@ def _lrsc_sys_spec(template: str) -> tuple[str, int, str] | None:
 
     if re.search(r"\bsc\.[wd]\.rl\b", normalized) and "fence rw, rw" in normalized:
         ordering = "release_post_full_fence"
+    elif pre_release:
+        ordering = "pre_release"
     elif re.search(r"\bsc\.[wd]\b", normalized):
         ordering = "relaxed"
     else:
@@ -1458,6 +1535,14 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                             if state_sys is not None:
                                 stats.lowered_system_state += 1
                                 out.append(state_sys)
+                                continue
+
+                            generic_csr_sys = _lower_generic_csr_sys(
+                                template, inst.text, result, layout
+                            )
+                            if generic_csr_sys is not None:
+                                stats.lowered_generic_csr += 1
+                                out.append(generic_csr_sys)
                                 continue
 
                             if _normalize_inline_asm(template).rstrip(";").strip() == "fence.i" and result is None:
