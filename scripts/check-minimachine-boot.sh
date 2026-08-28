@@ -40,7 +40,7 @@ else
     mv "$archive.tmp" "$archive"
 fi
 
-rm -rf "$source_root" "$out"
+rm -rf "$source_root"
 mkdir -p "$source_root" "$out"
 tar -xJf "$archive" -C "$source_root"
 
