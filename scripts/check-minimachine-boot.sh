@@ -56,6 +56,7 @@ common_make=(
     KBUILD_BUILD_USER=minimachine
     KBUILD_BUILD_HOST=minimachine
     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z
+    LDFLAGS_vmlinux=--error-limit=0
 )
 
 printf 'BOOT_GATE configure ARCH=%s LLVM=%s\n' "$ARCH" "$LLVM_MAJOR"
