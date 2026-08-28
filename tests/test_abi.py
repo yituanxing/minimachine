@@ -6,7 +6,8 @@ from src.minimachine.abi import (
     ENTRY,
     FRAME_SIZE,
     RESUME_PC,
-    RETVAL,
+    RESULT_COUNT,
+    RESULT_PTR,
     expand_function,
 )
 from src.minimachine.lower_p3 import lower_function
@@ -112,6 +113,62 @@ class AbiTests(unittest.TestCase):
             and i.src.address.base.name == "__mm_sys_fence"
         ]
         self.assertGreaterEqual(len(descriptor_loads), 2)
+        verify_p3(lower_function(expanded))
+
+    def test_system_op_can_return_multiple_values(self):
+        lo = muir.Slot("lo")
+        hi = muir.Slot("hi")
+        fn = muir.Function(
+            "pair_user",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Sys("pair", (), (lo, hi)),
+                        muir.Ret(lo),
+                    ],
+                )
+            ],
+            {"lo", "hi"},
+        )
+
+        expanded, stats = expand_function(fn)
+        self.assertEqual(stats.system_ops, 1)
+
+        # The call frame publishes a dynamic result buffer and the expected
+        # result count to the external system service.
+        header_writes = [
+            i
+            for b in expanded.blocks
+            for i in b.instructions
+            if isinstance(i, muir.Mov)
+            and isinstance(i.dst, muir.Mem)
+            and isinstance(i.dst.address.base, muir.Slot)
+        ]
+        self.assertTrue(
+            any(i.dst.address.offset == RESULT_PTR for i in header_writes)
+        )
+        self.assertTrue(
+            any(
+                i.dst.address.offset == RESULT_COUNT
+                and i.src == muir.Imm(2)
+                for i in header_writes
+            )
+        )
+
+        # Continuation reads result0/result1 from adjacent result words.
+        result_loads = [
+            i
+            for b in expanded.blocks
+            for i in b.instructions
+            if isinstance(i, muir.Mov)
+            and isinstance(i.src, muir.Mem)
+            and i.dst in {lo, hi}
+        ]
+        self.assertEqual(len(result_loads), 2)
+        offsets = sorted(i.src.address.offset for i in result_loads)
+        self.assertEqual(offsets, [0, 8])
+
         verify_p3(lower_function(expanded))
 
     def test_recursive_call_needs_no_special_case(self):
