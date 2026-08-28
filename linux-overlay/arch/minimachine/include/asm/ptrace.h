@@ -11,8 +11,9 @@
 #define MINIMACHINE_STATUS_IRQ_ENABLE	(1UL << 1)
 
 /*
- * Keep the kernel trap frame shape identical to the public semantic register
- * prefix.  Entry code/runtime will populate this at the trap boundary.
+ * Keep the public semantic register state as the frame prefix.  The kernel
+ * adds orig_arg0 so ptrace/audit can roll back an aborted syscall exactly.
+ * Entry code/runtime will populate this at the trap boundary.
  */
 struct pt_regs {
 	unsigned long pc;
@@ -21,6 +22,7 @@ struct pt_regs {
 	unsigned long result;
 	unsigned long syscall_nr;
 	unsigned long status;
+	unsigned long orig_arg0;
 };
 
 static inline int user_mode(const struct pt_regs *regs)
