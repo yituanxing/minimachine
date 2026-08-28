@@ -50,6 +50,7 @@ class LegalizeStats:
     lowered_system_wait: int = 0
     lowered_system_atomic: int = 0
     lowered_static_branch: int = 0
+    lowered_system_ecall: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -74,6 +75,7 @@ class LegalizeStats:
             "lowered_system_wait": self.lowered_system_wait,
             "lowered_system_atomic": self.lowered_system_atomic,
             "lowered_static_branch": self.lowered_static_branch,
+            "lowered_system_ecall": self.lowered_system_ecall,
         }
 
 
@@ -736,6 +738,30 @@ def _lower_jump_label_callbr(
     ]
 
 
+def _call_return_types(text: str) -> tuple[muir.Width, ...]:
+    m = re.search(r"\bcall\s+(.+?)\s+asm\b", text)
+    if not m:
+        raise ValueError(f"cannot parse inline-asm return type: {text}")
+    ty = m.group(1).strip()
+    if ty == "void":
+        return ()
+    if ty.startswith("{") and ty.endswith("}"):
+        fields = _split_top_commas(ty[1:-1].strip())
+        return tuple(_first_width(field, default_pointer=True) for field in fields)
+    return (_first_width(ty, default_pointer=True),)
+
+
+def _aggregate_result_slots(
+    result_name: str,
+    widths: tuple[muir.Width, ...],
+    frame_slots: set[str],
+) -> tuple[muir.Slot, ...]:
+    base = result_name[1:] if result_name.startswith("%") else result_name
+    slots = tuple(muir.Slot(f"{base}.__r{i}") for i in range(len(widths)))
+    frame_slots.update(slot.name for slot in slots)
+    return slots
+
+
 def _parse_call(inst: TextInst, layout: DataLayout):
     text = inst.text
     if re.search(r"\basm\b", text):
@@ -804,6 +830,7 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
     defs = _result_defs(fn)
     frame_slots = {arg[1:] for arg in fn.args}
     aliases: dict[str, muir.Address] = {}
+    aggregate_results: dict[str, tuple[tuple[muir.Slot, muir.Width], ...]] = {}
     phis_by_target: dict[str, list[tuple[muir.Slot, muir.Value, str, muir.Width]]] = defaultdict(list)
     out_blocks: dict[str, muir.Block] = {}
     temp_counter = [0]
@@ -1262,6 +1289,29 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                                 stats.lowered_system_wait += 1
                                 out.append(wait_sys)
                                 continue
+
+                            normalized_asm = _normalize_inline_asm(template).rstrip(";").strip()
+                            if normalized_asm == "ecall":
+                                widths = _call_return_types(inst.text)
+                                ecall_args = _inline_asm_args(inst.text, layout)
+                                if not widths:
+                                    out.append(muir.Sys("ecall", ecall_args, None))
+                                elif len(widths) == 1:
+                                    if result is None:
+                                        raise ValueError("scalar ecall result missing")
+                                    out.append(muir.Sys("ecall", ecall_args, result))
+                                else:
+                                    if inst.result is None:
+                                        raise ValueError("aggregate ecall result missing")
+                                    result_slots = _aggregate_result_slots(
+                                        inst.result, widths, frame_slots
+                                    )
+                                    aggregate_results[inst.result] = tuple(
+                                        zip(result_slots, widths)
+                                    )
+                                    out.append(muir.Sys("ecall", ecall_args, result_slots))
+                                stats.lowered_system_ecall += 1
+                                continue
                         if result is None and template is not None and _is_linux_bug_asm(template):
                             # Linux BUG() is a deliberate non-returning trap.
                             # Preserve the runtime fault, not the RISC-V ebreak
@@ -1315,12 +1365,33 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     out.append(muir.Trap("llvm.unreachable"))
                     continue
 
-                if op in {"extractvalue", "insertvalue"}:
+                if op == "extractvalue":
                     if result is None:
-                        raise ValueError(f"{op} has no result")
+                        raise ValueError("extractvalue has no result")
+                    m = re.search(
+                        r"extractvalue\s+.+?\s+(%[-A-Za-z$._0-9]+)\s*,\s*(\d+)\s*$",
+                        inst.text,
+                    )
+                    if m and m.group(1) in aggregate_results:
+                        source, index_text = m.groups()
+                        index = int(index_text)
+                        fields = aggregate_results[source]
+                        if index < 0 or index >= len(fields):
+                            raise ValueError(f"extractvalue index out of range: {inst.text}")
+                        src_slot, width = fields[index]
+                        out.append(muir.Mov(width, result, src_slot))
+                        continue
                     stats.temporary_helpers += 1
                     values = tuple(_value(x) for x in _LOCAL_RE.findall(inst.text))
-                    out.append(muir.Helper(f"__mm_{op}", values, result))
+                    out.append(muir.Helper("__mm_extractvalue", values, result))
+                    continue
+
+                if op == "insertvalue":
+                    if result is None:
+                        raise ValueError("insertvalue has no result")
+                    stats.temporary_helpers += 1
+                    values = tuple(_value(x) for x in _LOCAL_RE.findall(inst.text))
+                    out.append(muir.Helper("__mm_insertvalue", values, result))
                     continue
 
                 if op in {"callbr", "indirectbr"}:
