@@ -1346,6 +1346,34 @@ def _aggregate_index_layout(
     return offset, current, info.size, is_blob
 
 
+def _materialize_wide_value(
+    value: muir.Value,
+    bits: int,
+    out: list[muir.Instr],
+    temp_counter: list[int],
+    frame_slots: set[str],
+) -> muir.Value:
+    if bits <= 64 or not isinstance(value, muir.Imm):
+        return value
+
+    masked = value.value & ((1 << bits) - 1)
+    chunks = tuple(
+        muir.Imm((masked >> shift) & ((1 << 64) - 1))
+        for shift in range(0, bits, 64)
+    )
+    temp_counter[0] += 1
+    dst = muir.Slot(f"__wide_const{temp_counter[0]}")
+    frame_slots.add(dst.name)
+    out.append(
+        muir.Helper(
+            f"__mm_wide_const_{bits}",
+            chunks,
+            dst,
+        )
+    )
+    return dst
+
+
 def _register_metadata(text: str) -> dict[int, str]:
     out: dict[int, str] = {}
     for raw in text.splitlines():
@@ -1476,6 +1504,12 @@ def legalize_function(
                     bits = int(m.group(1)[1:])
                     a, b = _value(m.group(2)), _value(m.group(3))
                     if bits > 64:
+                        a = _materialize_wide_value(
+                            a, bits, out, temp_counter, frame_slots
+                        )
+                        b = _materialize_wide_value(
+                            b, bits, out, temp_counter, frame_slots
+                        )
                         stats.temporary_helpers += 1
                         out.append(muir.Helper(f"__mm_add_{bits}", (a, b), result))
                         continue
@@ -1637,6 +1671,10 @@ def legalize_function(
                                     frame_slots.add(ap.name)
                                     out.append(muir.Sub(muir.Width.I64,ap,base,muir.Imm(-addr.offset)))
                                     base=ap
+                                if bits > 64:
+                                    src = _materialize_wide_value(
+                                        src, bits, out, temp_counter, frame_slots
+                                    )
                                 stats.temporary_helpers += 1
                                 out.append(muir.Helper(f"__mm_store_i{bits}",(base,src),None))
                     else:
@@ -1667,6 +1705,13 @@ def legalize_function(
                         # Only an actual one-use conditional BR owns this
                         # fusion. Other consumers need a materialized i1.
                         continue
+                    if bits > 64:
+                        a = _materialize_wide_value(
+                            a, bits, out, temp_counter, frame_slots
+                        )
+                        b = _materialize_wide_value(
+                            b, bits, out, temp_counter, frame_slots
+                        )
                     stats.temporary_helpers += 1
                     out.append(muir.Helper(f"__mm_icmp_{pred}_{bits}", (a, b), result))
                     continue
@@ -1750,11 +1795,20 @@ def legalize_function(
                             )
                         )
                     else:
+                        src_value = _value(m.group(2))
+                        if src_bits > 64:
+                            src_value = _materialize_wide_value(
+                                src_value,
+                                src_bits,
+                                out,
+                                temp_counter,
+                                frame_slots,
+                            )
                         stats.temporary_helpers += 1
                         out.append(
                             muir.Helper(
                                 f"__mm_{op}_{src_bits}_{dst_bits}",
-                                (_value(m.group(2)),),
+                                (src_value,),
                                 result,
                             )
                         )
@@ -1784,6 +1838,14 @@ def legalize_function(
                             if bits in {1,8,16,32,64}:
                                 out.append(muir.Mov(_storage_width(bits),result,value))
                             else:
+                                if bits > 64:
+                                    value = _materialize_wide_value(
+                                        value,
+                                        bits,
+                                        out,
+                                        temp_counter,
+                                        frame_slots,
+                                    )
                                 stats.temporary_helpers += 1
                                 out.append(muir.Helper(f"__mm_freeze_{bits}",(value,),result))
                     else:
@@ -1811,7 +1873,21 @@ def legalize_function(
                         fv=_value(parts[2])
                     except ValueError as e:
                         raise ValueError(f"cannot parse select values: {inst.text}") from e
-                    type_tag=_sanitize(re.sub(r"\s+(?:%[-A-Za-z$._0-9]+|@[-A-Za-z$._0-9]+|-?\d+|poison|undef|zeroinitializer)\s*$","",parts[1]))
+                    type_text = re.sub(
+                        r"\s+(?:%[-A-Za-z$._0-9]+|@[-A-Za-z$._0-9]+|-?\d+|poison|undef|zeroinitializer)\s*$",
+                        "",
+                        parts[1],
+                    ).strip()
+                    type_tag=_sanitize(type_text)
+                    wm = re.fullmatch(r"i(\d+)", type_text)
+                    if wm and int(wm.group(1)) > 64:
+                        wide_bits = int(wm.group(1))
+                        tv = _materialize_wide_value(
+                            tv, wide_bits, out, temp_counter, frame_slots
+                        )
+                        fv = _materialize_wide_value(
+                            fv, wide_bits, out, temp_counter, frame_slots
+                        )
                     stats.temporary_helpers += 1
                     out.append(muir.Helper(f"__mm_select_{type_tag or 'opaque'}",(cond,tv,fv),result))
                     continue
@@ -1825,11 +1901,20 @@ def legalize_function(
                     if not m or result is None:
                         raise ValueError(f"cannot parse helper op {op}: {inst.text}")
                     width = int(m.group(1)[1:])
+                    lhs = _value(m.group(2))
+                    rhs = _value(m.group(3))
+                    if width > 64:
+                        lhs = _materialize_wide_value(
+                            lhs, width, out, temp_counter, frame_slots
+                        )
+                        rhs = _materialize_wide_value(
+                            rhs, width, out, temp_counter, frame_slots
+                        )
                     stats.temporary_helpers += 1
                     out.append(
                         muir.Helper(
                             f"__mm_{op}_{width}",
-                            (_value(m.group(2)), _value(m.group(3))),
+                            (lhs, rhs),
                             result,
                         )
                     )
