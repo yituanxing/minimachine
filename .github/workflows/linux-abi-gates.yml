@@ -1,0 +1,125 @@
+name: Linux ABI Gates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/minimachine/**
+      - scripts/abi_bc.py
+      - scripts/normalize-corpus.sh
+      - .github/workflows/linux-abi-gates.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minimachine-linux-abi-gates
+  cancel-in-progress: true
+
+jobs:
+  focused16:
+    runs-on: ubuntu-24.04
+    env:
+      ROOT: ${{ github.workspace }}/build/abi-focused
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-18 clang-18
+          echo "nproc=$(nproc)"
+
+      - name: Restore focused16
+        uses: actions/cache/restore@v4
+        with:
+          path: build/focused/raw
+          key: minimachine-focused16-v1-${{ hashFiles('scripts/focus_corpus.py', 'configs/linux-6.6.143-riscv.env') }}
+
+      - name: Verify focused16
+        run: test "$(find build/focused/raw -type f -name '*.bc' | wc -l)" -eq 16
+
+      - name: Normalize focused16
+        run: JOBS="$(nproc)" bash scripts/normalize-corpus.sh build/focused/raw "$ROOT/normalized"
+
+      - name: ABI + P3 focused16
+        run: |
+          mkdir -p "$ROOT/reports"
+          python3 scripts/abi_bc.py "$ROOT/normalized" \
+            --llvm-major 18 --jobs "$(nproc)" \
+            --json "$ROOT/reports/abi.json" --strict
+
+      - name: Focused summary
+        run: |
+          python3 - <<'PY'
+          import json
+          r=json.load(open("build/abi-focused/reports/abi.json"))
+          t=r["totals"]
+          print(
+              f"ABI_FOCUSED16 pass={r['pass']}/16 fail={r['fail']} "
+              f"functions={t['functions']} calls={t['calls']} helpers={t['helpers']} "
+              f"returns={t['returns']} p3_pass={t['p3_function_pass']} "
+              f"p3_skip_escape={t['p3_function_skip_escape']} "
+              f"traps={t['trap_sites']} arch={t['arch_escape_sites']}"
+          )
+          PY
+
+  full500:
+    needs: focused16
+    runs-on: ubuntu-24.04
+    env:
+      ROOT: ${{ github.workspace }}/build/abi-full500
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-18 clang-18
+          echo "nproc=$(nproc)"
+
+      - name: Restore full500
+        uses: actions/cache/restore@v4
+        with:
+          path: build/full500/raw
+          key: minimachine-legalizer-full500-v1-${{ hashFiles('scripts/subset_corpus.py', 'configs/linux-6.6.143-riscv.env') }}
+
+      - name: Verify full500
+        run: test "$(find build/full500/raw -type f -name '*.bc' | wc -l)" -eq 500
+
+      - name: Normalize full500
+        run: JOBS="$(nproc)" bash scripts/normalize-corpus.sh build/full500/raw "$ROOT/normalized"
+
+      - name: ABI + P3 full500
+        run: |
+          mkdir -p "$ROOT/reports"
+          python3 scripts/abi_bc.py "$ROOT/normalized" \
+            --llvm-major 18 --jobs "$(nproc)" \
+            --json "$ROOT/reports/abi.json"
+
+      - name: Full500 summary
+        run: |
+          python3 - <<'PY'
+          import json
+          r=json.load(open("build/abi-full500/reports/abi.json"))
+          t=r["totals"]
+          print(
+              f"ABI_FULL500 pass={r['pass']}/500 fail={r['fail']} "
+              f"functions={t['functions']} calls={t['calls']} helpers={t['helpers']} "
+              f"returns={t['returns']} p3_pass={t['p3_function_pass']} "
+              f"p3_skip_escape={t['p3_function_skip_escape']} "
+              f"traps={t['trap_sites']} arch={t['arch_escape_sites']} "
+              f"p3_instructions={t['p3_instructions']}"
+          )
+          for x in r["records"]:
+              if x["status"]=="FAIL":
+                  print(f"FAIL {x['file']} :: {x['error']}")
+          PY
+
+      - name: Upload full500 ABI report
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-abi-full500-${{ github.run_id }}
+          path: build/abi-full500/reports/abi.json
+          retention-days: 14
