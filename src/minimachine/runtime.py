@@ -468,8 +468,8 @@ def helper_callback(symbol: str):
                 return min((args[0] & mask) + (args[1] & mask), mask)
             if op == "usub":
                 return max((args[0] & mask) - (args[1] & mask), 0)
-            a = _signed(a_raw, bits)
-            b = _signed(b_raw, bits)
+            a = _signed(args[0], bits)
+            b = _signed(args[1], bits)
             raw = a + b if op == "sadd" else a - b
             return min(max(raw, signed_min), signed_max) & mask
 
@@ -505,8 +505,8 @@ def helper_callback(symbol: str):
                     overflow = raw > mask
                 return _overflow_blob(vm, bits, raw, overflow)
 
-            a = _signed(args[0], bits)
-            b = _signed(args[1], bits)
+            a = _signed(a_raw, bits)
+            b = _signed(b_raw, bits)
             if op == "add":
                 raw = a + b
             elif op == "sub":
