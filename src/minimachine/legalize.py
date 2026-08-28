@@ -51,6 +51,8 @@ class LegalizeStats:
     lowered_system_atomic: int = 0
     lowered_static_branch: int = 0
     lowered_system_ecall: int = 0
+    lowered_system_faultable: int = 0
+    lowered_system_lrsc: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -76,6 +78,8 @@ class LegalizeStats:
             "lowered_system_atomic": self.lowered_system_atomic,
             "lowered_static_branch": self.lowered_static_branch,
             "lowered_system_ecall": self.lowered_system_ecall,
+            "lowered_system_faultable": self.lowered_system_faultable,
+            "lowered_system_lrsc": self.lowered_system_lrsc,
         }
 
 
@@ -583,6 +587,55 @@ def _lower_simple_atomic_sys(
     )
 
 
+_FAULT_WIDTH = {
+    "lb": 8,
+    "lh": 16,
+    "lw": 32,
+    "ld": 64,
+    "sb": 8,
+    "sh": 16,
+    "sw": 32,
+    "sd": 64,
+}
+
+
+def _faultable_sys_spec(template: str) -> tuple[str, int] | None:
+    if "__ex_table" not in template:
+        return None
+    normalized = _normalize_inline_asm(template)
+    m = re.match(r"1:\s*;\s*(lb|lh|lw|ld|sb|sh|sw|sd)\b", normalized)
+    if not m:
+        return None
+    mnemonic = m.group(1)
+    kind = "load" if mnemonic.startswith("l") else "store"
+    return kind, _FAULT_WIDTH[mnemonic]
+
+
+def _lrsc_sys_spec(template: str) -> tuple[str, int, str] | None:
+    normalized = _normalize_inline_asm(template)
+    m = re.match(r"0:\s*(?:;)?\s*lr\.(w|d)\b", normalized)
+    if not m:
+        return None
+    bits = 32 if m.group(1) == "w" else 64
+
+    if re.search(r"\bbne\b", normalized) and re.search(r"\bsc\.[wd]", normalized):
+        kind = "cmpxchg"
+    elif re.search(r"\bbeq\b", normalized) and re.search(r"\badd\b", normalized):
+        kind = "add_unless"
+    elif "addi $1, $0, -1" in normalized and re.search(r"\bbltz\b", normalized):
+        kind = "dec_if_positive"
+    else:
+        return None
+
+    if re.search(r"\bsc\.[wd]\.rl\b", normalized) and "fence rw, rw" in normalized:
+        ordering = "release_post_full_fence"
+    elif re.search(r"\bsc\.[wd]\b", normalized):
+        ordering = "relaxed"
+    else:
+        return None
+    return kind, bits, ordering
+
+
 def _lower_wait_sys(template: str, result: muir.Slot | None) -> muir.Sys | None:
     if result is None and _normalize_inline_asm(template) == "wfi":
         return muir.Sys("wait_interrupt", (), None)
@@ -760,6 +813,26 @@ def _aggregate_result_slots(
     slots = tuple(muir.Slot(f"{base}.__r{i}") for i in range(len(widths)))
     frame_slots.update(slot.name for slot in slots)
     return slots
+
+
+def _prepare_inline_asm_result(
+    inst: TextInst,
+    scalar_result: muir.Slot | None,
+    frame_slots: set[str],
+    aggregate_results: dict[str, tuple[tuple[muir.Slot, muir.Width], ...]],
+) -> tuple[muir.Result, tuple[muir.Width, ...]]:
+    widths = _call_return_types(inst.text)
+    if not widths:
+        return None, ()
+    if len(widths) == 1:
+        if scalar_result is None:
+            raise ValueError("scalar inline-asm result missing")
+        return scalar_result, widths
+    if inst.result is None:
+        raise ValueError("aggregate inline-asm result missing")
+    slots = _aggregate_result_slots(inst.result, widths, frame_slots)
+    aggregate_results[inst.result] = tuple(zip(slots, widths))
+    return slots, widths
 
 
 def _parse_call(inst: TextInst, layout: DataLayout):
@@ -1292,25 +1365,51 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
 
                             normalized_asm = _normalize_inline_asm(template).rstrip(";").strip()
                             if normalized_asm == "ecall":
-                                widths = _call_return_types(inst.text)
+                                sys_result, _ = _prepare_inline_asm_result(
+                                    inst, result, frame_slots, aggregate_results
+                                )
                                 ecall_args = _inline_asm_args(inst.text, layout)
-                                if not widths:
-                                    out.append(muir.Sys("ecall", ecall_args, None))
-                                elif len(widths) == 1:
-                                    if result is None:
-                                        raise ValueError("scalar ecall result missing")
-                                    out.append(muir.Sys("ecall", ecall_args, result))
-                                else:
-                                    if inst.result is None:
-                                        raise ValueError("aggregate ecall result missing")
-                                    result_slots = _aggregate_result_slots(
-                                        inst.result, widths, frame_slots
-                                    )
-                                    aggregate_results[inst.result] = tuple(
-                                        zip(result_slots, widths)
-                                    )
-                                    out.append(muir.Sys("ecall", ecall_args, result_slots))
+                                out.append(muir.Sys("ecall", ecall_args, sys_result))
                                 stats.lowered_system_ecall += 1
+                                continue
+
+                            fault_spec = _faultable_sys_spec(template)
+                            if fault_spec is not None:
+                                kind, bits = fault_spec
+                                sys_result, _ = _prepare_inline_asm_result(
+                                    inst, result, frame_slots, aggregate_results
+                                )
+                                fault_args = _inline_asm_args(inst.text, layout)
+                                out.append(
+                                    muir.Sys(
+                                        f"faultable_{kind}_i{bits}",
+                                        fault_args,
+                                        sys_result,
+                                    )
+                                )
+                                stats.lowered_system_faultable += 1
+                                continue
+
+                            lrsc_spec = _lrsc_sys_spec(template)
+                            if lrsc_spec is not None:
+                                kind, bits, ordering = lrsc_spec
+                                sys_result, _ = _prepare_inline_asm_result(
+                                    inst, result, frame_slots, aggregate_results
+                                )
+                                lrsc_args = _inline_asm_args(inst.text, layout)
+                                # Linux's constraints repeat the memory operand
+                                # as the final input. The system contract needs
+                                # one address, not two aliases of the same cell.
+                                if len(lrsc_args) >= 2 and lrsc_args[-1] == lrsc_args[0]:
+                                    lrsc_args = lrsc_args[:-1]
+                                out.append(
+                                    muir.Sys(
+                                        f"atomic_{kind}_i{bits}_{ordering}",
+                                        lrsc_args,
+                                        sys_result,
+                                    )
+                                )
+                                stats.lowered_system_lrsc += 1
                                 continue
                         if result is None and template is not None and _is_linux_bug_asm(template):
                             # Linux BUG() is a deliberate non-returning trap.
