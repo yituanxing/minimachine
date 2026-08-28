@@ -7,7 +7,12 @@ from src.minimachine.image import (
     SymbolExpr,
     install_module_image,
 )
-from src.minimachine.linker import BoundarySymbol, LinkerContract, SectionGroup
+from src.minimachine.linker import (
+    BoundarySymbol,
+    LinkerContract,
+    SectionGroup,
+    SemanticBoundary,
+)
 from src.minimachine.vm import Program
 
 
@@ -172,6 +177,47 @@ class ImageTests(unittest.TestCase):
                 64,
             ),
             program.symbol_addresses["init0"],
+        )
+
+
+    def test_semantic_boundaries_follow_program_layout(self):
+        image = ModuleImage(
+            objects=(
+                ImageObject(
+                    name="payload",
+                    ty="i64",
+                    data=(7).to_bytes(8, "little"),
+                    align=8,
+                    section=".data",
+                    constant=False,
+                    relocations=(),
+                ),
+            ),
+            aliases=(),
+            external_data=("_sdata", "_end"),
+            external_functions=(),
+            skipped_linker_metadata=(),
+        )
+        contract = LinkerContract(
+            aliases={},
+            groups=(),
+            boundaries=(),
+            semantic_boundaries=(
+                SemanticBoundary("_sdata", "data_start"),
+                SemanticBoundary("_end", "data_end"),
+            ),
+        )
+
+        program = Program()
+        install_module_image(program, image, linker_contract=contract)
+
+        self.assertEqual(
+            program.symbol_addresses["_sdata"],
+            program.symbol_addresses["payload"],
+        )
+        self.assertEqual(
+            program.symbol_addresses["_end"],
+            program.symbol_addresses["payload"] + 8,
         )
 
 

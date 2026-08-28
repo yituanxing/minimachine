@@ -320,5 +320,27 @@
       "group": "kernel_params",
       "edge": "end"
     }
+  ],
+  "semantic_boundaries": [
+    {
+      "symbol": "_stext",
+      "point": "code_start"
+    },
+    {
+      "symbol": "_etext",
+      "point": "code_end"
+    },
+    {
+      "symbol": "_sdata",
+      "point": "data_start"
+    },
+    {
+      "symbol": "_edata",
+      "point": "data_end"
+    },
+    {
+      "symbol": "_end",
+      "point": "data_end"
+    }
   ]
 }

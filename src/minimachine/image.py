@@ -632,6 +632,7 @@ def install_module_image(
     object_addresses: dict[str, int] = {}
     claimed: set[int] = set()
     group_spans: dict[str, tuple[int, int]] = {}
+    image_data_start = program._next_data
 
     if linker_contract is not None:
         for group in linker_contract.groups:
@@ -697,6 +698,27 @@ def install_module_image(
             align=obj.align,
         )
         object_addresses[obj.name] = address
+
+    if linker_contract is not None and linker_contract.semantic_boundaries:
+        code_addresses = tuple(program.code_block.values())
+        code_start = min(code_addresses) if code_addresses else program.halt_code
+        code_end = (
+            max(code_addresses) + 8
+            if code_addresses
+            else program.halt_code
+        )
+        semantic_values = {
+            "code_start": code_start,
+            "code_end": code_end,
+            "data_start": image_data_start,
+            "data_end": program._next_data,
+        }
+        for boundary in linker_contract.semantic_boundaries:
+            _define_absolute_symbol(
+                program,
+                boundary.symbol,
+                semantic_values[boundary.point],
+            )
 
     # Aliases may chain. Resolve until fixed point.  Linker-defined aliases
     # (for example Linux's jiffies = jiffies_64) use the same relocation

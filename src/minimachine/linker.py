@@ -25,10 +25,17 @@ class BoundarySymbol:
 
 
 @dataclass(frozen=True)
+class SemanticBoundary:
+    symbol: str
+    point: str  # code_start/code_end/data_start/data_end
+
+
+@dataclass(frozen=True)
 class LinkerContract:
     aliases: dict[str, str]
     groups: tuple[SectionGroup, ...]
     boundaries: tuple[BoundarySymbol, ...]
+    semantic_boundaries: tuple[SemanticBoundary, ...] = ()
 
     def __post_init__(self) -> None:
         group_names: set[str] = set()
@@ -94,7 +101,30 @@ class LinkerContract:
                     f"{boundary.edge}"
                 )
 
-        overlap = boundary_names.intersection(self.aliases)
+        semantic_names: set[str] = set()
+        valid_points = {"code_start", "code_end", "data_start", "data_end"}
+        for boundary in self.semantic_boundaries:
+            if not boundary.symbol:
+                raise LinkerContractError("semantic boundary requires a symbol")
+            if boundary.symbol in semantic_names:
+                raise LinkerContractError(
+                    f"duplicate semantic boundary symbol: {boundary.symbol}"
+                )
+            semantic_names.add(boundary.symbol)
+            if boundary.point not in valid_points:
+                raise LinkerContractError(
+                    f"semantic boundary {boundary.symbol} has invalid point "
+                    f"{boundary.point}"
+                )
+
+        duplicate_names = boundary_names.intersection(semantic_names)
+        if duplicate_names:
+            raise LinkerContractError(
+                "symbol is both section and semantic boundary: "
+                + ", ".join(sorted(duplicate_names))
+            )
+
+        overlap = boundary_names.union(semantic_names).intersection(self.aliases)
         if overlap:
             raise LinkerContractError(
                 "symbol is both alias and boundary: "
@@ -131,7 +161,14 @@ class LinkerContract:
             )
             for item in raw.get("boundaries", ())
         )
-        return cls(aliases, groups, boundaries)
+        semantic_boundaries = tuple(
+            SemanticBoundary(
+                symbol=str(item["symbol"]),
+                point=str(item["point"]),
+            )
+            for item in raw.get("semantic_boundaries", ())
+        )
+        return cls(aliases, groups, boundaries, semantic_boundaries)
 
     @classmethod
     def load(cls, path: str | Path) -> "LinkerContract":
@@ -170,4 +207,8 @@ class LinkerContract:
         }
 
     def defined_symbols(self, sections: set[str]) -> set[str]:
-        return set(self.aliases).union(self.active_boundary_symbols(sections))
+        return (
+            set(self.aliases)
+            .union(self.active_boundary_symbols(sections))
+            .union(boundary.symbol for boundary in self.semantic_boundaries)
+        )
