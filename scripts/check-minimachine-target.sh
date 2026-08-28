@@ -111,3 +111,20 @@ rm -f "$out/kernel/bounds.bc"
 python3 "$root/scripts/legalize_bc.py" "$out/kernel" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/kernel-cluster-legalize.json"
 python3 "$root/scripts/abi_bc.py" "$out/kernel" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/kernel-cluster-abi.json"
 printf 'TARGET_KERNEL_CLUSTER_PASS path=kernel/\n'
+
+printf 'TARGET_MM_CLUSTER start path=mm/\n'
+mm_build_log="$build_root/mm-build.log"
+if ! make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR" CLANG_TARGET_FLAGS="$LLVM_CARRIER_TRIPLE"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     KCFLAGS="-save-temps=obj" mm/ >"$mm_build_log" 2>&1; then
+    printf 'TARGET_MM_CLUSTER_BUILD_FAIL log=%s\n' "$mm_build_log"
+    tail -n 200 "$mm_build_log"
+    exit 1
+fi
+printf 'TARGET_MM_CLUSTER_BUILD_PASS path=mm/\n'
+find "$out/mm" -name '*.bc' -type f -print0 | while IFS= read -r -d '' bc; do
+    case "$bc" in
+        */bounds.bc) rm -f "$bc" ;;
+    esac
+done
+python3 "$root/scripts/legalize_bc.py" "$out/mm" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/mm-cluster-legalize.json"
+python3 "$root/scripts/abi_bc.py" "$out/mm" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/mm-cluster-abi.json"
+printf 'TARGET_MM_CLUSTER_PASS path=mm/\n'
