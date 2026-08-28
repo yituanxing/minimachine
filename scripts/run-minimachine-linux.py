@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 
 from src.minimachine import muir
 from src.minimachine.abi import expand_function
-from src.minimachine.image import install_module_image, parse_module_image
+from src.minimachine.image import ImageError, install_module_image, parse_module_image
 from src.minimachine.legalize import legalize_module
 from src.minimachine.linker import LinkerContract
 from src.minimachine.lower_p3 import lower_function
@@ -144,12 +144,16 @@ def main() -> int:
         )
         return 1
 
-    install_module_image(
-        program,
-        image,
-        symbol_aliases=dict(linker_contract.aliases),
-        linker_contract=linker_contract,
-    )
+    try:
+        install_module_image(
+            program,
+            image,
+            symbol_aliases=dict(linker_contract.aliases),
+            linker_contract=linker_contract,
+        )
+    except (ImageError, VMError, ValueError) as exc:
+        print(f"BOOT_EXEC_BLOCKED stage=image error={exc}")
+        return 1
 
     if args.entry not in program.functions:
         print(f"BOOT_EXEC_BLOCKED stage=entry missing={args.entry}")
