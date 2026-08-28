@@ -570,10 +570,7 @@ class RuntimeTests(unittest.TestCase):
 
             define i64 @inline_sched_class_checks() {
             entry:
-              br i1 icmp eq (
-                ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1),
-                ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1)
-              ), label %ok, label %bad
+              br i1 icmp eq (ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1), ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1)), label %ok, label %bad
 
             ok:
               br label %join
@@ -582,12 +579,7 @@ class RuntimeTests(unittest.TestCase):
               br label %join
 
             join:
-              %same = phi i1 [
-                icmp eq (
-                  ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1),
-                  ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1)
-                ), %ok
-              ], [ false, %bad ]
+              %same = phi i1 [ icmp eq (ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1), ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1)), %ok ], [ false, %bad ]
               %result = zext i1 %same to i64
               ret i64 %result
             }
