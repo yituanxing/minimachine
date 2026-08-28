@@ -236,6 +236,34 @@ def probe_linux_memory_helpers(vm) -> None:
         )
         return result
 
+    memblock = vm.program.symbol_addresses.get("memblock")
+    if memblock is not None:
+        regions = vm.memory.read(memblock + 40, 64)
+        run("memblock_get_region_node", (regions,))
+        run("numa_valid_node", (0,))
+
+        index = vm.alloc_bytes(8, align=8)
+        direct_start = vm.alloc_bytes(8, align=8)
+        direct_end = vm.alloc_bytes(8, align=8)
+        direct_nid = vm.alloc_bytes(8, align=8)
+        vm.memory.write(index, 32, 0xFFFFFFFF)
+        vm.memory.write(direct_start, 64, 0)
+        vm.memory.write(direct_end, 64, 0)
+        vm.memory.write(direct_nid, 32, 0xFFFFFFFF)
+        run(
+            "__next_mem_pfn_range",
+            (index, 0, direct_start, direct_end, direct_nid),
+            result_count=0,
+        )
+        print(
+            "BOOT_EXEC_PROBE_NEXT_PFN "
+            f"index={vm.memory.read(index, 32)} "
+            f"start={vm.memory.read(direct_start, 64)} "
+            f"end={vm.memory.read(direct_end, 64)} "
+            f"nid={vm.memory.read(direct_nid, 32)}",
+            flush=True,
+        )
+
     start = vm.alloc_bytes(8, align=8)
     end = vm.alloc_bytes(8, align=8)
     run("get_pfn_range_for_nid", (0, start, end), result_count=0)
