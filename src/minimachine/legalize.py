@@ -1161,7 +1161,7 @@ def _parallel_copies(copies, temp_index: list[int]):
 def _typed_aggregate_operand(text: str) -> tuple[str, muir.Value]:
     raw = text.strip()
     m = re.search(
-        r"(%[-A-Za-z$._0-9]+|@[-A-Za-z$._0-9]+|zeroinitializer|poison|undef)$",
+        r"(%[-A-Za-z$._0-9]+|@[-A-Za-z$._0-9]+|-?[0-9]+|true|false|null|zeroinitializer|poison|undef)$",
         raw,
     )
     if not m:
