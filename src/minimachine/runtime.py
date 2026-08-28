@@ -551,6 +551,13 @@ def system_callback(op: str):
             return vm.vector_state[4]
         return vector_length
 
+    if op == "thread_pointer":
+        def thread_pointer(vm: VM, args: tuple[int, ...]):
+            if args:
+                raise VMError("thread_pointer expects no arguments")
+            return vm.system_state.get("thread_pointer", 0)
+        return thread_pointer
+
     if op in {"fence", "icache_sync"} or op.startswith("tlb_flush_"):
         def ordering(vm: VM, args: tuple[int, ...]):
             # The reference VM is single-threaded and executes memory accesses
