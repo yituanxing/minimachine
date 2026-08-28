@@ -149,6 +149,19 @@ def _caller_frame(vm: VM, depth: int) -> int:
 
 
 def helper_callback(symbol: str):
+    if symbol == "__mm_alloca":
+        def alloca(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError("__mm_alloca expects element_size,count,align")
+            element_size, count, align = args
+            if align == 0 or (align & (align - 1)):
+                raise VMError(f"invalid alloca alignment: {align}")
+            if count > MASK64 // max(1, element_size):
+                raise VMError("alloca size overflow")
+            return vm.alloc_bytes(element_size * count, align=align)
+
+        return alloca
+
     m = re.fullmatch(
         r"__mm_(and|or|xor|shl|lshr|ashr|mul|udiv|sdiv|urem|srem)_(\d+)",
         symbol,
