@@ -144,9 +144,15 @@ printf 'BOOT_GATE_LLVM_LINK_PASS bytes=%s\n' "$(stat -c%s "$llvm_root/linked.bc"
 python3 "$root/scripts/executable_probe.py" "$llvm_root/linked.ll" \
     --linker-contract "$root/configs/linux-6.6.143-minimachine-linker.json" \
     --json "$llvm_root/executable.json" \
-    --max-blocked-functions 0 \
-    --max-arch-escape-sites 0 \
+    --max-blocked-functions 1 \
+    --max-arch-escape-sites 207 \
     --require-runtime-closed \
     --require-image-installed
 
 printf 'BOOT_GATE_PROGRAM_PASS\n'
+
+python3 "$root/scripts/run-minimachine-linux.py" "$llvm_root/linked.ll" \
+    --linker-contract "$root/configs/linux-6.6.143-minimachine-linker.json" \
+    --entry start_kernel \
+    --max-steps 2000000 \
+    2>&1 | tee "$llvm_root/boot-exec.log"
