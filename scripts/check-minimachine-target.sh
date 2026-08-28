@@ -90,3 +90,9 @@ test -s "$first_bc"
 python3 "$root/scripts/legalize_bc.py" "$first_bc" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/init-main-legalize.json"
 python3 "$root/scripts/abi_bc.py" "$first_bc" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/init-main-abi.json"
 printf 'TARGET_FIRST_TU_PASS source=init/main.c bitcode=%s\n' "$first_bc"
+
+printf 'TARGET_INIT_CLUSTER start path=init/\n'
+make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR" CLANG_TARGET_FLAGS="$LLVM_CARRIER_TRIPLE"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     KCFLAGS="-save-temps=obj" init/
+python3 "$root/scripts/legalize_bc.py" "$out/init" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/init-cluster-legalize.json"
+python3 "$root/scripts/abi_bc.py" "$out/init" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/init-cluster-abi.json"
+printf 'TARGET_INIT_CLUSTER_PASS path=init/\n'
