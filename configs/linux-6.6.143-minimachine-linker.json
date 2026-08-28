@@ -4,6 +4,27 @@
   },
   "groups": [
     {
+      "name": "governor_thermal",
+      "sections": ["__governor_thermal_table"],
+      "align": 8
+    },
+    {
+      "name": "earlycon",
+      "sections": ["__earlycon_table"],
+      "align": 8
+    },
+    {
+      "name": "lsm_info",
+      "sections": [".lsm_info.init"],
+      "align": 8
+    },
+    {
+      "name": "early_lsm_info",
+      "sections": [".early_lsm_info.init"],
+      "align": 8,
+      "empty_after": "lsm_info"
+    },
+    {
       "name": "init_setup",
       "sections": [".init.setup"],
       "align": 16
@@ -64,11 +85,6 @@
       "align": 8
     },
     {
-      "name": "lsm_info",
-      "sections": [".lsm_info.init"],
-      "align": 8
-    },
-    {
       "name": "sched_classes",
       "sections": [
         "__stop_sched_class",
@@ -78,14 +94,20 @@
         "__idle_sched_class"
       ],
       "align": 32
-    },
-    {
-      "name": "governor_thermal",
-      "sections": ["__governor_thermal_table"],
-      "align": 8
     }
   ],
   "boundaries": [
+    {"symbol": "__governor_thermal_table", "group": "governor_thermal", "edge": "start"},
+    {"symbol": "__governor_thermal_table_end", "group": "governor_thermal", "edge": "end"},
+
+    {"symbol": "__earlycon_table", "group": "earlycon", "edge": "start"},
+    {"symbol": "__earlycon_table_end", "group": "earlycon", "edge": "end"},
+
+    {"symbol": "__start_lsm_info", "group": "lsm_info", "edge": "start"},
+    {"symbol": "__end_lsm_info", "group": "lsm_info", "edge": "end"},
+    {"symbol": "__start_early_lsm_info", "group": "early_lsm_info", "edge": "start"},
+    {"symbol": "__end_early_lsm_info", "group": "early_lsm_info", "edge": "end"},
+
     {"symbol": "__setup_start", "group": "init_setup", "edge": "start"},
     {"symbol": "__setup_end", "group": "init_setup", "edge": "end"},
 
@@ -104,13 +126,7 @@
     {"symbol": "__con_initcall_start", "group": "con_initcall", "edge": "start"},
     {"symbol": "__con_initcall_end", "group": "con_initcall", "edge": "end"},
 
-    {"symbol": "__start_lsm_info", "group": "lsm_info", "edge": "start"},
-    {"symbol": "__end_lsm_info", "group": "lsm_info", "edge": "end"},
-
     {"symbol": "__sched_class_highest", "group": "sched_classes", "edge": "start"},
-    {"symbol": "__sched_class_lowest", "group": "sched_classes", "edge": "end"},
-
-    {"symbol": "__governor_thermal_table", "group": "governor_thermal", "edge": "start"},
-    {"symbol": "__governor_thermal_table_end", "group": "governor_thermal", "edge": "end"}
+    {"symbol": "__sched_class_lowest", "group": "sched_classes", "edge": "end"}
   ]
 }
