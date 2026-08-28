@@ -200,6 +200,93 @@ def helper_callback(symbol: str):
 
         return bswap
 
+    m = re.fullmatch(r"__mm_llvm_(fshl|fshr)_i(8|16|32|64)", symbol)
+    if m:
+        direction, bits_text = m.groups()
+        bits = int(bits_text)
+        mask = _mask(bits)
+
+        def funnel(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError(f"{symbol} expects a,b,shift")
+            a, b, shift = args
+            a &= mask
+            b &= mask
+            amount = shift % bits
+            if amount == 0:
+                return a if direction == "fshl" else b
+            if direction == "fshl":
+                return ((a << amount) | (b >> (bits - amount))) & mask
+            return ((a << (bits - amount)) | (b >> amount)) & mask
+
+        return funnel
+
+    m = re.fullmatch(r"__mm_llvm_(cttz|ctlz|ctpop)_i(8|16|32|64)", symbol)
+    if m:
+        op, bits_text = m.groups()
+        bits = int(bits_text)
+        mask = _mask(bits)
+
+        def bitcount(vm: VM, args: tuple[int, ...]):
+            if op == "ctpop":
+                if len(args) != 1:
+                    raise VMError(f"{symbol} expects one argument")
+                return (args[0] & mask).bit_count()
+
+            if len(args) not in {1, 2}:
+                raise VMError(f"{symbol} expects value[,zero_is_poison]")
+            value = args[0] & mask
+            zero_is_poison = bool(args[1]) if len(args) == 2 else False
+            if value == 0:
+                if zero_is_poison:
+                    raise VMError(f"{symbol} reached LLVM poison zero input")
+                return bits
+            if op == "cttz":
+                return (value & -value).bit_length() - 1
+            return bits - value.bit_length()
+
+        return bitcount
+
+    m = re.fullmatch(r"__mm_(load|store)_i(\d+)", symbol)
+    if m:
+        kind, bits_text = m.groups()
+        bits = int(bits_text)
+        if bits <= 64:
+            size = (bits + 7) // 8
+            mask = _mask(bits)
+
+            if kind == "load":
+                def odd_load(vm: VM, args: tuple[int, ...]):
+                    if len(args) != 1:
+                        raise VMError(f"{symbol} expects address")
+                    address = args[0]
+                    value = 0
+                    for i in range(size):
+                        value |= vm.memory.read(address + i, 8) << (8 * i)
+                    return value & mask
+                return odd_load
+
+            def odd_store(vm: VM, args: tuple[int, ...]):
+                if len(args) != 2:
+                    raise VMError(f"{symbol} expects address,value")
+                address, value = args
+                value &= mask
+                for i in range(size):
+                    vm.memory.write(
+                        address + i,
+                        8,
+                        (value >> (8 * i)) & 0xFF,
+                    )
+                return None
+            return odd_store
+
+    if symbol.startswith("__mm_llvm_prefetch_"):
+        def prefetch(vm: VM, args: tuple[int, ...]):
+            # LLVM prefetch has no observable program semantics; the reference
+            # VM deliberately models it as a no-op performance hint.
+            return None
+        return prefetch
+
     m = re.fullmatch(r"__mm_llvm_(u|s)(min|max)_i(8|16|32|64)", symbol)
     if m:
         sign, direction, bits_text = m.groups()
