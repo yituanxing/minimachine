@@ -29,7 +29,7 @@ _LABEL_RE = re.compile(r"^([-A-Za-z$._0-9]+):(?:\s*;.*)?$")
 _DEFINE_RE = re.compile(r"^define\b.*@([-A-Za-z$._0-9]+)\s*\((.*)\).*\{\s*$")
 _OPCODE_RE = re.compile(
     r"^(?:(?:tail|musttail|notail)\s+)?"
-    r"(callbr|call|ret|br|indirectbr|unreachable|"
+    r"(callbr|call|ret|br|switch|indirectbr|unreachable|"
     r"add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|"
     r"alloca|load|store|getelementptr|trunc|zext|sext|ptrtoint|inttoptr|"
     r"bitcast|addrspacecast|icmp|phi|select|freeze|extractvalue|insertvalue)\b"
@@ -86,6 +86,23 @@ def parse_module(text: str) -> list[TextFunction]:
             prev = block.instructions[-1]
             if prev.opcode == "callbr":
                 block.instructions[-1] = TextInst(prev.result, prev.opcode, prev.text + " " + line)
+                continue
+
+        # switch is printed as one logical instruction over multiple lines:
+        #   switch i32 %x, label %default [
+        #     i32 0, label %zero
+        #   ]
+        # Keep all case rows attached to the terminator.
+        if block is not None and block.instructions:
+            prev = block.instructions[-1]
+            if (
+                prev.opcode == "switch"
+                and "[" in prev.text
+                and not prev.text.rstrip().endswith("]")
+            ):
+                block.instructions[-1] = TextInst(
+                    prev.result, prev.opcode, prev.text + " " + line
+                )
                 continue
 
         lm = _LABEL_RE.match(line)
