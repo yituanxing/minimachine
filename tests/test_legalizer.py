@@ -122,6 +122,28 @@ class LegalizerTests(unittest.TestCase):
         self.assertEqual(stats.lowered_system_tlb, 1)
         self.assertEqual(stats.lowered_system_wait, 1)
 
+    def test_simple_amo_maps_to_atomic_system_contract(self):
+        fn, stats = self.lower_one(
+            """
+            define i32 @atomic_add(ptr %p) {
+            entry:
+              %old = call i32 asm sideeffect "amoadd.w.aqrl $1, $2, $0", "=*A,=r,r,*A,~{memory}"(ptr elementtype(i32) %p, i32 1, ptr elementtype(i32) %p)
+              ret i32 %old
+            }
+            """
+        )
+        sysops = [
+            i
+            for b in fn.blocks
+            for i in b.instructions
+            if isinstance(i, muir.Sys)
+        ]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(sysops[0].op, "atomic_add_i32_acq_rel")
+        self.assertEqual(sysops[0].args, (muir.Slot("p"), muir.Imm(1)))
+        self.assertEqual(sysops[0].result, muir.Slot("old"))
+        self.assertEqual(stats.lowered_system_atomic, 1)
+
     def test_bitwise_routes_to_explicit_helper(self):
         fn, stats = self.lower_one(
             """
