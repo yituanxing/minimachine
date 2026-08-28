@@ -65,6 +65,11 @@ def verify_p3(function: p3.Function) -> None:
         for inst in block.instructions:
             if not isinstance(inst, (p3.Mov, p3.Sub, p3.Br)):
                 raise VerifyError(f"non-P3 instruction survived: {type(inst).__name__}")
+            if isinstance(inst, p3.Mov):
+                if inst.src_bits is not None and not (1 <= inst.src_bits <= 64):
+                    raise VerifyError(f"invalid MOV source width: {inst.src_bits}")
+                if inst.extend is not None and inst.extend not in {"zext", "sext", "trunc"}:
+                    raise VerifyError(f"invalid MOV extension mode: {inst.extend}")
             if isinstance(inst, p3.Br):
                 _check_target(inst.true_target, labels)
                 _check_target(inst.false_target, labels)
