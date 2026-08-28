@@ -144,6 +144,7 @@ def main() -> int:
             abi_stats = {
                 "calls": 0,
                 "helpers": 0,
+                "system_ops": 0,
                 "returns": 0,
                 "continuation_blocks": 0,
                 "argument_loads": 0,
@@ -215,6 +216,7 @@ def main() -> int:
         "functions": 0,
         "calls": 0,
         "helpers": 0,
+        "system_ops": 0,
         "returns": 0,
         "continuation_blocks": 0,
         "argument_loads": 0,
@@ -240,7 +242,7 @@ def main() -> int:
             if rec["status"] == "PASS":
                 pass_count += 1
                 totals["functions"] += rec["functions"]
-                for key in ("calls", "helpers", "returns", "continuation_blocks", "argument_loads"):
+                for key in ("calls", "helpers", "system_ops", "returns", "continuation_blocks", "argument_loads"):
                     totals[key] += rec["abi"][key]
                 for key in (
                     "p3_function_pass",
@@ -282,6 +284,7 @@ def main() -> int:
         f"functions={totals['functions']} "
         f"calls={totals['calls']} "
         f"helpers={totals['helpers']} "
+        f"system_ops={totals['system_ops']} "
         f"returns={totals['returns']} "
         f"p3_function_pass={totals['p3_function_pass']} "
         f"p3_function_skip_escape={totals['p3_function_skip_escape']} "
