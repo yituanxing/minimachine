@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: minimachine-linux-target-gate
+  group: minimachine-linux-target-gate-v2
   cancel-in-progress: true
 
 jobs:
@@ -53,9 +53,15 @@ jobs:
           path: .cache/minimachine/source/linux-6.6.143.tar.xz
           key: minimachine-linux-source-6.6.143-dace1f8dc9c0dbf5
 
-      - name: Upload target config
+      - name: Upload target evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: minimachine-linux-target-${{ github.run_id }}
-          path: build/linux-6.6.143-minimachine-target/kconfig/.config
+          path: |
+            build/linux-6.6.143-minimachine-target/kconfig/.config
+            build/linux-6.6.143-minimachine-target/kernel-build.log
+            build/linux-6.6.143-minimachine-target/*-legalize.json
+            build/linux-6.6.143-minimachine-target/*-abi.json
+          if-no-files-found: ignore
           retention-days: 14
