@@ -700,7 +700,7 @@ def install_module_image(
         object_addresses[obj.name] = address
 
     if linker_contract is not None and linker_contract.semantic_boundaries:
-        code_addresses = tuple(program.code_block.values())
+        code_addresses = tuple(program.code_block.keys())
         code_start = min(code_addresses) if code_addresses else program.halt_code
         code_end = (
             max(code_addresses) + 8

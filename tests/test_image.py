@@ -1,5 +1,6 @@
 import unittest
 
+from src.minimachine import muir, p3
 from src.minimachine.image import (
     ImageObject,
     ModuleImage,
@@ -203,14 +204,46 @@ class ImageTests(unittest.TestCase):
             groups=(),
             boundaries=(),
             semantic_boundaries=(
+                SemanticBoundary("_stext", "code_start"),
+                SemanticBoundary("_etext", "code_end"),
                 SemanticBoundary("_sdata", "data_start"),
                 SemanticBoundary("_end", "data_end"),
             ),
         )
 
-        program = Program()
+        program = Program(
+            [
+                p3.Function(
+                    "entry",
+                    [
+                        p3.Block(
+                            "entry",
+                            [
+                                p3.Br(
+                                    muir.Width.I8,
+                                    muir.Cond.EQ,
+                                    muir.Imm(0),
+                                    muir.Imm(0),
+                                    muir.Target(label="entry"),
+                                    muir.Target(label="entry"),
+                                ),
+                            ],
+                        ),
+                    ],
+                    set(),
+                ),
+            ]
+        )
         install_module_image(program, image, linker_contract=contract)
 
+        self.assertEqual(
+            program.symbol_addresses["_stext"],
+            min(program.code_block),
+        )
+        self.assertEqual(
+            program.symbol_addresses["_etext"],
+            max(program.code_block) + 8,
+        )
         self.assertEqual(
             program.symbol_addresses["_sdata"],
             program.symbol_addresses["payload"],
