@@ -381,6 +381,60 @@ def _parse_alias(name: str, rhs: str) -> ImageAlias:
     return ImageAlias(name, target)
 
 
+def _logical_module_records(text: str):
+    """Yield top-level LLVM module records, preserving multiline globals.
+
+    llvm-dis may emit long global initializers (especially cstrings and
+    aggregate constants) across physical lines. Split only when not inside a
+    quoted string or nested delimiter.
+    """
+    buf: list[str] = []
+    depth = 0
+    in_string = False
+    escape = False
+
+    def feed(line: str) -> None:
+        nonlocal depth, in_string, escape
+        for ch in line:
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch in "([{<":
+                depth += 1
+            elif ch in ")]}>":
+                depth = max(0, depth - 1)
+
+    for raw in text.splitlines():
+        if not buf:
+            stripped = raw.lstrip()
+            # Only aggregate top-level records we care about. Function bodies
+            # and metadata remain one physical line at a time.
+            if not (
+                stripped.startswith("@")
+                or stripped.startswith("declare ")
+            ):
+                yield raw
+                continue
+
+        buf.append(raw)
+        feed(raw)
+
+        if not in_string and depth == 0:
+            yield "\n".join(buf)
+            buf.clear()
+
+    if buf:
+        yield "\n".join(buf)
+
+
 def parse_module_image(text: str) -> ModuleImage:
     layout = DataLayout.from_module(text)
     objects: list[ImageObject] = []
@@ -390,7 +444,7 @@ def parse_module_image(text: str) -> ModuleImage:
     skipped: list[str] = []
     stats: dict[str, int] = {}
 
-    for raw_line in text.splitlines():
+    for raw_line in _logical_module_records(text):
         line = raw_line.strip()
         if not line:
             continue
