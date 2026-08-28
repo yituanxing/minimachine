@@ -102,14 +102,16 @@ class AbiTests(unittest.TestCase):
         self.assertFalse(
             any(isinstance(i, muir.Sys) for b in expanded.blocks for i in b.instructions)
         )
-        external_targets = [
-            i.true_target.symbol
+        descriptor_loads = [
+            i
             for b in expanded.blocks
             for i in b.instructions
-            if isinstance(i, muir.Br)
-            and i.true_target.is_external()
+            if isinstance(i, muir.Mov)
+            and isinstance(i.src, muir.Mem)
+            and isinstance(i.src.address.base, muir.Symbol)
+            and i.src.address.base.name == "__mm_sys_fence"
         ]
-        self.assertIn("__mm_sys_fence", external_targets)
+        self.assertGreaterEqual(len(descriptor_loads), 2)
         verify_p3(lower_function(expanded))
 
     def test_recursive_call_needs_no_special_case(self):
