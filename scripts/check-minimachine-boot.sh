@@ -60,6 +60,32 @@ common_make=(
 
 printf 'BOOT_GATE configure ARCH=%s LLVM=%s\n' "$ARCH" "$LLVM_MAJOR"
 "${common_make[@]}" "$KCONFIG_TARGET"
+
+# Boot-first configuration: keep only the generic kernel surface needed to
+# reach start_kernel and early init.  Full corpus/target gates remain the
+# completeness proof and are intentionally not weakened by this focused gate.
+"$src/scripts/config" --file "$out/.config" \
+    --disable MODULES \
+    --disable NET \
+    --disable BLOCK \
+    --disable PCI \
+    --disable USB_SUPPORT \
+    --disable USB \
+    --disable SOUND \
+    --disable MEDIA_SUPPORT \
+    --disable DRM \
+    --disable INPUT \
+    --disable VT \
+    --disable WIRELESS \
+    --disable WLAN \
+    --disable VIRTUALIZATION \
+    --disable BPF_SYSCALL \
+    --disable CGROUPS \
+    --disable NAMESPACES \
+    --disable PROFILING \
+    --disable KPROBES \
+    --disable FTRACE
+
 "${common_make[@]}" olddefconfig
 
 config="$out/.config"
