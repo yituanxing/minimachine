@@ -132,71 +132,66 @@ def main() -> int:
     jobs = args.jobs or max(1, os.cpu_count() or 1)
 
     def _global_shape_counts(text: str) -> Counter[str]:
-    counts: Counter[str] = Counter()
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line.startswith("@") or " = " not in line:
-            continue
+        counts: Counter[str] = Counter()
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line.startswith("@") or " = " not in line:
+                continue
 
-        lhs, rhs = line.split(" = ", 1)
-        counts["symbols"] += 1
+            lhs, rhs = line.split(" = ", 1)
+            counts["symbols"] += 1
 
-        if re.search(r"\balias\b", rhs):
-            counts["alias"] += 1
-            continue
-        if re.search(r"\bifunc\b", rhs):
-            counts["ifunc"] += 1
-            continue
+            if re.search(r"\balias\b", rhs):
+                counts["alias"] += 1
+                continue
+            if re.search(r"\bifunc\b", rhs):
+                counts["ifunc"] += 1
+                continue
 
-        gm = re.search(r"\b(global|constant)\b", rhs)
-        if not gm:
-            counts["other_symbol"] += 1
-            continue
+            gm = re.search(r"\b(global|constant)\b", rhs)
+            if not gm:
+                counts["other_symbol"] += 1
+                continue
 
-        kind = gm.group(1)
-        counts[kind] += 1
-        tail = rhs[gm.end():].strip()
+            kind = gm.group(1)
+            counts[kind] += 1
+            tail = rhs[gm.end():].strip()
 
-        if tail.startswith(("external ", "extern_weak ")):
-            counts[f"{kind}:external"] += 1
-            continue
+            if tail.startswith(("external ", "extern_weak ")):
+                counts[f"{kind}:external"] += 1
+                continue
 
-        # Split the leading type from the initializer only well enough to
-        # classify the initializer shape. Exact parsing belongs in the image
-        # linker, not in this census.
-        if "zeroinitializer" in tail:
-            counts[f"{kind}:zeroinitializer"] += 1
-        elif re.search(r'\bc"', tail):
-            counts[f"{kind}:cstring"] += 1
-        elif "getelementptr" in tail:
-            counts[f"{kind}:gep_reloc"] += 1
-        elif "bitcast" in tail or "addrspacecast" in tail:
-            counts[f"{kind}:cast_reloc"] += 1
-        elif "blockaddress" in tail:
-            counts[f"{kind}:blockaddress"] += 1
-        elif re.search(r"@\w|@[-A-Za-z$._0-9]+", tail):
-            counts[f"{kind}:symbol_reloc"] += 1
-        elif re.search(r"\[[^\]]*\]", tail):
-            counts[f"{kind}:array"] += 1
-        elif "<{" in tail or re.search(r"\{.*\}", tail):
-            counts[f"{kind}:struct"] += 1
-        elif re.search(r"\b(?:i\d+|ptr|float|double|half|bfloat)\b", tail):
-            counts[f"{kind}:scalar"] += 1
-        else:
-            counts[f"{kind}:other_initializer"] += 1
-    return counts
+            if "zeroinitializer" in tail:
+                counts[f"{kind}:zeroinitializer"] += 1
+            elif re.search(r'\bc"', tail):
+                counts[f"{kind}:cstring"] += 1
+            elif "getelementptr" in tail:
+                counts[f"{kind}:gep_reloc"] += 1
+            elif "bitcast" in tail or "addrspacecast" in tail:
+                counts[f"{kind}:cast_reloc"] += 1
+            elif "blockaddress" in tail:
+                counts[f"{kind}:blockaddress"] += 1
+            elif re.search(r"@\w|@[-A-Za-z$._0-9]+", tail):
+                counts[f"{kind}:symbol_reloc"] += 1
+            elif re.search(r"\[[^\]]*\]", tail):
+                counts[f"{kind}:array"] += 1
+            elif "<{" in tail or re.search(r"\{.*\}", tail):
+                counts[f"{kind}:struct"] += 1
+            elif re.search(r"\b(?:i\d+|ptr|float|double|half|bfloat)\b", tail):
+                counts[f"{kind}:scalar"] += 1
+            else:
+                counts[f"{kind}:other_initializer"] += 1
+        return counts
 
+    def _declaration_counts(text: str) -> Counter[str]:
+        counts: Counter[str] = Counter()
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("declare "):
+                counts["function_declarations"] += 1
+        return counts
 
-def _declaration_counts(text: str) -> Counter[str]:
-    counts: Counter[str] = Counter()
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line.startswith("declare "):
-            counts["function_declarations"] += 1
-    return counts
-
-
-def one(path: Path):
+    def one(path: Path):
         rel = path.relative_to(args.input).as_posix() if args.input.is_dir() else path.name
         try:
             proc = subprocess.run(
