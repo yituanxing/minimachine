@@ -83,6 +83,35 @@ class AbiTests(unittest.TestCase):
         )
         verify_p3(lower_function(expanded))
 
+    def test_system_op_uses_external_service_abi(self):
+        fn = muir.Function(
+            "sys_user",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Sys("fence", (muir.Imm(3), muir.Imm(12)), None),
+                        muir.Ret(None),
+                    ],
+                )
+            ],
+            set(),
+        )
+        expanded, stats = expand_function(fn)
+        self.assertEqual(stats.system_ops, 1)
+        self.assertFalse(
+            any(isinstance(i, muir.Sys) for b in expanded.blocks for i in b.instructions)
+        )
+        external_targets = [
+            i.true_target.symbol
+            for b in expanded.blocks
+            for i in b.instructions
+            if isinstance(i, muir.Br)
+            and i.true_target.is_external()
+        ]
+        self.assertIn("__mm_sys_fence", external_targets)
+        verify_p3(lower_function(expanded))
+
     def test_recursive_call_needs_no_special_case(self):
         n = muir.Slot("n")
         r = muir.Slot("r")
