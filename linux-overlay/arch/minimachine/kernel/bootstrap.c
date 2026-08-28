@@ -34,7 +34,31 @@ unsigned long memory_start;
 unsigned long memory_end = MINIMACHINE_BOOT_RAM_SIZE;
 void *empty_zero_page;
 
+/*
+ * asm-generic/vmlinux.lds.h defines init_stack at the beginning of the
+ * .data..init_task region.  Materialize the full THREAD_SIZE reservation in
+ * LLVM as well so the MiniMachine data image cannot overlap the initial stack.
+ */
+unsigned char minimachine_init_stack_storage[THREAD_SIZE]
+	__section(".data..init_task") __aligned(THREAD_SIZE) __used;
+
 struct task_struct *minimachine_current_task = &init_task;
+
+static const char setup_arch_entered[] =
+	"Linux/MiniMachine: setup_arch entered\n";
+static const char setup_arch_ready[] =
+	"Linux/MiniMachine: setup_arch ready\n";
+
+static __always_inline void minimachine_boot_console(const char *text,
+						      unsigned long len)
+{
+	/*
+	 * The RISC-V spelling is only the Clang transport syntax.  MiniMachine's
+	 * legalizer converts this to the architecture-neutral SYS ecall contract;
+	 * the P3 VM supplies the host console service.
+	 */
+	asm volatile("ecall" : : "r"(1UL), "r"(text), "r"(len) : "memory");
+}
 
 static unsigned long minimachine_irq_state;
 
@@ -104,6 +128,9 @@ void __init mem_init(void)
 
 void __init setup_arch(char **cmdline_p)
 {
+	minimachine_boot_console(setup_arch_entered,
+				 sizeof(setup_arch_entered) - 1);
+
 	memory_start = PAGE_ALIGN((unsigned long)_end);
 
 	/*
@@ -118,6 +145,9 @@ void __init setup_arch(char **cmdline_p)
 	parse_early_param();
 
 	paging_init();
+
+	minimachine_boot_console(setup_arch_ready,
+				 sizeof(setup_arch_ready) - 1);
 }
 
 void __init init_IRQ(void)
