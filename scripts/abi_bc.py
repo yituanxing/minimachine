@@ -20,6 +20,7 @@ from src.minimachine.abi import AbiError, expand_function
 from src.minimachine.legalize import LegalizeError, legalize_module
 from src.minimachine.llvm_text import LLVMTextError
 from src.minimachine.lower_p3 import MachineLoweringError, lower_function
+from src.minimachine.runtime import helper_callback, system_callback
 from src.minimachine.verify import VerifyError, verify_muir, verify_p3
 
 
@@ -319,6 +320,67 @@ def main() -> int:
         f"RUNTIME_SURFACE helper_kinds={len(totals['helper_symbols'])} "
         f"system_op_kinds={len(totals['system_ops_used'])}"
     )
+    resolved_helpers = {
+        key for key in totals["helper_symbols"]
+        if helper_callback(key) is not None
+    }
+    unresolved_helpers = {
+        key for key in totals["helper_symbols"]
+        if key not in resolved_helpers
+    }
+    resolved_systems = {
+        key for key in totals["system_ops_used"]
+        if system_callback(key) is not None
+    }
+    unresolved_systems = {
+        key for key in totals["system_ops_used"]
+        if key not in resolved_systems
+    }
+    helper_sites_total = sum(totals["helper_symbols"].values())
+    helper_sites_resolved = sum(
+        value for key, value in totals["helper_symbols"].items()
+        if key in resolved_helpers
+    )
+    system_sites_total = sum(totals["system_ops_used"].values())
+    system_sites_resolved = sum(
+        value for key, value in totals["system_ops_used"].items()
+        if key in resolved_systems
+    )
+    totals["runtime_coverage"] = {
+        "helper_kinds_resolved": len(resolved_helpers),
+        "helper_kinds_total": len(totals["helper_symbols"]),
+        "helper_sites_resolved": helper_sites_resolved,
+        "helper_sites_total": helper_sites_total,
+        "system_kinds_resolved": len(resolved_systems),
+        "system_kinds_total": len(totals["system_ops_used"]),
+        "system_sites_resolved": system_sites_resolved,
+        "system_sites_total": system_sites_total,
+        "unresolved_helpers": sorted(unresolved_helpers),
+        "unresolved_systems": sorted(unresolved_systems),
+    }
+    print(
+        "RUNTIME_EXECUTABLE "
+        f"helper_kinds={len(resolved_helpers)}/{len(totals['helper_symbols'])} "
+        f"helper_sites={helper_sites_resolved}/{helper_sites_total} "
+        f"system_kinds={len(resolved_systems)}/{len(totals['system_ops_used'])} "
+        f"system_sites={system_sites_resolved}/{system_sites_total}"
+    )
+    for key, value in sorted(
+        (
+            (key, totals["helper_symbols"][key])
+            for key in unresolved_helpers
+        ),
+        key=lambda x: (-x[1], x[0]),
+    )[:40]:
+        print(f"UNRESOLVED_HELPER {value}x {key}")
+    for key, value in sorted(
+        (
+            (key, totals["system_ops_used"][key])
+            for key in unresolved_systems
+        ),
+        key=lambda x: (-x[1], x[0]),
+    )[:40]:
+        print(f"UNRESOLVED_SYS {value}x {key}")
     for key, value in sorted(totals["helper_symbols"].items(), key=lambda x: (-x[1], x[0]))[:40]:
         print(f"HELPER_KIND {value}x {key}")
     for key, value in sorted(totals["system_ops_used"].items(), key=lambda x: (-x[1], x[0]))[:40]:
