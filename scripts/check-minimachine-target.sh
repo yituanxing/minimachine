@@ -96,3 +96,9 @@ make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR" CLANG_TARGET_FLAGS="$LL
 python3 "$root/scripts/legalize_bc.py" "$out/init" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/init-cluster-legalize.json"
 python3 "$root/scripts/abi_bc.py" "$out/init" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/init-cluster-abi.json"
 printf 'TARGET_INIT_CLUSTER_PASS path=init/\n'
+
+printf 'TARGET_KERNEL_CLUSTER start path=kernel/\n'
+make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR" CLANG_TARGET_FLAGS="$LLVM_CARRIER_TRIPLE"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     KCFLAGS="-save-temps=obj" kernel/
+python3 "$root/scripts/legalize_bc.py" "$out/kernel" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/kernel-cluster-legalize.json"
+python3 "$root/scripts/abi_bc.py" "$out/kernel" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/kernel-cluster-abi.json"
+printf 'TARGET_KERNEL_CLUSTER_PASS path=kernel/\n'
