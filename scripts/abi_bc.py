@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from collections import Counter
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -37,16 +39,37 @@ def files_under(path: Path):
     return sorted(path.rglob("*.bc"))
 
 
-def _has_system_escape(fn: muir.Function) -> tuple[int, int]:
+def _asm_template(text: str) -> str:
+    m = re.search(r'\\basm\\b(?:\\s+\\w+)*\\s+"((?:\\\\.|[^"])*)"', text)
+    if not m:
+        return "<unparsed-asm>"
+    template = m.group(1)
+    template = template.replace(r"\\0A", ";").replace(r"\\09", " ")
+    template = re.sub(r"\\$\\{?\\d+(?::[^}]*)?\\}?", "$N", template)
+    template = re.sub(r"\\s+", " ", template).strip()
+    return template[:240]
+
+
+def _escape_key(inst: muir.ArchEscape) -> str:
+    if "asm" in inst.text:
+        return f"{inst.kind}|{_asm_template(inst.text)}"
+    return f"{inst.kind}|<control>"
+
+
+def _has_system_escape(fn: muir.Function) -> tuple[int, int, Counter[str], Counter[str]]:
     traps = 0
     arch = 0
+    kinds: Counter[str] = Counter()
+    groups: Counter[str] = Counter()
     for block in fn.blocks:
         for inst in block.instructions:
             if isinstance(inst, muir.Trap):
                 traps += 1
             elif isinstance(inst, muir.ArchEscape):
                 arch += 1
-    return traps, arch
+                kinds[inst.kind] += 1
+                groups[_escape_key(inst)] += 1
+    return traps, arch, kinds, groups
 
 
 def main() -> int:
@@ -81,6 +104,8 @@ def main() -> int:
             trap_sites = 0
             arch_sites = 0
             p3_instructions = 0
+            escape_kinds: Counter[str] = Counter()
+            escape_groups: Counter[str] = Counter()
 
             for fn in functions:
                 verify_muir(fn)
@@ -88,9 +113,11 @@ def main() -> int:
                 for key, value in stats.as_dict().items():
                     abi_stats[key] += value
 
-                traps, arch = _has_system_escape(expanded)
+                traps, arch, kinds, groups = _has_system_escape(expanded)
                 trap_sites += traps
                 arch_sites += arch
+                escape_kinds.update(kinds)
+                escape_groups.update(groups)
 
                 if traps or arch:
                     p3_skip_escape += 1
@@ -112,6 +139,8 @@ def main() -> int:
                 "trap_sites": trap_sites,
                 "arch_escape_sites": arch_sites,
                 "p3_instructions": p3_instructions,
+                "escape_kinds": dict(escape_kinds),
+                "escape_groups": dict(escape_groups),
             }
         except (
             subprocess.CalledProcessError,
@@ -138,6 +167,8 @@ def main() -> int:
         "trap_sites": 0,
         "arch_escape_sites": 0,
         "p3_instructions": 0,
+        "escape_kinds": {},
+        "escape_groups": {},
     }
 
     print(f"ABI_START files={len(files)} jobs={jobs}")
@@ -161,6 +192,10 @@ def main() -> int:
                     "p3_instructions",
                 ):
                     totals[key] += rec[key]
+                for key, value in rec["escape_kinds"].items():
+                    totals["escape_kinds"][key] = totals["escape_kinds"].get(key, 0) + value
+                for key, value in rec["escape_groups"].items():
+                    totals["escape_groups"][key] = totals["escape_groups"].get(key, 0) + value
 
             if done % 25 == 0 or rec["status"] == "FAIL" or done == len(files):
                 tail = f" FAIL {rec['file']} :: {rec['error']}" if rec["status"] == "FAIL" else ""
@@ -190,8 +225,14 @@ def main() -> int:
         f"p3_function_skip_escape={totals['p3_function_skip_escape']} "
         f"trap_sites={totals['trap_sites']} "
         f"arch_escape_sites={totals['arch_escape_sites']} "
-        f"p3_instructions={totals['p3_instructions']}"
+        f"p3_instructions={totals['p3_instructions']} "
+        f"escape_groups={len(totals['escape_groups'])}"
     )
+    print("ESCAPE_KINDS " + " ".join(
+        f"{k}={v}" for k, v in sorted(totals["escape_kinds"].items(), key=lambda x: (-x[1], x[0]))
+    ))
+    for key, value in sorted(totals["escape_groups"].items(), key=lambda x: (-x[1], x[0]))[:30]:
+        print(f"ESCAPE_GROUP {value}x {key}")
 
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
