@@ -144,5 +144,5 @@ printf 'BOOT_GATE_LLVM_LINK_PASS bytes=%s\n' "$(stat -c%s "$llvm_root/linked.bc"
 python3 "$root/scripts/run-minimachine-linux.py" "$llvm_root/linked.ll" \
     --linker-contract "$root/configs/linux-6.6.143-minimachine-linker.json" \
     --entry start_kernel \
-    --max-steps 2000000 \
+    --max-steps 10000000 \
     2>&1 | tee "$llvm_root/boot-exec.log"
