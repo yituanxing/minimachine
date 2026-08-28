@@ -61,6 +61,7 @@ class LegalizeStats:
     lowered_faultable_atomic: int = 0
     lowered_read_sp: int = 0
     lowered_read_thread_pointer: int = 0
+    lowered_indirectbr: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -96,6 +97,7 @@ class LegalizeStats:
             "lowered_faultable_atomic": self.lowered_faultable_atomic,
             "lowered_read_sp": self.lowered_read_sp,
             "lowered_read_thread_pointer": self.lowered_read_thread_pointer,
+            "lowered_indirectbr": self.lowered_indirectbr,
         }
 
 
@@ -2323,23 +2325,71 @@ def legalize_function(
                     )
                     continue
 
-                if op in {"callbr", "indirectbr"}:
-                    if op == "callbr":
-                        cpu_feature_branch = _lower_cpu_feature_callbr(
-                            inst, layout, temp_counter, frame_slots
+                if op == "indirectbr":
+                    labels = _LABEL_USE_RE.findall(inst.text)
+                    if not labels:
+                        raise ValueError(
+                            f"indirectbr has no declared successor: {inst.text}"
                         )
-                        if cpu_feature_branch is not None:
-                            stats.lowered_cpu_feature_branch += 1
-                            out.extend(cpu_feature_branch)
-                            continue
 
-                        static_branch = _lower_jump_label_callbr(
-                            inst, layout, temp_counter, frame_slots
+                    body = inst.text[len("indirectbr") :].strip()
+                    parts = _split_top_commas(body)
+                    if not parts:
+                        raise ValueError(f"cannot parse indirectbr: {inst.text}")
+
+                    address_text = parts[0]
+                    block = re.search(
+                        r"blockaddress\s*\(\s*@([-A-Za-z$._0-9]+)\s*,\s*%([-A-Za-z$._0-9]+)\s*\)",
+                        address_text,
+                    )
+                    if block is not None:
+                        function_name, label = block.groups()
+                        if function_name != fn.name:
+                            raise ValueError(
+                                "indirectbr blockaddress must target current function"
+                            )
+                        target = muir.Target(label=label)
+                    else:
+                        address = _value(address_text)
+                        if not isinstance(address, muir.Slot):
+                            raise ValueError(
+                                "dynamic indirectbr address must be a local SSA value"
+                            )
+                        target = muir.Target(slot=address)
+
+                    # LLVM indirectbr is a register jump whose destination set
+                    # is CFG metadata.  P3 already has an indirect BR target,
+                    # so semantic descent only needs an unconditional indirect
+                    # branch; invalid destinations retain LLVM's UB contract.
+                    out.append(
+                        muir.Br(
+                            muir.Width.I8,
+                            muir.Cond.EQ,
+                            muir.Imm(0),
+                            muir.Imm(0),
+                            target,
+                            target,
                         )
-                        if static_branch is not None:
-                            stats.lowered_static_branch += 1
-                            out.extend(static_branch)
-                            continue
+                    )
+                    stats.lowered_indirectbr += 1
+                    continue
+
+                if op == "callbr":
+                    cpu_feature_branch = _lower_cpu_feature_callbr(
+                        inst, layout, temp_counter, frame_slots
+                    )
+                    if cpu_feature_branch is not None:
+                        stats.lowered_cpu_feature_branch += 1
+                        out.extend(cpu_feature_branch)
+                        continue
+
+                    static_branch = _lower_jump_label_callbr(
+                        inst, layout, temp_counter, frame_slots
+                    )
+                    if static_branch is not None:
+                        stats.lowered_static_branch += 1
+                        out.extend(static_branch)
+                        continue
 
                     labels = _LABEL_USE_RE.findall(inst.text)
                     if not labels:
