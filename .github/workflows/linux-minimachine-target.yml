@@ -7,6 +7,10 @@ on:
       - configs/linux-6.6.143-minimachine.env
       - linux-overlay/arch/minimachine/**
       - scripts/check-minimachine-target.sh
+      - scripts/legalize_bc.py
+      - scripts/abi_bc.py
+      - src/minimachine/**
+      - tests/**
       - .github/workflows/linux-minimachine-target.yml
   workflow_dispatch:
 
