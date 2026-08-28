@@ -62,6 +62,7 @@ class LegalizeStats:
     lowered_read_sp: int = 0
     lowered_read_thread_pointer: int = 0
     lowered_indirectbr: int = 0
+    lowered_undef_indirectbr: int = 0
     lowered_switch: int = 0
 
     def as_dict(self) -> dict[str, int]:
@@ -99,6 +100,7 @@ class LegalizeStats:
             "lowered_read_sp": self.lowered_read_sp,
             "lowered_read_thread_pointer": self.lowered_read_thread_pointer,
             "lowered_indirectbr": self.lowered_indirectbr,
+            "lowered_undef_indirectbr": self.lowered_undef_indirectbr,
             "lowered_switch": self.lowered_switch,
         }
 
@@ -2505,12 +2507,20 @@ def legalize_function(
                         target = muir.Target(label=label)
                     else:
                         address = _value(address_text)
-                        if not isinstance(address, muir.Slot):
+                        if isinstance(address, muir.Arbitrary) and address.kind == "undef":
+                            # LLVM undef may be refined independently at each
+                            # use. Choose one declared valid successor rather
+                            # than preserving an unconstrained pointer that
+                            # could also trigger LLVM UB.
+                            target = muir.Target(label=labels[0])
+                            stats.lowered_undef_indirectbr += 1
+                        elif isinstance(address, muir.Slot):
+                            target = muir.Target(slot=address)
+                        else:
                             raise ValueError(
                                 "dynamic indirectbr address must be a local SSA value: "
                                 + address_text
                             )
-                        target = muir.Target(slot=address)
 
                     # LLVM indirectbr is a register jump whose destination set
                     # is CFG metadata.  P3 already has an indirect BR target,
