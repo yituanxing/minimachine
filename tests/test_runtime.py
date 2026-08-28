@@ -563,6 +563,40 @@ class RuntimeTests(unittest.TestCase):
             (16,),
         )
 
+    def test_phi_inline_icmp_materializes_linker_symbol_difference(self):
+        llvm = """
+            @begin = external global i8
+            @end = external global i8
+
+            define i64 @phi_symbol_distance_check() {
+            entry:
+              br i1 true, label %yes, label %no
+
+            yes:
+              br label %join
+
+            no:
+              br label %join
+
+            join:
+              %same = phi i1 [ icmp sgt (i64 sub (i64 ptrtoint (ptr @end to i64), i64 ptrtoint (ptr @begin to i64)), i64 0), %yes ], [ false, %no ]
+              %result = zext i1 %same to i64
+              ret i64 %result
+            }
+        """
+        functions, _ = legalize_module(llvm)
+        program = executable(functions)
+        install_module_image(
+            program,
+            parse_module_image(llvm),
+            external_symbols={"begin": 0x12000, "end": 0x12080},
+        )
+
+        self.assertEqual(
+            program.new_vm().run_function("phi_symbol_distance_check"),
+            (1,),
+        )
+
     def test_inline_icmp_materializes_linker_symbol_difference(self):
         llvm = """
             @begin = external global i8
@@ -599,7 +633,7 @@ class RuntimeTests(unittest.TestCase):
 
             define i64 @inline_sched_class_checks() {
             entry:
-              br i1 icmp eq (ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1), ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1)), label %ok, label %bad
+              br i1 icmp eq (ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1), ptr getelementptr inbounds ([2 x %struct.sched_class], ptr @classes, i64 0, i64 1)), label %ok, label %bad, !prof !19
 
             ok:
               br label %join
