@@ -6,6 +6,8 @@ on:
     paths:
       - .github/workflows/linux-whole-image-probe.yml
       - scripts/duplicate_symbols.py
+      - scripts/image_probe.py
+      - src/minimachine/image.py
   workflow_dispatch:
 
 permissions:
@@ -66,6 +68,9 @@ jobs:
           llvm-dis-18 "$ROOT/linked.bc" -o "$ROOT/linked.ll"
           echo "WHOLE_IMAGE_FULL500 bytes=$(stat -c%s "$ROOT/linked.bc") functions=$(grep -c '^define ' "$ROOT/linked.ll") globals=$(grep -c '^@.* = ' "$ROOT/linked.ll") declarations=$(grep -c '^declare ' "$ROOT/linked.ll")"
 
+      - name: Probe full500 MiniMachine data image
+        run: python3 scripts/image_probe.py "$ROOT/linked.ll"
+
   full_all:
     needs: full500
     runs-on: ubuntu-24.04
@@ -121,6 +126,9 @@ jobs:
           opt-18 -passes=verify -disable-output "$ROOT/linked.bc"
           llvm-dis-18 "$ROOT/linked.bc" -o "$ROOT/linked.ll"
           echo "WHOLE_IMAGE_FULL_ALL bytes=$(stat -c%s "$ROOT/linked.bc") functions=$(grep -c '^define ' "$ROOT/linked.ll") globals=$(grep -c '^@.* = ' "$ROOT/linked.ll") declarations=$(grep -c '^declare ' "$ROOT/linked.ll")"
+
+      - name: Probe full-all MiniMachine data image
+        run: python3 scripts/image_probe.py "$ROOT/linked.ll"
 
       - name: Upload linked-module probe
         uses: actions/upload-artifact@v4
