@@ -78,6 +78,7 @@ jobs:
       - name: Probe full500 executable MiniMachine program
         run: |
           python3 scripts/executable_probe.py "$ROOT/linked.ll" \
+            --symbol-alias jiffies=jiffies_64 \
             --require-runtime-closed
 
   full_all:
@@ -142,8 +143,9 @@ jobs:
       - name: Probe full-all executable MiniMachine program
         run: |
           python3 scripts/executable_probe.py "$ROOT/linked.ll" \
-            --max-blocked-functions 95 \
-            --max-arch-escape-sites 165 \
+            --symbol-alias jiffies=jiffies_64 \
+            --max-blocked-functions 94 \
+            --max-arch-escape-sites 164 \
             --require-runtime-closed
 
       - name: Upload linked-module probe
