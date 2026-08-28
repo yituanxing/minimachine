@@ -62,6 +62,7 @@ class LegalizeStats:
     lowered_read_sp: int = 0
     lowered_read_thread_pointer: int = 0
     lowered_indirectbr: int = 0
+    lowered_switch: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -98,6 +99,7 @@ class LegalizeStats:
             "lowered_read_sp": self.lowered_read_sp,
             "lowered_read_thread_pointer": self.lowered_read_thread_pointer,
             "lowered_indirectbr": self.lowered_indirectbr,
+            "lowered_switch": self.lowered_switch,
         }
 
 
@@ -221,6 +223,38 @@ def _parse_icmp(inst: TextInst):
     bits = int(ty[1:])
     width = _width(bits) if bits in {1, 8, 16, 32, 64} else None
     return pred, bits, width, _value(lhs), _value(rhs)
+
+
+def _parse_switch(inst: TextInst):
+    text = re.sub(r"\s+", " ", inst.text.strip())
+    m = re.fullmatch(
+        r"switch\s+i(\d+)\s+(.+?),\s*label\s+%([-A-Za-z$._0-9]+)\s*\[(.*)\]",
+        text,
+    )
+    if not m:
+        raise ValueError(f"cannot parse switch: {inst.text}")
+
+    bits = int(m.group(1))
+    selector = _value(m.group(2))
+    default = m.group(3)
+    case_body = m.group(4).strip()
+    cases: list[tuple[int, str]] = []
+
+    if case_body:
+        case_re = re.compile(
+            rf"i{bits}\s+(-?[0-9]+)\s*,\s*label\s+%([-A-Za-z$._0-9]+)"
+        )
+        pos = 0
+        for cm in case_re.finditer(case_body):
+            between = case_body[pos:cm.start()].strip()
+            if between:
+                raise ValueError(f"cannot parse switch cases: {inst.text}")
+            cases.append((int(cm.group(1)), cm.group(2)))
+            pos = cm.end()
+        if case_body[pos:].strip():
+            raise ValueError(f"cannot parse switch cases: {inst.text}")
+
+    return bits, selector, default, cases
 
 
 def _use_counts(fn: TextFunction) -> Counter[str]:
@@ -1427,7 +1461,19 @@ def legalize_function(
     aggregate_results: dict[str, tuple[tuple[muir.Slot, muir.Width], ...]] = {}
     phis_by_target: dict[str, list[tuple[muir.Slot, muir.Value, str, muir.Width]]] = defaultdict(list)
     out_blocks: dict[str, muir.Block] = {}
+    extra_blocks_after: dict[str, list[str]] = defaultdict(list)
+    switch_edge_blocks: dict[tuple[str, str], list[str]] = defaultdict(list)
+    used_block_labels = {b.label for b in fn.blocks}
     temp_counter = [0]
+
+    def fresh_block_label(base: str) -> str:
+        label = base
+        index = 0
+        while label in used_block_labels:
+            index += 1
+            label = f"{base}_{index}"
+        used_block_labels.add(label)
+        return label
 
     # Pre-read PHIs so predecessor edge copies are known independently of
     # textual block order.
@@ -1731,6 +1777,110 @@ def legalize_function(
                         )
                     stats.temporary_helpers += 1
                     out.append(muir.Helper(f"__mm_icmp_{pred}_{bits}", (a, b), result))
+                    continue
+
+                if op == "switch":
+                    bits, selector, default_label, cases = _parse_switch(inst)
+                    if bits > 64:
+                        raise ValueError(
+                            f"switch selector wider than one MiniMachine slot: i{bits}"
+                        )
+                    width = _storage_width(bits)
+                    stem = _sanitize(block.label) or "entry"
+
+                    edge_specs = [(value, target) for value, target in cases]
+                    default_edge = fresh_block_label(
+                        f"__switch_{stem}_default_edge"
+                    )
+                    default_target = muir.Target(label=default_label)
+                    out_blocks[default_edge] = muir.Block(
+                        default_edge,
+                        [
+                            muir.Br(
+                                muir.Width.I8,
+                                muir.Cond.EQ,
+                                muir.Imm(0),
+                                muir.Imm(0),
+                                default_target,
+                                default_target,
+                            )
+                        ],
+                    )
+                    switch_edge_blocks[(block.label, default_label)].append(
+                        default_edge
+                    )
+
+                    case_edges: list[tuple[int, str, str]] = []
+                    for index, (value, target_label) in enumerate(edge_specs):
+                        edge_label = fresh_block_label(
+                            f"__switch_{stem}_case{index}_edge"
+                        )
+                        target = muir.Target(label=target_label)
+                        out_blocks[edge_label] = muir.Block(
+                            edge_label,
+                            [
+                                muir.Br(
+                                    muir.Width.I8,
+                                    muir.Cond.EQ,
+                                    muir.Imm(0),
+                                    muir.Imm(0),
+                                    target,
+                                    target,
+                                )
+                            ],
+                        )
+                        switch_edge_blocks[(block.label, target_label)].append(
+                            edge_label
+                        )
+                        case_edges.append((value, target_label, edge_label))
+
+                    compare_labels = [
+                        fresh_block_label(f"__switch_{stem}_cmp{index}")
+                        for index in range(1, len(case_edges))
+                    ]
+
+                    for index, (value, _target_label, edge_label) in enumerate(
+                        case_edges
+                    ):
+                        false_label = (
+                            compare_labels[index]
+                            if index < len(compare_labels)
+                            else default_edge
+                        )
+                        branch = muir.Br(
+                            width,
+                            muir.Cond.EQ,
+                            selector,
+                            muir.Imm(value),
+                            muir.Target(label=edge_label),
+                            muir.Target(label=false_label),
+                        )
+                        if index == 0:
+                            out.append(branch)
+                        else:
+                            compare_label = compare_labels[index - 1]
+                            out_blocks[compare_label] = muir.Block(
+                                compare_label, [branch]
+                            )
+
+                    if not case_edges:
+                        out.append(
+                            muir.Br(
+                                muir.Width.I8,
+                                muir.Cond.EQ,
+                                muir.Imm(0),
+                                muir.Imm(0),
+                                muir.Target(label=default_edge),
+                                muir.Target(label=default_edge),
+                            )
+                        )
+
+                    extra_blocks_after[block.label].extend(compare_labels)
+                    extra_blocks_after[block.label].extend(
+                        edge_label for _, _, edge_label in case_edges
+                    )
+                    extra_blocks_after[block.label].append(default_edge)
+                    stats.lowered_switch += 1
                     continue
 
                 if op == "br":
@@ -2420,7 +2570,12 @@ def legalize_function(
                 resolved_pred = "entry"
             if resolved_pred not in out_blocks:
                 raise LegalizeError(fn.name, target, "phi", f"unknown predecessor: {pred}")
-            copies_by_pred[resolved_pred].append((dst, src, width))
+            switch_edges = switch_edge_blocks.get((resolved_pred, target))
+            if switch_edges:
+                for edge_pred in switch_edges:
+                    copies_by_pred[edge_pred].append((dst, src, width))
+            else:
+                copies_by_pred[resolved_pred].append((dst, src, width))
 
     for pred, copies in copies_by_pred.items():
         block = out_blocks[pred]
@@ -2436,9 +2591,16 @@ def legalize_function(
         block.instructions[-1:-1] = moves
         stats.phi_edge_moves += len(moves)
 
+    ordered_blocks: list[muir.Block] = []
+    for text_block in fn.blocks:
+        ordered_blocks.append(out_blocks[text_block.label])
+        ordered_blocks.extend(
+            out_blocks[label] for label in extra_blocks_after.get(text_block.label, [])
+        )
+
     result_fn = muir.Function(
         fn.name,
-        [out_blocks[b.label] for b in fn.blocks],
+        ordered_blocks,
         frame_slots,
         tuple(arg[1:] if arg.startswith("%") else arg for arg in fn.args),
     )
