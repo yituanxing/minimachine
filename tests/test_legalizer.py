@@ -311,6 +311,64 @@ class LegalizerTests(unittest.TestCase):
         self.assertEqual(sysops[0].args, (muir.Slot("addr"),))
         self.assertEqual(stats.lowered_alternative_tlb, 1)
 
+    def test_generic_csr_expression_becomes_system_service(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @pmu() {
+            entry:
+              %v = call i64 asm sideeffect "csrr $0, 0xc00 + 16 + 8 + 4 + 2 + 1", "=r,~{memory}"()
+              ret i64 %v
+            }
+            """
+        )
+        sysops = [i for b in fn.blocks for i in b.instructions if isinstance(i, muir.Sys)]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(sysops[0].op, "csr_read")
+        self.assertEqual(sysops[0].args, (muir.Imm(0xc00 + 31),))
+        self.assertEqual(sysops[0].result, muir.Slot("v"))
+        self.assertEqual(stats.lowered_generic_csr, 1)
+
+    def test_conditional_lrsc_preserves_condition_and_order(self):
+        fn, stats = self.lower_one(
+            """
+            define i32 @inc_not_negative(ptr %p) {
+            entry:
+              %pair = call { i32, i32 } asm sideeffect "0: lr.w $0, $2; bltz $0, 1f; addi $1, $0, 1; sc.w.rl $1, $1, $2; bnez $1, 0b; fence rw, rw;1:;", "=&r,=&r,=*A,*A,~{memory}"(ptr elementtype(i32) %p, ptr elementtype(i32) %p)
+              %old = extractvalue { i32, i32 } %pair, 0
+              ret i32 %old
+            }
+            """
+        )
+        sysops = [i for b in fn.blocks for i in b.instructions if isinstance(i, muir.Sys)]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(
+            sysops[0].op,
+            "atomic_add1_if_nonnegative_i32_release_post_full_fence",
+        )
+        self.assertEqual(sysops[0].args, (muir.Slot("p"),))
+        self.assertIsInstance(sysops[0].result, tuple)
+        self.assertEqual(len(sysops[0].result), 2)
+        self.assertEqual(stats.lowered_system_lrsc, 1)
+
+    def test_amoswap_post_acquire_fence_is_preserved(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @swap(ptr %p, i64 %x) {
+            entry:
+              %old = call i64 asm sideeffect "amoswap.d $0, $2, $1; fence r , rw;", "=r,=*A,r,*A,~{memory}"(ptr elementtype(i64) %p, i64 %x, ptr elementtype(i64) %p)
+              ret i64 %old
+            }
+            """
+        )
+        sysops = [i for b in fn.blocks for i in b.instructions if isinstance(i, muir.Sys)]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(
+            sysops[0].op,
+            "atomic_swap_i64_relaxed_post_acquire_fence",
+        )
+        self.assertEqual(sysops[0].args, (muir.Slot("p"), muir.Slot("x")))
+        self.assertEqual(stats.lowered_system_atomic, 1)
+
     def test_bitwise_routes_to_explicit_helper(self):
         fn, stats = self.lower_one(
             """
