@@ -338,6 +338,26 @@ def helper_callback(symbol: str):
 
         return add
 
+    m = re.fullmatch(r"__mm_llvm_objectsize_i(32|64)_p\d+", symbol)
+    if m:
+        bits = int(m.group(1))
+        mask = _mask(bits)
+
+        def llvm_objectsize(vm: VM, args: tuple[int, ...]):
+            if len(args) != 4:
+                raise VMError(
+                    f"{symbol} expects object,min,nullunknown,dynamic"
+                )
+            pointer, minimum, null_unknown, _dynamic = args
+            if pointer == 0 and not null_unknown:
+                return 0
+            # The reference VM has no source-level allocation provenance for
+            # an arbitrary pointer. LLVM specifies unknown size as 0 for the
+            # minimum query and -1 for the maximum query.
+            return 0 if minimum else mask
+
+        return llvm_objectsize
+
     m = re.fullmatch(r"__mm_llvm_expect(?:_with_probability)?_.+", symbol)
     if m:
         def llvm_expect(vm: VM, args: tuple[int, ...]):
