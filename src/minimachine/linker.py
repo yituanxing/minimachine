@@ -14,6 +14,7 @@ class SectionGroup:
     name: str
     sections: tuple[str, ...]
     align: int = 1
+    empty_after: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,20 @@ class LinkerContract:
                     )
                 claimed_sections[section] = group.name
 
+        group_order = {group.name: i for i, group in enumerate(self.groups)}
+        for group in self.groups:
+            if group.empty_after is None:
+                continue
+            if group.empty_after not in group_names:
+                raise LinkerContractError(
+                    f"section group {group.name} anchors after unknown group "
+                    f"{group.empty_after}"
+                )
+            if group_order[group.empty_after] >= group_order[group.name]:
+                raise LinkerContractError(
+                    f"section group {group.name} must anchor after an earlier group"
+                )
+
         boundary_names: set[str] = set()
         for boundary in self.boundaries:
             if not boundary.symbol:
@@ -100,6 +115,11 @@ class LinkerContract:
                 name=str(item["name"]),
                 sections=tuple(str(x) for x in item.get("sections", ())),
                 align=int(item.get("align", 1)),
+                empty_after=(
+                    str(item["empty_after"])
+                    if item.get("empty_after") is not None
+                    else None
+                ),
             )
             for item in raw.get("groups", ())
         )
@@ -127,11 +147,19 @@ class LinkerContract:
         return cls.from_dict(raw)
 
     def active_groups(self, sections: set[str]) -> set[str]:
-        return {
-            group.name
-            for group in self.groups
-            if any(section in sections for section in group.sections)
-        }
+        active: set[str] = set()
+        for group in self.groups:
+            has_members = any(
+                section in sections for section in group.sections
+            )
+            anchored_empty = (
+                not has_members
+                and group.empty_after is not None
+                and group.empty_after in active
+            )
+            if has_members or anchored_empty:
+                active.add(group.name)
+        return active
 
     def active_boundary_symbols(self, sections: set[str]) -> set[str]:
         active = self.active_groups(sections)
