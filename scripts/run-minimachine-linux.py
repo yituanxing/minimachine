@@ -72,6 +72,23 @@ def register_traps(program: Program, reasons: set[str]) -> None:
             program.register_service(symbol, callback(reason))
 
 
+def linux_ecall(vm, args: tuple[int, ...]):
+    # Boot-first host ABI:
+    #   service 1: write(ptr, len) to the host boot console.
+    if len(args) != 3:
+        raise VMError(f"Linux ecall expects service,ptr,len; got {len(args)} args")
+    service, ptr, size = args
+    if service != 1:
+        raise VMError(f"unsupported MiniMachine Linux ecall service: {service}")
+    if size > 1 << 20:
+        raise VMError(f"MiniMachine Linux console write too large: {size}")
+    data = bytes(vm.memory.read(ptr + i, 8) for i in range(size))
+    text = data.decode("utf-8", errors="replace")
+    sys.stdout.write(text)
+    sys.stdout.flush()
+    return None
+
+
 def current_instruction(vm):
     if vm.current_function is None or vm.current_block is None:
         return None
@@ -148,6 +165,7 @@ def main() -> int:
     )
 
     vm = program.new_vm()
+    vm.ecall_handler = linux_ecall
     try:
         vm.run_function(
             args.entry,
