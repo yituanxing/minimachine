@@ -466,6 +466,44 @@ class RuntimeTests(unittest.TestCase):
             (32,),
         )
 
+    def test_static_alloca_store_load_executes(self):
+        functions, _ = legalize_module(
+            """
+            define i64 @local_roundtrip(i64 %x) {
+            entry:
+              %p = alloca i64, align 8
+              store i64 %x, ptr %p
+              %y = load i64, ptr %p
+              ret i64 %y
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("local_roundtrip", (0x123456789ABCDEF0,)),
+            (0x123456789ABCDEF0,),
+        )
+
+    def test_dynamic_alloca_and_gep_execute(self):
+        functions, _ = legalize_module(
+            """
+            define i32 @dynamic_local(i64 %n, i64 %idx, i32 %x) {
+            entry:
+              %base = alloca i32, i64 %n, align 16
+              %p = getelementptr i32, ptr %base, i64 %idx
+              store i32 %x, ptr %p
+              %y = load i32, ptr %p
+              ret i32 %y
+            }
+            """
+        )
+        program = executable(functions)
+        vm = program.new_vm()
+        self.assertEqual(
+            vm.run_function("dynamic_local", (8, 5, 0xAABBCCDD)),
+            (0xAABBCCDD,),
+        )
+
     def test_pointer_scaled_helper_executes(self):
         fn = muir.Function(
             "ptr",
