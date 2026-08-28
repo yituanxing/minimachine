@@ -168,6 +168,8 @@ class VM:
         self.ip = 0
         self.halted = False
         self.steps = 0
+        self.system_state: dict[str, int] = {}
+        self.csr: dict[int, int] = {}
 
     @staticmethod
     def _mask(bits: int) -> int:
