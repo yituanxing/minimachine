@@ -34,14 +34,20 @@ def _mask(bits: int) -> int:
     return (1 << bits) - 1
 
 
+def _int_mask(bits: int) -> int:
+    if bits < 1:
+        raise VMError(f"invalid integer width: {bits}")
+    return (1 << bits) - 1
+
+
 def _signed(value: int, bits: int) -> int:
-    value &= _mask(bits)
+    value &= _int_mask(bits)
     sign = 1 << (bits - 1)
     return value - (1 << bits) if value & sign else value
 
 
 def _binary_integer(op: str, bits: int, a: int, b: int) -> int:
-    mask = _mask(bits)
+    mask = _int_mask(bits)
     a &= mask
     b &= mask
 
@@ -83,7 +89,7 @@ def _binary_integer(op: str, bits: int, a: int, b: int) -> int:
 
 
 def _icmp(pred: str, bits: int, a: int, b: int) -> int:
-    mask = _mask(bits)
+    mask = _int_mask(bits)
     ua, ub = a & mask, b & mask
     sa, sb = _signed(a, bits), _signed(b, bits)
     table = {
@@ -117,6 +123,27 @@ def _int_abi_align(bits: int) -> int:
     return 16
 
 
+def _decode_integer(vm: VM, encoded: int, bits: int) -> int:
+    if bits <= 64:
+        return encoded & _int_mask(bits)
+    size = (bits + 7) // 8
+    value = 0
+    for i in range(size):
+        value |= vm.memory.read(encoded + i, 8) << (8 * i)
+    return value & _int_mask(bits)
+
+
+def _encode_integer(vm: VM, bits: int, value: int) -> int:
+    value &= _int_mask(bits)
+    if bits <= 64:
+        return value
+    size = (bits + 7) // 8
+    blob = vm.alloc_bytes(size, align=_int_abi_align(bits))
+    for i in range(size):
+        vm.memory.write(blob + i, 8, (value >> (8 * i)) & 0xFF)
+    return blob
+
+
 def _overflow_blob(vm: VM, bits: int, value: int, overflow: bool) -> int:
     size = max(1, (bits + 7) // 8)
     align = _int_abi_align(bits)
@@ -125,7 +152,7 @@ def _overflow_blob(vm: VM, bits: int, value: int, overflow: bool) -> int:
     blob = vm.alloc_bytes(total_size, align=align)
     for i in range(total_size):
         vm.memory.write(blob + i, 8, 0)
-    masked = value & _mask(bits)
+    masked = value & _int_mask(bits)
     for i in range(size):
         vm.memory.write(
             blob + i,
@@ -161,6 +188,23 @@ def helper_callback(symbol: str):
             return vm.alloc_bytes(element_size * count, align=align)
 
         return alloca
+
+    m = re.fullmatch(r"__mm_wide_const_(\d+)", symbol)
+    if m:
+        bits = int(m.group(1))
+
+        def wide_const(vm: VM, args: tuple[int, ...]):
+            expected = (bits + 63) // 64
+            if len(args) != expected:
+                raise VMError(
+                    f"{symbol} expects {expected} 64-bit chunks"
+                )
+            value = 0
+            for i, chunk in enumerate(args):
+                value |= (chunk & MASK64) << (64 * i)
+            return _encode_integer(vm, bits, value)
+
+        return wide_const
 
     if symbol == "__mm_llvm_va_start":
         def va_start(vm: VM, args: tuple[int, ...]):
@@ -211,7 +255,13 @@ def helper_callback(symbol: str):
         def binary(vm: VM, args: tuple[int, ...]):
             if len(args) != 2:
                 raise VMError(f"{symbol} expects 2 arguments")
-            return _binary_integer(op, bits, args[0], args[1])
+            a = _decode_integer(vm, args[0], bits)
+            b = _decode_integer(vm, args[1], bits)
+            return _encode_integer(
+                vm,
+                bits,
+                _binary_integer(op, bits, a, b),
+            )
 
         return binary
 
@@ -223,7 +273,9 @@ def helper_callback(symbol: str):
         def compare(vm: VM, args: tuple[int, ...]):
             if len(args) != 2:
                 raise VMError(f"{symbol} expects 2 arguments")
-            return _icmp(pred, bits, args[0], args[1])
+            a = _decode_integer(vm, args[0], bits)
+            b = _decode_integer(vm, args[1], bits)
+            return _icmp(pred, bits, a, b)
 
         return compare
 
@@ -254,10 +306,10 @@ def helper_callback(symbol: str):
         def cast(vm: VM, args: tuple[int, ...]):
             if len(args) != 1:
                 raise VMError(f"{symbol} expects 1 argument")
-            value = args[0] & _mask(src_bits)
+            value = _decode_integer(vm, args[0], src_bits)
             if op == "sext":
                 value = _signed(value, src_bits)
-            return value & _mask(dst_bits)
+            return _encode_integer(vm, dst_bits, value)
 
         return cast
 
@@ -268,7 +320,8 @@ def helper_callback(symbol: str):
         def freeze(vm: VM, args: tuple[int, ...]):
             if len(args) != 1:
                 raise VMError(f"{symbol} expects 1 argument")
-            return args[0] & _mask(bits)
+            value = _decode_integer(vm, args[0], bits)
+            return _encode_integer(vm, bits, value)
 
         return freeze
 
@@ -279,7 +332,9 @@ def helper_callback(symbol: str):
         def add(vm: VM, args: tuple[int, ...]):
             if len(args) != 2:
                 raise VMError(f"{symbol} expects 2 arguments")
-            return (args[0] + args[1]) & _mask(bits)
+            a = _decode_integer(vm, args[0], bits)
+            b = _decode_integer(vm, args[1], bits)
+            return _encode_integer(vm, bits, a + b)
 
         return add
 
@@ -347,34 +402,32 @@ def helper_callback(symbol: str):
     if m:
         kind, bits_text = m.groups()
         bits = int(bits_text)
-        if bits <= 64:
-            size = (bits + 7) // 8
-            mask = _mask(bits)
+        size = (bits + 7) // 8
 
-            if kind == "load":
-                def odd_load(vm: VM, args: tuple[int, ...]):
-                    if len(args) != 1:
-                        raise VMError(f"{symbol} expects address")
-                    address = args[0]
-                    value = 0
-                    for i in range(size):
-                        value |= vm.memory.read(address + i, 8) << (8 * i)
-                    return value & mask
-                return odd_load
-
-            def odd_store(vm: VM, args: tuple[int, ...]):
-                if len(args) != 2:
-                    raise VMError(f"{symbol} expects address,value")
-                address, value = args
-                value &= mask
+        if kind == "load":
+            def integer_load(vm: VM, args: tuple[int, ...]):
+                if len(args) != 1:
+                    raise VMError(f"{symbol} expects address")
+                address = args[0]
+                value = 0
                 for i in range(size):
-                    vm.memory.write(
-                        address + i,
-                        8,
-                        (value >> (8 * i)) & 0xFF,
-                    )
-                return None
-            return odd_store
+                    value |= vm.memory.read(address + i, 8) << (8 * i)
+                return _encode_integer(vm, bits, value)
+            return integer_load
+
+        def integer_store(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError(f"{symbol} expects address,value")
+            address, encoded = args
+            value = _decode_integer(vm, encoded, bits)
+            for i in range(size):
+                vm.memory.write(
+                    address + i,
+                    8,
+                    (value >> (8 * i)) & 0xFF,
+                )
+            return None
+        return integer_store
 
     if symbol.startswith("__mm_llvm_prefetch_"):
         def prefetch(vm: VM, args: tuple[int, ...]):
@@ -415,30 +468,32 @@ def helper_callback(symbol: str):
                 return min((args[0] & mask) + (args[1] & mask), mask)
             if op == "usub":
                 return max((args[0] & mask) - (args[1] & mask), 0)
-            a = _signed(args[0], bits)
-            b = _signed(args[1], bits)
+            a = _signed(a_raw, bits)
+            b = _signed(b_raw, bits)
             raw = a + b if op == "sadd" else a - b
             return min(max(raw, signed_min), signed_max) & mask
 
         return saturating
 
     m = re.fullmatch(
-        r"__mm_llvm_([us])(add|sub|mul)_with_overflow_i(8|16|32|64)",
+        r"__mm_llvm_([us])(add|sub|mul)_with_overflow_i(\d+)",
         symbol,
     )
     if m:
         signedness, op, bits_text = m.groups()
         bits = int(bits_text)
-        mask = _mask(bits)
+        mask = _int_mask(bits)
         signed_min = -(1 << (bits - 1))
         signed_max = (1 << (bits - 1)) - 1
 
         def with_overflow(vm: VM, args: tuple[int, ...]):
             if len(args) != 2:
                 raise VMError(f"{symbol} expects two operands")
+            a_raw = _decode_integer(vm, args[0], bits)
+            b_raw = _decode_integer(vm, args[1], bits)
             if signedness == "u":
-                a = args[0] & mask
-                b = args[1] & mask
+                a = a_raw & mask
+                b = b_raw & mask
                 if op == "add":
                     raw = a + b
                     overflow = raw > mask
