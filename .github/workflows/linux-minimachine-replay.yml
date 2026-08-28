@@ -1,0 +1,76 @@
+name: Linux MiniMachine Dynamic Replay
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - configs/linux-6.6.143-minimachine-linker.json
+      - src/minimachine/abi.py
+      - src/minimachine/image.py
+      - src/minimachine/legalize.py
+      - src/minimachine/linker.py
+      - src/minimachine/lower_p3.py
+      - src/minimachine/muir.py
+      - src/minimachine/p3.py
+      - src/minimachine/runtime.py
+      - src/minimachine/verify.py
+      - src/minimachine/vm.py
+      - scripts/run-minimachine-linux.py
+      - .github/workflows/linux-minimachine-replay.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: minimachine-linux-dynamic-replay
+  cancel-in-progress: true
+
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find latest native Linux LLVM artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(
+            gh api               "/repos/$GITHUB_REPOSITORY/actions/workflows/linux-minimachine-boot.yml/runs?status=completed&per_page=30"               --jq '.workflow_runs[] | select(.conclusion == "success" or .conclusion == "failure") | .id' |
+              head -n 1
+          )"
+          test -n "$run_id"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "REPLAY_SOURCE_RUN $run_id"
+
+      - name: Download linked Linux LLVM image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: minimachine-linux-boot-*
+          path: replay-source
+          merge-multiple: true
+
+      - name: Verify replay source
+        run: |
+          test -s replay-source/llvm/linked.ll
+          echo "REPLAY_LLVM bytes=$(stat -c%s replay-source/llvm/linked.ll)"
+
+      - name: Replay Linux start_kernel in MiniMachine VM
+        run: |
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --entry start_kernel             --max-steps 10000000             2>&1 | tee replay-source/llvm/replay-exec.log
+
+      - name: Upload replay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-linux-replay-${{ github.run_id }}
+          path: replay-source/llvm/replay-exec.log
+          if-no-files-found: ignore
+          retention-days: 14
