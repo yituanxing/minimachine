@@ -2338,12 +2338,12 @@ def legalize_function(
                         raise ValueError(f"cannot parse indirectbr: {inst.text}")
 
                     address_text = parts[0]
-                    block = re.search(
+                    blockaddress_match = re.search(
                         r"blockaddress\s*\(\s*@([-A-Za-z$._0-9]+)\s*,\s*%([-A-Za-z$._0-9]+)\s*\)",
                         address_text,
                     )
-                    if block is not None:
-                        function_name, label = block.groups()
+                    if blockaddress_match is not None:
+                        function_name, label = blockaddress_match.groups()
                         if function_name != fn.name:
                             raise ValueError(
                                 "indirectbr blockaddress must target current function"
