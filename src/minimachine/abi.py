@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from . import muir
 from .verify import VerifyError, verify_muir
@@ -54,6 +55,11 @@ def _mem(base: muir.Value, offset: int) -> muir.Mem:
 
 def _indirect_from_sp(offset: int) -> muir.Target:
     return muir.Target(address=muir.Address(muir.Special.SP, offset))
+
+
+def _system_symbol(reason: str) -> str:
+    tag = re.sub(r"[^A-Za-z0-9_]+", "_", reason).strip("_")
+    return "__mm_trap_" + (tag or "unknown")
 
 
 def _uncond(target: muir.Target) -> muir.Br:
@@ -197,7 +203,8 @@ def expand_function(function: muir.Function) -> tuple[muir.Function, AbiStats]:
     """Expand CALL/HELPER/RET into the MOV/SUB/BR ABI.
 
     This is a sub-pass of the μIR -> P3 machine descent, not a new IR layer.
-    Trap and ArchEscape intentionally remain for later system/arch lowering.
+    Trap is lowered to an external system BR. ArchEscape intentionally remains
+    for the future arch/minimachine replacement boundary.
     """
     verify_muir(function)
     stats = AbiStats()
@@ -226,6 +233,8 @@ def expand_function(function: muir.Function) -> tuple[muir.Function, AbiStats]:
                     if isinstance(inst, muir.Ret):
                         stats.returns += 1
                         tail.extend(_return_sequence(builder, inst.value))
+                    elif isinstance(inst, muir.Trap):
+                        tail.append(_uncond(muir.Target(symbol=_system_symbol(inst.reason))))
                     else:
                         tail.append(inst)
                 output.append(muir.Block(current_label, tail))
@@ -277,7 +286,7 @@ def expand_function(function: muir.Function) -> tuple[muir.Function, AbiStats]:
 def verify_abi_normalized(function: muir.Function) -> None:
     for block in function.blocks:
         for inst in block.instructions:
-            if isinstance(inst, (muir.Call, muir.Helper, muir.Ret)):
+            if isinstance(inst, (muir.Call, muir.Helper, muir.Ret, muir.Trap)):
                 raise VerifyError(
                     f"ABI pseudo survived in {function.name}:{block.label}: "
                     f"{type(inst).__name__}"
