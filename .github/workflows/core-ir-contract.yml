@@ -5,8 +5,7 @@ on:
     branches: [main]
     paths:
       - src/minimachine/**
-      - tests/test_ir_contract.py
-      - tests/test_legalizer.py
+      - tests/**
       - .github/workflows/core-ir-contract.yml
   workflow_dispatch:
 
