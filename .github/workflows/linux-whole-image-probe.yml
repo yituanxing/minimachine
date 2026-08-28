@@ -10,6 +10,7 @@ on:
       - scripts/executable_probe.py
       - src/minimachine/image.py
       - src/minimachine/legalize.py
+      - src/minimachine/runtime.py
       - src/minimachine/layout.py
   workflow_dispatch:
 
