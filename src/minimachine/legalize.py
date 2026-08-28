@@ -59,6 +59,8 @@ class LegalizeStats:
     lowered_alternative_tlb: int = 0
     lowered_generic_csr: int = 0
     lowered_faultable_atomic: int = 0
+    lowered_read_sp: int = 0
+    lowered_read_thread_pointer: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -92,6 +94,8 @@ class LegalizeStats:
             "lowered_alternative_tlb": self.lowered_alternative_tlb,
             "lowered_generic_csr": self.lowered_generic_csr,
             "lowered_faultable_atomic": self.lowered_faultable_atomic,
+            "lowered_read_sp": self.lowered_read_sp,
+            "lowered_read_thread_pointer": self.lowered_read_thread_pointer,
         }
 
 
@@ -1142,8 +1146,24 @@ def _parallel_copies(copies, temp_index: list[int]):
     return out
 
 
-def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Function, LegalizeStats]:
+def _register_metadata(text: str) -> dict[int, str]:
+    out: dict[int, str] = {}
+    for match in re.finditer(
+        r"^!(\d+)\s*=\s*!\{\s*!\"([^\"]+)\"\s*\}\s*$",
+        text,
+        flags=re.MULTILINE,
+    ):
+        out[int(match.group(1))] = match.group(2)
+    return out
+
+
+def legalize_function(
+    fn: TextFunction,
+    layout: DataLayout,
+    register_metadata: dict[int, str] | None = None,
+) -> tuple[muir.Function, LegalizeStats]:
     stats = LegalizeStats()
+    register_metadata = register_metadata or {}
     uses = _use_counts(fn)
     defs = _result_defs(fn)
     fusable_icmps = _fusable_icmp_results(fn, uses, defs)
@@ -1549,6 +1569,40 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
 
                 if op == "call":
                     kind, symbol, args, callee_slot = _parse_call(inst, layout)
+
+                    if (
+                        kind == "direct"
+                        and symbol is not None
+                        and symbol.startswith("llvm.read_register.")
+                        and result is not None
+                    ):
+                        mm = re.search(r"metadata\s+!(\d+)", inst.text)
+                        reg_name = (
+                            register_metadata.get(int(mm.group(1)))
+                            if mm is not None
+                            else None
+                        )
+                        if reg_name in {"sp", "x2"}:
+                            stats.lowered_read_sp += 1
+                            out.append(
+                                muir.Mov(
+                                    muir.Width.I64,
+                                    result,
+                                    muir.Special.SP,
+                                )
+                            )
+                            continue
+                        if reg_name in {"tp", "x4"}:
+                            stats.lowered_read_thread_pointer += 1
+                            out.append(
+                                muir.Sys(
+                                    "thread_pointer",
+                                    (),
+                                    result,
+                                )
+                            )
+                            continue
+
                     if kind == "inline_asm":
                         template = _inline_asm_template(inst.text)
                         if result is None and template is not None and not template.strip():
@@ -1887,10 +1941,11 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
 def legalize_module(text: str):
     functions = parse_module(text)
     layout = DataLayout.from_module(text)
+    register_metadata = _register_metadata(text)
     out = []
     total = LegalizeStats()
     for fn in functions:
-        lowered, stats = legalize_function(fn, layout)
+        lowered, stats = legalize_function(fn, layout, register_metadata)
         out.append(lowered)
         for key, value in stats.as_dict().items():
             setattr(total, key, getattr(total, key) + value)
