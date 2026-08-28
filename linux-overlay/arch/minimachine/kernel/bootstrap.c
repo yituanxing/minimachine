@@ -25,6 +25,7 @@
 #include <asm/page.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
+#include <asm/sections.h>
 
 #define MINIMACHINE_BOOT_RAM_SIZE (64UL * 1024 * 1024)
 
@@ -132,6 +133,9 @@ void __init setup_arch(char **cmdline_p)
 				 sizeof(setup_arch_entered) - 1);
 
 	memory_start = PAGE_ALIGN((unsigned long)_end);
+	memory_end = MINIMACHINE_BOOT_RAM_SIZE;
+
+	setup_initial_init_mm(_stext, _etext, _edata, _end);
 
 	/*
 	 * Reserve the carrier image and expose a single flat RAM bank.  PAGE_OFFSET
@@ -139,6 +143,9 @@ void __init setup_arch(char **cmdline_p)
 	 */
 	memblock_add(0, memory_end);
 	memblock_reserve(0, memory_start);
+
+	min_low_pfn = PFN_DOWN(memory_start);
+	max_pfn = max_low_pfn = PFN_DOWN(memory_end);
 
 	strscpy(boot_command_line, CONFIG_CMDLINE, COMMAND_LINE_SIZE);
 	*cmdline_p = boot_command_line;
