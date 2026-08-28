@@ -6,6 +6,7 @@ config 64BIT
 config MINIMACHINE
 	def_bool y
 	select ARCH_HAS_BINFMT_FLAT
+	select GENERIC_ATOMIC64
 	select HAVE_UID16
 	select UACCESS_MEMCPY
 
