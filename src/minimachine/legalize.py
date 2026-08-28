@@ -858,7 +858,12 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                             # encoding or __bug_table assembler metadata.
                             stats.lowered_linux_bug += 1
                             out.append(muir.Trap("linux_bug"))
-                            continue
+                            # BUG() is non-returning. LLVM inline asm itself
+                            # does not encode that fact strongly enough for
+                            # every optimization shape, so dead tail may still
+                            # remain in the textual block. Semantic legalization
+                            # makes the control-flow contract explicit here.
+                            break
                         stats.arch_escapes += 1
                         out.append(muir.ArchEscape("inline_asm", inst.text))
                         continue
