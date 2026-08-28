@@ -220,7 +220,14 @@ def _icmp_basis(
     raise ValueError(f"unsupported icmp predicate: {pred}")
 
 
-def _parse_icmp(inst: TextInst, layout: DataLayout):
+def _parse_icmp(
+    inst: TextInst,
+    layout: DataLayout,
+    *,
+    out: list[muir.Instr] | None = None,
+    temp_counter: list[int] | None = None,
+    frame_slots: set[str] | None = None,
+):
     text = inst.text.strip()
     m = re.match(r"icmp\s+([a-z]+)\s+(.+)$", text)
     if not m:
@@ -234,8 +241,18 @@ def _parse_icmp(inst: TextInst, layout: DataLayout):
     ty, lhs_text = _split_typed_value(parts[0])
     rhs_text = parts[1].strip()
 
-    lhs = _const_scalar_value(lhs_text, layout)
-    rhs = _const_scalar_value(rhs_text, layout)
+    if out is None:
+        lhs = _const_scalar_value(lhs_text, layout)
+        rhs = _const_scalar_value(rhs_text, layout)
+    else:
+        if temp_counter is None or frame_slots is None:
+            raise ValueError("icmp materialization state is incomplete")
+        lhs = _materialize_scalar_value(
+            lhs_text, layout, out, temp_counter, frame_slots
+        )
+        rhs = _materialize_scalar_value(
+            rhs_text, layout, out, temp_counter, frame_slots
+        )
 
     if ty == "ptr" or ty.startswith("ptr addrspace("):
         return pred, 64, muir.Width.I64, lhs, rhs
@@ -2033,7 +2050,13 @@ def legalize_function(
                 if op == "icmp":
                     if result is None:
                         raise ValueError("icmp has no result")
-                    pred, bits, width, a, b = _parse_icmp(inst, layout)
+                    pred, bits, width, a, b = _parse_icmp(
+                        inst,
+                        layout,
+                        out=out,
+                        temp_counter=temp_counter,
+                        frame_slots=frame_slots,
+                    )
                     if inst.result and inst.result in fusable_icmps and width is not None:
                         # Only an actual one-use conditional BR owns this
                         # fusion. Other consumers need a materialized i1.
@@ -2211,7 +2234,13 @@ def legalize_function(
                     tt, ft = muir.Target(label=labels[0]), muir.Target(label=labels[1])
                     cond_def = defs.get(cond_text)
                     if cond_def and cond_def.opcode == "icmp" and cond_text in fusable_icmps:
-                        pred, bits, width, a, b = _parse_icmp(cond_def, layout)
+                        pred, bits, width, a, b = _parse_icmp(
+                            cond_def,
+                            layout,
+                            out=out,
+                            temp_counter=temp_counter,
+                            frame_slots=frame_slots,
+                        )
                         if width is not None:
                             out.append(_icmp_basis(pred, width, a, b, tt, ft))
                             stats.fused_icmp_br += 1
