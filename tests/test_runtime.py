@@ -4,7 +4,11 @@ from src.minimachine import muir
 from src.minimachine.abi import expand_function
 from src.minimachine.legalize import legalize_module
 from src.minimachine.lower_p3 import lower_function
-from src.minimachine.runtime import collect_runtime_surface, install_runtime
+from src.minimachine.runtime import (
+    collect_runtime_surface,
+    direct_runtime_callback,
+    install_runtime,
+)
 from src.minimachine.vm import Program
 
 
@@ -689,36 +693,23 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotEqual(vm.run_function("runtime_strncmp", (a, b, 4)), (0,))
 
     def test_portable_memmove_runtime_handles_overlap(self):
-        functions, _ = legalize_module(
-            """
-            declare ptr @memmove(ptr, ptr, i64)
+        callback = direct_runtime_callback("memmove")
+        self.assertIsNotNone(callback)
 
-            define i8 @runtime_memmove(ptr %p) {
-            entry:
-              %src = getelementptr i8, ptr %p, i64 0
-              %dst = getelementptr i8, ptr %p, i64 1
-              %ignored = call ptr @memmove(ptr %dst, ptr %src, i64 4)
-              %last = getelementptr i8, ptr %p, i64 4
-              %value = load i8, ptr %last
-              ret i8 %value
-            }
-            """
-        )
-        program = executable(functions)
-        vm = program.new_vm()
+        vm = Program().new_vm()
         address = 0xB000
         for i, byte in enumerate(b"abcd" + bytes([0])):
             vm.memory.write(address + i, 8, byte)
 
+        assert callback is not None
         self.assertEqual(
-            vm.run_function("runtime_memmove", (address,)),
-            (ord("d"),),
+            callback(vm, (address + 1, address, 4)),
+            address + 1,
         )
         self.assertEqual(
             bytes(vm.memory.read(address + i, 8) for i in range(5)),
             b"aabcd",
         )
-
 
 if __name__ == "__main__":
     unittest.main()
