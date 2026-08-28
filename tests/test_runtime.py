@@ -648,5 +648,77 @@ class RuntimeTests(unittest.TestCase):
         )
 
 
+    def test_portable_string_runtime_services_execute(self):
+        functions, _ = legalize_module(
+            """
+            declare i64 @strlen(ptr)
+            declare i32 @strcmp(ptr, ptr)
+            declare i32 @strncmp(ptr, ptr, i64)
+
+            define i64 @runtime_strlen(ptr %p) {
+            entry:
+              %n = call i64 @strlen(ptr %p)
+              ret i64 %n
+            }
+
+            define i32 @runtime_strcmp(ptr %a, ptr %b) {
+            entry:
+              %r = call i32 @strcmp(ptr %a, ptr %b)
+              ret i32 %r
+            }
+
+            define i32 @runtime_strncmp(ptr %a, ptr %b, i64 %n) {
+            entry:
+              %r = call i32 @strncmp(ptr %a, ptr %b, i64 %n)
+              ret i32 %r
+            }
+            """
+        )
+        program = executable(functions)
+        vm = program.new_vm()
+        a = 0xA000
+        b = 0xA100
+        for i, byte in enumerate(b"mini\\0"):
+            vm.memory.write(a + i, 8, byte)
+        for i, byte in enumerate(b"mino\\0"):
+            vm.memory.write(b + i, 8, byte)
+
+        self.assertEqual(vm.run_function("runtime_strlen", (a,)), (4,))
+        self.assertEqual(vm.run_function("runtime_strcmp", (a, a)), (0,))
+        self.assertEqual(vm.run_function("runtime_strncmp", (a, b, 3)), (0,))
+        self.assertNotEqual(vm.run_function("runtime_strncmp", (a, b, 4)), (0,))
+
+    def test_portable_memmove_runtime_handles_overlap(self):
+        functions, _ = legalize_module(
+            """
+            declare ptr @memmove(ptr, ptr, i64)
+
+            define i8 @runtime_memmove(ptr %p) {
+            entry:
+              %src = getelementptr i8, ptr %p, i64 0
+              %dst = getelementptr i8, ptr %p, i64 1
+              %ignored = call ptr @memmove(ptr %dst, ptr %src, i64 4)
+              %last = getelementptr i8, ptr %p, i64 4
+              %value = load i8, ptr %last
+              ret i8 %value
+            }
+            """
+        )
+        program = executable(functions)
+        vm = program.new_vm()
+        address = 0xB000
+        for i, byte in enumerate(b"abcd\\0"):
+            vm.memory.write(address + i, 8, byte)
+
+        self.assertEqual(
+            vm.run_function("runtime_memmove", (address,)),
+            (ord("d"),),
+        )
+        self.assertEqual(
+            bytes(vm.memory.read(address + i, 8) for i in range(5)),
+            b"aabcd",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
