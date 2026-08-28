@@ -518,6 +518,26 @@ class RuntimeTests(unittest.TestCase):
             (0x123456789ABCDEF0,),
         )
 
+    def test_single_use_gep_stored_as_pointer_value_executes(self):
+        functions, _ = legalize_module(
+            """
+            define ptr @gep_pointer_value_store(ptr %base) {
+            entry:
+              %slot = alloca ptr, align 8
+              %next = getelementptr i8, ptr %base, i64 1
+              store ptr %next, ptr %slot, align 8
+              %got = load ptr, ptr %slot, align 8
+              ret ptr %got
+            }
+            """
+        )
+        program = executable(functions)
+        base = 0x12345000
+        self.assertEqual(
+            program.new_vm().run_function("gep_pointer_value_store", (base,)),
+            (base + 1,),
+        )
+
     def test_dynamic_alloca_and_gep_execute(self):
         functions, _ = legalize_module(
             """
