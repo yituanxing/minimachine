@@ -43,6 +43,7 @@ def lower_function(function: muir.Function) -> p3.Function:
                         dst=_lower_operand(inst.dst),
                         src=_lower_operand(inst.src),
                         extend=inst.extend,
+                        src_bits=inst.src_bits,
                     )
                 )
             elif isinstance(inst, muir.Sub):
