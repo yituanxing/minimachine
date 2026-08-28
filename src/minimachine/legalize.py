@@ -1341,7 +1341,14 @@ def legalize_function(
                             frame_slots.add(ap.name)
                             out.append(muir.Sub(muir.Width.I64,ap,base,muir.Imm(-addr.offset)))
                             base=ap
-                        out.append(muir.Helper("__mm_load_aggregate",(base,),result))
+                        agg_size = layout.info(ty).size
+                        out.append(
+                            muir.Helper(
+                                "__mm_load_aggregate",
+                                (base, muir.Imm(agg_size)),
+                                result,
+                            )
+                        )
                     continue
 
                 if op == "store":
@@ -1397,7 +1404,14 @@ def legalize_function(
                             out.append(muir.Sub(muir.Width.I64,ap,base,muir.Imm(-addr.offset)))
                             base=ap
                         stats.temporary_helpers += 1
-                        out.append(muir.Helper("__mm_store_aggregate",(base,src),None))
+                        agg_size = layout.info(ty).size
+                        out.append(
+                            muir.Helper(
+                                "__mm_store_aggregate",
+                                (base, src, muir.Imm(agg_size)),
+                                None,
+                            )
+                        )
                     continue
 
 
