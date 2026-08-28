@@ -254,14 +254,42 @@ def helper_callback(symbol: str):
 
         return memmove
 
-    # These helpers are intentionally not guessed. Their current μIR call
-    # shape lacks enough executable type/layout information.
+    if symbol == "__mm_load_aggregate":
+        def load_aggregate(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("__mm_load_aggregate expects address,size")
+            source, size = args
+            blob = vm.alloc_bytes(size)
+            for i in range(size):
+                vm.memory.write(blob + i, 8, vm.memory.read(source + i, 8))
+            return blob
+        return load_aggregate
+
+    if symbol == "__mm_store_aggregate":
+        def store_aggregate(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError("__mm_store_aggregate expects address,blob,size")
+            destination, blob, size = args
+            for i in range(size):
+                vm.memory.write(
+                    destination + i,
+                    8,
+                    vm.memory.read(blob + i, 8),
+                )
+            return None
+        return store_aggregate
+
+    if symbol == "__mm_freeze_aggregate":
+        def freeze_aggregate(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError("__mm_freeze_aggregate expects blob")
+            return args[0]
+        return freeze_aggregate
+
+    # extractvalue/insertvalue still need field offset metadata.
     if symbol in {
-        "__mm_load_aggregate",
-        "__mm_store_aggregate",
         "__mm_extractvalue",
         "__mm_insertvalue",
-        "__mm_freeze_aggregate",
     }:
         def incomplete(vm: VM, args: tuple[int, ...]):
             raise VMError(
