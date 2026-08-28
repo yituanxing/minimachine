@@ -375,6 +375,22 @@
     {
       "symbol": "__init_end",
       "point": "data_end"
+    },
+    {
+      "symbol": "__start_rodata",
+      "point": "data_start"
+    },
+    {
+      "symbol": "__end_rodata",
+      "point": "data_start"
+    },
+    {
+      "symbol": "__bss_start",
+      "point": "data_end"
+    },
+    {
+      "symbol": "__bss_stop",
+      "point": "data_end"
     }
   ]
 }
