@@ -748,22 +748,19 @@ class RuntimeTests(unittest.TestCase):
 
             define i64 @obj_max(ptr %p) {
             entry:
-              %r = call i64 @llvm.objectsize.i64.p0(
-                ptr %p, i1 false, i1 true, i1 false)
+              %r = call i64 @llvm.objectsize.i64.p0(ptr %p, i1 false, i1 true, i1 false)
               ret i64 %r
             }
 
             define i64 @obj_min(ptr %p) {
             entry:
-              %r = call i64 @llvm.objectsize.i64.p0(
-                ptr %p, i1 true, i1 true, i1 false)
+              %r = call i64 @llvm.objectsize.i64.p0(ptr %p, i1 true, i1 true, i1 false)
               ret i64 %r
             }
 
             define i64 @obj_null() {
             entry:
-              %r = call i64 @llvm.objectsize.i64.p0(
-                ptr null, i1 false, i1 false, i1 false)
+              %r = call i64 @llvm.objectsize.i64.p0(ptr null, i1 false, i1 false, i1 false)
               ret i64 %r
             }
             """
