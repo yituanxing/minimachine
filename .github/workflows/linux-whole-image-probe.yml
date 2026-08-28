@@ -8,6 +8,8 @@ on:
       - scripts/duplicate_symbols.py
       - scripts/image_probe.py
       - src/minimachine/image.py
+      - src/minimachine/legalize.py
+      - src/minimachine/layout.py
   workflow_dispatch:
 
 permissions:
