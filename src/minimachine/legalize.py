@@ -611,7 +611,10 @@ def _lower_simple_atomic_sys(
 ) -> muir.Sys | None:
     normalized = _normalize_inline_asm(template).strip().rstrip(";").strip()
     post_acquire_fence = False
-    m_fence = re.fullmatch(r"(.+?);\s*fence\s+r\s*,\s*rw", normalized)
+    m_fence = re.fullmatch(
+        r"(.+?)\s*(?:;\s*)?fence\s+r\s*,\s*rw",
+        normalized,
+    )
     if m_fence:
         normalized = m_fence.group(1).strip()
         post_acquire_fence = True
@@ -680,9 +683,13 @@ def _faultable_sys_spec(template: str) -> tuple[str, int] | None:
 def _lrsc_sys_spec(template: str) -> tuple[str, int, str] | None:
     normalized = _normalize_inline_asm(template).strip()
     pre_release = False
-    if re.match(r"fence\s+rw\s*,\s*w\s*;", normalized):
+    m_pre = re.match(
+        r"fence\s+rw\s*,\s*w(?=\s*(?:;\s*)?0:)",
+        normalized,
+    )
+    if m_pre:
         pre_release = True
-        normalized = re.sub(r"^fence\s+rw\s*,\s*w\s*;\s*", "", normalized, count=1)
+        normalized = normalized[m_pre.end():].lstrip(" ;")
 
     m = re.match(r"0:\s*;?\s*lr\.(w|d)\b", normalized)
     if not m:
