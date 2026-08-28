@@ -1148,11 +1148,11 @@ def _parallel_copies(copies, temp_index: list[int]):
 
 def _register_metadata(text: str) -> dict[int, str]:
     out: dict[int, str] = {}
-    for match in re.finditer(
-        r"^!(\d+)\s*=\s*!\{\s*!\"([^\"]+)\"\s*\}\s*$",
-        text,
+    pattern = re.compile(
+        r'^\\s*!(\\d+)\\s*=\\s*!\\{\\s*!["]([^"]+)["]\\s*\\}\\s*$',
         flags=re.MULTILINE,
-    ):
+    )
+    for match in pattern.finditer(text):
         out[int(match.group(1))] = match.group(2)
     return out
 
