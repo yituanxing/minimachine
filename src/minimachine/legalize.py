@@ -48,6 +48,7 @@ class LegalizeStats:
     lowered_system_state: int = 0
     lowered_system_tlb: int = 0
     lowered_system_wait: int = 0
+    lowered_system_atomic: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -70,6 +71,7 @@ class LegalizeStats:
             "lowered_system_state": self.lowered_system_state,
             "lowered_system_tlb": self.lowered_system_tlb,
             "lowered_system_wait": self.lowered_system_wait,
+            "lowered_system_atomic": self.lowered_system_atomic,
         }
 
 
@@ -534,6 +536,47 @@ def _lower_simple_tlb_sys(
     if normalized == "sfence.vma $0, $1" and len(args) == 2:
         return muir.Sys("tlb_flush_address_asid", args, None)
     return None
+
+
+def _lower_simple_atomic_sys(
+    template: str,
+    text: str,
+    result: muir.Slot | None,
+    layout: DataLayout,
+) -> muir.Sys | None:
+    normalized = _normalize_inline_asm(template).rstrip(";").strip()
+    m = re.fullmatch(
+        r"amo(add|or|and|xor|swap)\.(w|d)(?:\.(aqrl|aq|rl))?\s+"
+        r"(zero|\$\d+),\s*\$\d+,\s*\$\d+",
+        normalized,
+    )
+    if not m:
+        return None
+
+    kind, width_tag, ordering, dest = m.groups()
+    args = _inline_asm_args(text, layout)
+    if len(args) != 3 or args[0] != args[2]:
+        return None
+    address, value, _ = args
+
+    if dest == "zero":
+        if result is not None:
+            return None
+    elif result is None:
+        return None
+
+    bits = 32 if width_tag == "w" else 64
+    order = {
+        None: "relaxed",
+        "aq": "acquire",
+        "rl": "release",
+        "aqrl": "acq_rel",
+    }[ordering]
+    return muir.Sys(
+        f"atomic_{kind}_i{bits}_{order}",
+        (address, value),
+        result,
+    )
 
 
 def _lower_wait_sys(template: str, result: muir.Slot | None) -> muir.Sys | None:
@@ -1169,6 +1212,12 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                             if tlb_sys is not None:
                                 stats.lowered_system_tlb += 1
                                 out.append(tlb_sys)
+                                continue
+
+                            atomic_sys = _lower_simple_atomic_sys(template, inst.text, result, layout)
+                            if atomic_sys is not None:
+                                stats.lowered_system_atomic += 1
+                                out.append(atomic_sys)
                                 continue
 
                             wait_sys = _lower_wait_sys(template, result)
