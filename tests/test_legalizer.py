@@ -430,6 +430,37 @@ class LegalizerTests(unittest.TestCase):
         self.assertEqual(mov.extend, "sext")
         self.assertEqual(mov.src_bits, 1)
 
+    def test_insertvalue_can_overwrite_poison_literal_field(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @replace(i64 %x) {
+            entry:
+              %v = insertvalue [2 x i64] [i64 0, i64 poison], i64 %x, 1
+              %r = extractvalue [2 x i64] %v, 1
+              ret i64 %r
+            }
+            """
+        )
+        helpers = [
+            i for b in fn.blocks for i in b.instructions
+            if isinstance(i, muir.Helper)
+        ]
+        self.assertTrue(any(i.symbol == "__mm_insertvalue" for i in helpers))
+        self.assertTrue(any(i.symbol == "__mm_extractvalue" for i in helpers))
+
+    def test_insertvalue_rejects_live_poison_literal_field(self):
+        with self.assertRaisesRegex(ValueError, "live nonzero/poison"):
+            legalize_module(
+                """
+                define i64 @bad(i64 %x) {
+                entry:
+                  %v = insertvalue [2 x i64] [i64 0, i64 poison], i64 %x, 0
+                  %r = extractvalue [2 x i64] %v, 1
+                  ret i64 %r
+                }
+                """
+            )
+
     def test_bitwise_routes_to_explicit_helper(self):
         fn, stats = self.lower_one(
             """
