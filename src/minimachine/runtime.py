@@ -1111,7 +1111,132 @@ def system_callback(op: str):
     return None
 
 
+# Portable C-runtime entry points that a real MiniMachine target can later
+# provide as P3 code.  The reference VM exposes them as host services so the
+# executable whole-image gate is not coupled to RISC-V's assembly lib/string
+# implementations.
+_DIRECT_RUNTIME_SYMBOLS = (
+    "memcpy",
+    "__memcpy",
+    "memmove",
+    "__memmove",
+    "memset",
+    "__memset",
+    "memcmp",
+    "strlen",
+    "strcmp",
+    "strncmp",
+)
+
+
+def direct_runtime_callback(symbol: str):
+    base = symbol[2:] if symbol in {"__memcpy", "__memmove", "__memset"} else symbol
+
+    if base == "memcpy":
+        def memcpy(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError(f"{symbol} expects dst,src,size")
+            dst, src, size = args
+            for i in range(size):
+                vm.memory.write(dst + i, 8, vm.memory.read(src + i, 8))
+            return dst
+        return memcpy
+
+    if base == "memmove":
+        def memmove(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError(f"{symbol} expects dst,src,size")
+            dst, src, size = args
+            data = [vm.memory.read(src + i, 8) for i in range(size)]
+            for i, byte in enumerate(data):
+                vm.memory.write(dst + i, 8, byte)
+            return dst
+        return memmove
+
+    if base == "memset":
+        def memset(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError(f"{symbol} expects dst,value,size")
+            dst, value, size = args
+            byte = value & 0xFF
+            for i in range(size):
+                vm.memory.write(dst + i, 8, byte)
+            return dst
+        return memset
+
+    if base == "memcmp":
+        def memcmp(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError("memcmp expects a,b,size")
+            a, b, size = args
+            for i in range(size):
+                av = vm.memory.read(a + i, 8)
+                bv = vm.memory.read(b + i, 8)
+                if av != bv:
+                    return (av - bv) & MASK64
+            return 0
+        return memcmp
+
+    if base == "strlen":
+        def strlen(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError("strlen expects string")
+            ptr = args[0]
+            size = 0
+            while vm.memory.read(ptr + size, 8) != 0:
+                size += 1
+                if size > MASK64:
+                    raise VMError("strlen address wrapped")
+            return size
+        return strlen
+
+    if base == "strcmp":
+        def strcmp(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("strcmp expects a,b")
+            a, b = args
+            i = 0
+            while True:
+                av = vm.memory.read(a + i, 8)
+                bv = vm.memory.read(b + i, 8)
+                if av != bv:
+                    return (av - bv) & MASK64
+                if av == 0:
+                    return 0
+                i += 1
+        return strcmp
+
+    if base == "strncmp":
+        def strncmp(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError("strncmp expects a,b,size")
+            a, b, size = args
+            for i in range(size):
+                av = vm.memory.read(a + i, 8)
+                bv = vm.memory.read(b + i, 8)
+                if av != bv:
+                    return (av - bv) & MASK64
+                if av == 0:
+                    return 0
+            return 0
+        return strncmp
+
+    return None
+
+
+def install_direct_runtime(program: Program) -> None:
+    for symbol in _DIRECT_RUNTIME_SYMBOLS:
+        if symbol in program.symbol_addresses:
+            continue
+        callback = direct_runtime_callback(symbol)
+        if callback is None:
+            continue
+        program.register_service(symbol, callback)
+
+
 def install_runtime(program: Program, surface: RuntimeSurface) -> None:
+    install_direct_runtime(program)
+
     missing_helpers = []
     for symbol in sorted(surface.helpers):
         callback = helper_callback(symbol)
