@@ -534,6 +534,72 @@ class RuntimeTests(unittest.TestCase):
             (0x2222333344445555,),
         )
 
+    def test_wide_i128_math_executes_through_blob_values(self):
+        functions, _ = legalize_module(
+            """
+            define i64 @wide_math(i64 %x) {
+            entry:
+              %a = zext i64 %x to i128
+              %b = shl i128 %a, 68
+              %c = or i128 %b, 15
+              %d = lshr i128 %c, 64
+              %r = trunc i128 %d to i64
+              ret i64 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("wide_math", (0x123,)),
+            (0x1230,),
+        )
+
+    def test_i128_load_preserves_high_word(self):
+        functions, _ = legalize_module(
+            """
+            define i64 @load_high(ptr %p) {
+            entry:
+              %w = load i128, ptr %p, align 16
+              %h = lshr i128 %w, 64
+              %r = trunc i128 %h to i64
+              ret i64 %r
+            }
+            """
+        )
+        program = executable(functions)
+        vm = program.new_vm()
+        address = 0x9000
+        vm.memory.write(address + 0, 64, 0x0123456789ABCDEF)
+        vm.memory.write(address + 8, 64, 0xFEDCBA9876543210)
+        self.assertEqual(
+            vm.run_function("load_high", (address,)),
+            (0xFEDCBA9876543210,),
+        )
+
+    def test_i65_signed_overflow_aggregate_executes(self):
+        functions, _ = legalize_module(
+            """
+            declare { i65, i1 } @llvm.sadd.with.overflow.i65(i65, i65)
+
+            define i1 @overflow65(i64 %x, i64 %y) {
+            entry:
+              %a = zext i64 %x to i65
+              %b = zext i64 %y to i65
+              %pair = call { i65, i1 } @llvm.sadd.with.overflow.i65(i65 %a, i65 %b)
+              %ov = extractvalue { i65, i1 } %pair, 1
+              ret i1 %ov
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function(
+                "overflow65",
+                (((1 << 64) - 1), 1),
+            ),
+            (1,),
+        )
+
     def test_pointer_scaled_helper_executes(self):
         fn = muir.Function(
             "ptr",
