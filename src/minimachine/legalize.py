@@ -44,6 +44,10 @@ class LegalizeStats:
     lowered_plain_asm_memory: int = 0
     lowered_identity_asm: int = 0
     lowered_divzero_constant: int = 0
+    lowered_system_fence: int = 0
+    lowered_system_state: int = 0
+    lowered_system_tlb: int = 0
+    lowered_system_wait: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -62,6 +66,10 @@ class LegalizeStats:
             "lowered_plain_asm_memory": self.lowered_plain_asm_memory,
             "lowered_identity_asm": self.lowered_identity_asm,
             "lowered_divzero_constant": self.lowered_divzero_constant,
+            "lowered_system_fence": self.lowered_system_fence,
+            "lowered_system_state": self.lowered_system_state,
+            "lowered_system_tlb": self.lowered_system_tlb,
+            "lowered_system_wait": self.lowered_system_wait,
         }
 
 
@@ -399,17 +407,139 @@ def _normalize_inline_asm(template: str) -> str:
     return re.sub(r"\s+", " ", template.replace("\t", " ").strip())
 
 
-def _counter_read_helper(template: str) -> str | None:
+def _counter_read_sysop(template: str) -> str | None:
     normalized = _normalize_inline_asm(template)
     mapping = {
-        "csrr $0, 0xc00": "__mm_sys_read_cycle",
-        "csrr $0, cycle": "__mm_sys_read_cycle",
-        "csrr $0, 0xc01": "__mm_sys_read_time",
-        "csrr $0, time": "__mm_sys_read_time",
-        "csrr $0, 0xc02": "__mm_sys_read_instret",
-        "csrr $0, instret": "__mm_sys_read_instret",
+        "csrr $0, 0xc00": "counter_cycle",
+        "csrr $0, cycle": "counter_cycle",
+        "csrr $0, 0xc01": "counter_time",
+        "csrr $0, time": "counter_time",
+        "csrr $0, 0xc02": "counter_instret",
+        "csrr $0, instret": "counter_instret",
     }
     return mapping.get(normalized)
+
+
+_FENCE_BITS = {"i": 1, "o": 2, "r": 4, "w": 8}
+
+
+def _fence_mask(spec: str) -> int:
+    mask = 0
+    for ch in spec:
+        mask |= _FENCE_BITS[ch]
+    return mask
+
+
+def _lower_simple_fence_sys(template: str, result: muir.Slot | None) -> muir.Sys | None:
+    if result is not None:
+        return None
+    normalized = _normalize_inline_asm(template).rstrip(";").strip()
+    m = re.fullmatch(r"fence\s+([iorw]+)\s*,\s*([iorw]+)", normalized)
+    if not m:
+        return None
+    return muir.Sys(
+        "fence",
+        (muir.Imm(_fence_mask(m.group(1))), muir.Imm(_fence_mask(m.group(2)))),
+        None,
+    )
+
+
+_STATE_NAMES = {
+    "sstatus": "status",
+    "0x100": "status",
+    "sie": "interrupt_enable",
+    "0x104": "interrupt_enable",
+    "stvec": "trap_vector",
+    "0x105": "trap_vector",
+    "senvcfg": "env_config",
+    "0x10a": "env_config",
+    "sscratch": "scratch",
+    "0x140": "scratch",
+    "sepc": "exception_pc",
+    "0x141": "exception_pc",
+    "scause": "exception_cause",
+    "0x142": "exception_cause",
+    "stval": "exception_value",
+    "0x143": "exception_value",
+    "sip": "interrupt_pending",
+    "0x144": "interrupt_pending",
+    "stimecmp": "timer_compare",
+    "0x14d": "timer_compare",
+    "satp": "address_space",
+    "0x180": "address_space",
+}
+
+
+def _state_name(token: str) -> str | None:
+    return _STATE_NAMES.get(token.lower())
+
+
+def _lower_simple_state_sys(
+    template: str,
+    text: str,
+    result: muir.Slot | None,
+    layout: DataLayout,
+) -> muir.Sys | None:
+    normalized = _normalize_inline_asm(template).rstrip(";").strip()
+    args = _inline_asm_args(text, layout)
+
+    m = re.fullmatch(r"csrr \$0,\s*([A-Za-z0-9x]+)", normalized)
+    if m and result is not None and not args:
+        state = _state_name(m.group(1))
+        if state:
+            return muir.Sys(f"state_read_{state}", (), result)
+
+    for mnemonic, action in (
+        ("csrw", "write"),
+        ("csrs", "set"),
+        ("csrc", "clear"),
+    ):
+        m = re.fullmatch(rf"{mnemonic}\s+([A-Za-z0-9x]+),\s*\$0", normalized)
+        if m and result is None and len(args) == 1:
+            state = _state_name(m.group(1))
+            if state:
+                return muir.Sys(f"state_{action}_{state}", args, None)
+
+    for mnemonic, action in (
+        ("csrrw", "swap"),
+        ("csrrs", "read_set"),
+        ("csrrc", "read_clear"),
+    ):
+        m = re.fullmatch(rf"{mnemonic}\s+\$0,\s*([A-Za-z0-9x]+),\s*\$1", normalized)
+        if m and result is not None and len(args) == 1:
+            state = _state_name(m.group(1))
+            if state:
+                return muir.Sys(f"state_{action}_{state}", args, result)
+
+    return None
+
+
+def _lower_simple_tlb_sys(
+    template: str,
+    text: str,
+    result: muir.Slot | None,
+    layout: DataLayout,
+) -> muir.Sys | None:
+    if result is not None:
+        return None
+    normalized = _normalize_inline_asm(template).rstrip(";").strip()
+    args = _inline_asm_args(text, layout)
+
+    if normalized == "sfence.vma" and not args:
+        return muir.Sys("tlb_flush_all", (), None)
+    if normalized == "sfence.vma $0" and len(args) == 1:
+        return muir.Sys("tlb_flush_address", args, None)
+    if normalized == "sfence.vma x0, $0" and len(args) == 1:
+        return muir.Sys("tlb_flush_asid", args, None)
+    if normalized == "sfence.vma $0, $1" and len(args) == 2:
+        return muir.Sys("tlb_flush_address_asid", args, None)
+    return None
+
+
+def _lower_wait_sys(template: str, result: muir.Slot | None) -> muir.Sys | None:
+    if result is None and _normalize_inline_asm(template) == "wfi":
+        return muir.Sys("wait_interrupt", (), None)
+    return None
 
 
 def _scan_quoted(text: str, start: int) -> int:
@@ -1011,16 +1141,40 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                             stats.dropped_pause_hints += 1
                             continue
                         if result is not None and template is not None:
-                            helper_symbol = _counter_read_helper(template)
-                            if helper_symbol is not None:
+                            counter_op = _counter_read_sysop(template)
+                            if counter_op is not None:
                                 stats.lowered_counter_reads += 1
-                                out.append(muir.Helper(helper_symbol, (), result))
+                                out.append(muir.Sys(counter_op, (), result))
                                 continue
                         if template is not None:
                             plain_mem = _lower_plain_asm_memory(template, inst.text, result, layout)
                             if plain_mem is not None:
                                 stats.lowered_plain_asm_memory += 1
                                 out.append(plain_mem)
+                                continue
+
+                            fence_sys = _lower_simple_fence_sys(template, result)
+                            if fence_sys is not None:
+                                stats.lowered_system_fence += 1
+                                out.append(fence_sys)
+                                continue
+
+                            state_sys = _lower_simple_state_sys(template, inst.text, result, layout)
+                            if state_sys is not None:
+                                stats.lowered_system_state += 1
+                                out.append(state_sys)
+                                continue
+
+                            tlb_sys = _lower_simple_tlb_sys(template, inst.text, result, layout)
+                            if tlb_sys is not None:
+                                stats.lowered_system_tlb += 1
+                                out.append(tlb_sys)
+                                continue
+
+                            wait_sys = _lower_wait_sys(template, result)
+                            if wait_sys is not None:
+                                stats.lowered_system_wait += 1
+                                out.append(wait_sys)
                                 continue
                         if result is None and template is not None and _is_linux_bug_asm(template):
                             # Linux BUG() is a deliberate non-returning trap.
