@@ -258,6 +258,59 @@ class LegalizerTests(unittest.TestCase):
         self.assertEqual(len(sysops[0].result), 2)
         self.assertEqual(stats.lowered_system_lrsc, 1)
 
+    def test_cpu_feature_alternative_callbr_becomes_sys_branch(self):
+        fn, stats = self.lower_one(
+            """
+            define i1 @feature() {
+            entry:
+              callbr void asm sideeffect "886 : nop;887 : .pushsection .alternative;888 : j ${1:l};889 :", "i,!i"(i64 34) to label %fallthrough [label %taken]
+            fallthrough:
+              ret i1 false
+            taken:
+              ret i1 true
+            }
+            """
+        )
+        entry = fn.blocks[0].instructions
+        self.assertIsInstance(entry[0], muir.Sys)
+        self.assertEqual(entry[0].op, "cpu_feature")
+        self.assertEqual(entry[0].args, (muir.Imm(34),))
+        self.assertIsInstance(entry[1], muir.Br)
+        self.assertEqual(entry[1].true_target.label, "fallthrough")
+        self.assertEqual(entry[1].false_target.label, "taken")
+        self.assertEqual(stats.lowered_cpu_feature_branch, 1)
+
+    def test_icache_fence_becomes_system_contract(self):
+        fn, stats = self.lower_one(
+            """
+            define void @flush_icache() {
+            entry:
+              call void asm sideeffect "fence.i", "~{memory}"()
+              ret void
+            }
+            """
+        )
+        sysops = [i for b in fn.blocks for i in b.instructions if isinstance(i, muir.Sys)]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(sysops[0].op, "icache_sync")
+        self.assertEqual(stats.lowered_system_icache, 1)
+
+    def test_alternative_tlb_flush_becomes_system_contract(self):
+        fn, stats = self.lower_one(
+            """
+            define void @flush_one(i64 %addr) {
+            entry:
+              call void asm sideeffect "886 : sfence.vma $0;887 : .pushsection .alternative;888 : sfence.vma;889 :", "r,~{memory}"(i64 %addr)
+              ret void
+            }
+            """
+        )
+        sysops = [i for b in fn.blocks for i in b.instructions if isinstance(i, muir.Sys)]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(sysops[0].op, "tlb_flush_address")
+        self.assertEqual(sysops[0].args, (muir.Slot("addr"),))
+        self.assertEqual(stats.lowered_alternative_tlb, 1)
+
     def test_bitwise_routes_to_explicit_helper(self):
         fn, stats = self.lower_one(
             """
