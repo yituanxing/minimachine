@@ -600,6 +600,28 @@ class RuntimeTests(unittest.TestCase):
             (1,),
         )
 
+    def test_signed_saturating_add_executes(self):
+        functions, _ = legalize_module(
+            """
+            declare i32 @llvm.sadd.sat.i32(i32, i32)
+
+            define i32 @sat_add(i32 %a, i32 %b) {
+            entry:
+              %r = call i32 @llvm.sadd.sat.i32(i32 %a, i32 %b)
+              ret i32 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("sat_add", (0x7fffffff, 1)),
+            (0x7fffffff,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function("sat_add", (0x80000000, 0xffffffff)),
+            (0x80000000,),
+        )
+
     def test_pointer_scaled_helper_executes(self):
         fn = muir.Function(
             "ptr",
