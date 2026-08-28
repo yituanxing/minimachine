@@ -117,7 +117,7 @@ def _has_system_escape(fn: muir.Function) -> tuple[int, int, Counter[str], Count
                 key = _escape_key(inst)
                 groups[key] += 1
                 families[_escape_family(inst)] += 1
-                samples.setdefault(key, re.sub(r"\s+", " ", inst.text).strip()[:1200])
+                samples.setdefault(key, re.sub(r"\s+", " ", inst.text).strip()[:12000])
     return traps, arch, kinds, groups, families, samples
 
 
