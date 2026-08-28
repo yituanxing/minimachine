@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import json
 from pathlib import Path
 import re
 import sys
@@ -52,6 +53,7 @@ def parse_args():
         type=Path,
         help="JSON target linker contract with section groups and boundaries",
     )
+    p.add_argument("--json", type=Path, help="write complete executable probe report")
     return p.parse_args()
 
 
@@ -349,6 +351,44 @@ def main() -> int:
         print(f"EXEC_RUNTIME_MISSING_HELPER {name}")
     for name in missing_systems[:40]:
         print(f"EXEC_RUNTIME_MISSING_SYSTEM {name}")
+
+    if args.json is not None:
+        report = {
+            "summary": {
+                "functions": len(functions),
+                "p3_functions": len(p3_functions),
+                "blocked_functions": len(blocked_functions),
+                "arch_escape_sites": arch_escape_sites,
+                "p3_instructions": p3_instruction_count,
+                "runtime_helpers": len(surface.helpers),
+                "runtime_systems": len(surface.system_ops),
+                "missing_runtime_helpers": len(missing_helpers),
+                "missing_runtime_systems": len(missing_systems),
+                "image_objects": len(image.objects),
+                "image_bytes": image.byte_size,
+                "image_relocations": image.relocation_count,
+                "external_data": len(image.external_data),
+                "external_functions": len(image.external_functions),
+                "linker_aliases": len(symbol_aliases),
+                "linker_boundaries": len(linker_symbols),
+                "image_installed": image_installed,
+                "p3_unresolved_symbols": len(p3_missing_symbols),
+                "p3_unresolved_blocks": len(p3_missing_blocks),
+                "image_unresolved_symbols": len(image_missing_symbols),
+                "image_unresolved_blocks": len(image_missing_blocks),
+            },
+            "blocked_function_names": blocked_functions,
+            "p3_unresolved_symbols": dict(p3_missing_symbols.most_common()),
+            "p3_unresolved_blocks": dict(p3_missing_blocks.most_common()),
+            "image_unresolved_symbols": sorted(image_missing_symbols),
+            "image_unresolved_blocks": sorted(image_missing_blocks),
+            "runtime_missing_helpers": list(missing_helpers),
+            "runtime_missing_systems": list(missing_systems),
+            "linker_symbols": sorted(linker_symbols),
+            "linker_aliases": dict(sorted(symbol_aliases.items())),
+        }
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 
     failed = False
     if (
