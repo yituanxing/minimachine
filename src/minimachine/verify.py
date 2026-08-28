@@ -12,9 +12,11 @@ def _check_target(target: muir.Target, labels: set[str]) -> None:
         if target.label not in labels:
             raise VerifyError(f"unknown direct target: {target.label}")
         return
-    if target.is_indirect():
+    if target.is_external() or target.is_indirect():
         return
-    raise VerifyError("target must be exactly one of local label, indirect slot, or indirect address")
+    raise VerifyError(
+        "target must be exactly one of local label, external symbol, indirect slot, or indirect address"
+    )
 
 
 def verify_muir(function: muir.Function) -> None:
