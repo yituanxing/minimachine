@@ -49,6 +49,7 @@ class LegalizeStats:
     lowered_system_tlb: int = 0
     lowered_system_wait: int = 0
     lowered_system_atomic: int = 0
+    lowered_static_branch: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -72,6 +73,7 @@ class LegalizeStats:
             "lowered_system_tlb": self.lowered_system_tlb,
             "lowered_system_wait": self.lowered_system_wait,
             "lowered_system_atomic": self.lowered_system_atomic,
+            "lowered_static_branch": self.lowered_static_branch,
         }
 
 
@@ -699,6 +701,41 @@ def _lower_plain_asm_memory(
     return None
 
 
+def _lower_jump_label_callbr(
+    inst: TextInst,
+    layout: DataLayout,
+    temp_counter: list[int],
+    frame_slots: set[str],
+) -> list[muir.Instr] | None:
+    template = _inline_asm_template(inst.text)
+    if template is None or "__jump_table" not in template:
+        return None
+
+    labels = _LABEL_USE_RE.findall(inst.text)
+    if len(labels) != 2:
+        return None
+    args = _inline_asm_args(inst.text, layout)
+    if len(args) != 1:
+        return None
+
+    temp_counter[0] += 1
+    cond = muir.Slot(f"__static_branch{temp_counter[0]}")
+    frame_slots.add(cond.name)
+
+    fallthrough, patched_target = labels
+    return [
+        muir.Sys("static_branch", (args[0],), cond),
+        muir.Br(
+            muir.Width.I8,
+            muir.Cond.EQ,
+            cond,
+            muir.Imm(0),
+            muir.Target(label=fallthrough),
+            muir.Target(label=patched_target),
+        ),
+    ]
+
+
 def _parse_call(inst: TextInst, layout: DataLayout):
     text = inst.text
     if re.search(r"\basm\b", text):
@@ -1287,6 +1324,15 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     continue
 
                 if op in {"callbr", "indirectbr"}:
+                    if op == "callbr":
+                        static_branch = _lower_jump_label_callbr(
+                            inst, layout, temp_counter, frame_slots
+                        )
+                        if static_branch is not None:
+                            stats.lowered_static_branch += 1
+                            out.extend(static_branch)
+                            continue
+
                     labels = _LABEL_USE_RE.findall(inst.text)
                     if not labels:
                         raise ValueError(f"arch/control escape has no successor: {inst.text}")
