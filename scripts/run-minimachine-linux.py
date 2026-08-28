@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 import re
 import sys
@@ -33,7 +34,8 @@ def parse_args():
         help="MiniMachine linker contract used to install the Linux data image",
     )
     p.add_argument("--entry", default="start_kernel")
-    p.add_argument("--max-steps", type=int, default=2_000_000)
+    p.add_argument("--max-steps", type=int, default=10_000_000)
+    p.add_argument("--progress-every", type=int, default=250_000)
     return p.parse_args()
 
 
@@ -87,6 +89,56 @@ def linux_ecall(vm, args: tuple[int, ...]):
     sys.stdout.write(text)
     sys.stdout.flush()
     return None
+
+
+def referenced_slots(value):
+    seen: set[int] = set()
+
+    def walk(obj):
+        identity = id(obj)
+        if identity in seen:
+            return
+        seen.add(identity)
+
+        if isinstance(obj, muir.Slot):
+            yield obj.name
+            return
+        if is_dataclass(obj):
+            for field in fields(obj):
+                yield from walk(getattr(obj, field.name))
+            return
+        if isinstance(obj, (tuple, list, set, frozenset)):
+            for item in obj:
+                yield from walk(item)
+            return
+        if isinstance(obj, dict):
+            for key, item in obj.items():
+                yield from walk(key)
+                yield from walk(item)
+
+    yield from walk(value)
+
+
+def dump_instruction_slots(vm, inst) -> None:
+    if inst is None or vm.current_function is None:
+        return
+    linked = vm.program.functions.get(vm.current_function)
+    if linked is None:
+        return
+
+    for name in sorted(set(referenced_slots(inst))):
+        offset = linked.slot_offsets.get(name)
+        if offset is None:
+            continue
+        cell = (vm.sp + offset) & ((1 << 64) - 1)
+        value = vm.memory.read(cell, 64)
+        preview = bytes(vm.memory.read(value + i, 8) for i in range(16))
+        print(
+            "BOOT_EXEC_SLOT "
+            f"name={name} cell=0x{cell:x} value=0x{value:x} "
+            f"mem16={preview.hex()}",
+            flush=True,
+        )
 
 
 def current_instruction(vm):
@@ -170,6 +222,24 @@ def main() -> int:
 
     vm = program.new_vm()
     vm.ecall_handler = linux_ecall
+
+    original_step = vm.step
+    next_progress = args.progress_every
+
+    def traced_step():
+        nonlocal next_progress
+        if args.progress_every > 0 and vm.steps >= next_progress:
+            print(
+                "BOOT_EXEC_PROGRESS "
+                f"steps={vm.steps} function={vm.current_function} "
+                f"block={vm.current_block} ip={vm.ip}",
+                flush=True,
+            )
+            next_progress += args.progress_every
+        original_step()
+
+    vm.step = traced_step
+
     try:
         vm.run_function(
             args.entry,
@@ -186,7 +256,8 @@ def main() -> int:
             f"error={exc}"
         )
         if inst is not None:
-            print(f"BOOT_EXEC_NEXT {inst!r}")
+            print(f"BOOT_EXEC_NEXT {inst!r}", flush=True)
+            dump_instruction_slots(vm, inst)
         return 1
 
     print(
