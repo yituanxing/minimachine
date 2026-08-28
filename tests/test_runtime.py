@@ -279,6 +279,34 @@ class RuntimeTests(unittest.TestCase):
         tp_vm.system_state["thread_pointer"] = 0xABCDEF
         self.assertEqual(tp_vm.run_function("read_tp"), (0xABCDEF,))
 
+    def test_aggregate_load_store_round_trip_executes(self):
+        functions, _ = legalize_module(
+            """
+            %Pair = type { i32, i32 }
+
+            define void @copy_pair(ptr %src, ptr %dst) {
+            entry:
+              %v = load %Pair, ptr %src
+              store %Pair %v, ptr %dst
+              ret void
+            }
+            """
+        )
+        program = executable(functions)
+        vm = program.new_vm()
+        source = 0x4000
+        dest = 0x5000
+        raw = bytes([1, 2, 3, 4, 0xAA, 0xBB, 0xCC, 0xDD])
+        for i, byte in enumerate(raw):
+            vm.memory.write(source + i, 8, byte)
+
+        self.assertEqual(
+            vm.run_function("copy_pair", (source, dest), result_count=0),
+            (),
+        )
+        copied = bytes(vm.memory.read(dest + i, 8) for i in range(len(raw)))
+        self.assertEqual(copied, raw)
+
     def test_pointer_scaled_helper_executes(self):
         fn = muir.Function(
             "ptr",
