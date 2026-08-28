@@ -254,6 +254,34 @@ def helper_callback(symbol: str):
 
         return memmove
 
+    if symbol == "__mm_aggregate_literal":
+        def aggregate_literal(vm: VM, args: tuple[int, ...]):
+            if not args or (len(args) - 1) % 3:
+                raise VMError(
+                    "__mm_aggregate_literal expects total,(offset,value,size)*"
+                )
+            total_size = args[0]
+            blob = vm.alloc_bytes(total_size)
+            for i in range(total_size):
+                vm.memory.write(blob + i, 8, 0)
+
+            for n in range(1, len(args), 3):
+                offset, value, size = args[n : n + 3]
+                if size < 1 or size > 8:
+                    raise VMError(
+                        f"aggregate literal scalar size outside one word: {size}"
+                    )
+                if offset + size > total_size:
+                    raise VMError("aggregate literal initializer exceeds blob")
+                for byte_index in range(size):
+                    vm.memory.write(
+                        blob + offset + byte_index,
+                        8,
+                        (value >> (8 * byte_index)) & 0xFF,
+                    )
+            return blob
+        return aggregate_literal
+
     if symbol == "__mm_load_aggregate":
         def load_aggregate(vm: VM, args: tuple[int, ...]):
             if len(args) != 2:
