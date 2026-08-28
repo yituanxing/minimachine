@@ -711,5 +711,28 @@ class RuntimeTests(unittest.TestCase):
             b"aabcd",
         )
 
+    def test_expect_and_is_constant_intrinsics_execute(self):
+        functions, _ = legalize_module(
+            """
+            declare i64 @llvm.expect.i64(i64, i64)
+            declare i1 @llvm.is.constant.i64(i64)
+
+            define i64 @expect_user(i64 %x) {
+            entry:
+              %r = call i64 @llvm.expect.i64(i64 %x, i64 7)
+              ret i64 %r
+            }
+
+            define i1 @is_constant_user(i64 %x) {
+            entry:
+              %r = call i1 @llvm.is.constant.i64(i64 %x)
+              ret i1 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(program.new_vm().run_function("expect_user", (42,)), (42,))
+        self.assertEqual(program.new_vm().run_function("is_constant_user", (42,)), (0,))
+
 if __name__ == "__main__":
     unittest.main()
