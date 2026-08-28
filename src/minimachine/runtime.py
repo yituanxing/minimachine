@@ -286,17 +286,61 @@ def helper_callback(symbol: str):
             return args[0]
         return freeze_aggregate
 
-    # extractvalue/insertvalue still need field offset metadata.
-    if symbol in {
-        "__mm_extractvalue",
-        "__mm_insertvalue",
-    }:
-        def incomplete(vm: VM, args: tuple[int, ...]):
-            raise VMError(
-                f"{symbol} requires aggregate layout metadata before execution"
-            )
+    if symbol == "__mm_extractvalue":
+        def extractvalue(vm: VM, args: tuple[int, ...]):
+            if len(args) != 4:
+                raise VMError(
+                    "__mm_extractvalue expects blob,offset,size,is_blob"
+                )
+            blob, offset, size, is_blob = args
+            if is_blob:
+                out = vm.alloc_bytes(size)
+                for i in range(size):
+                    byte = 0 if blob == 0 else vm.memory.read(blob + offset + i, 8)
+                    vm.memory.write(out + i, 8, byte)
+                return out
+            if size < 1 or size > 8:
+                raise VMError(
+                    f"scalar extractvalue size outside one word: {size}"
+                )
+            value = 0
+            if blob != 0:
+                for i in range(size):
+                    value |= vm.memory.read(blob + offset + i, 8) << (8 * i)
+            return value
+        return extractvalue
 
-        return incomplete
+    if symbol == "__mm_insertvalue":
+        def insertvalue(vm: VM, args: tuple[int, ...]):
+            if len(args) != 6:
+                raise VMError(
+                    "__mm_insertvalue expects blob,total,offset,value,size,is_blob"
+                )
+            blob, total_size, offset, value, field_size, field_is_blob = args
+            if offset + field_size > total_size:
+                raise VMError("__mm_insertvalue field exceeds aggregate")
+            out = vm.alloc_bytes(total_size)
+            for i in range(total_size):
+                byte = 0 if blob == 0 else vm.memory.read(blob + i, 8)
+                vm.memory.write(out + i, 8, byte)
+
+            if field_is_blob:
+                for i in range(field_size):
+                    byte = 0 if value == 0 else vm.memory.read(value + i, 8)
+                    vm.memory.write(out + offset + i, 8, byte)
+            else:
+                if field_size < 1 or field_size > 8:
+                    raise VMError(
+                        f"scalar insertvalue size outside one word: {field_size}"
+                    )
+                for i in range(field_size):
+                    vm.memory.write(
+                        out + offset + i,
+                        8,
+                        (value >> (8 * i)) & 0xFF,
+                    )
+            return out
+        return insertvalue
 
     return None
 
