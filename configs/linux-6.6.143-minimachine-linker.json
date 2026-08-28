@@ -359,6 +359,22 @@
     {
       "symbol": "_end",
       "point": "data_end"
+    },
+    {
+      "symbol": "_sinittext",
+      "point": "code_start"
+    },
+    {
+      "symbol": "_einittext",
+      "point": "code_start"
+    },
+    {
+      "symbol": "__init_begin",
+      "point": "data_end"
+    },
+    {
+      "symbol": "__init_end",
+      "point": "data_end"
     }
   ]
 }
