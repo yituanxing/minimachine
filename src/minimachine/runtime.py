@@ -338,6 +338,26 @@ def helper_callback(symbol: str):
 
         return add
 
+    m = re.fullmatch(r"__mm_llvm_expect(?:_with_probability)?_.+", symbol)
+    if m:
+        def llvm_expect(vm: VM, args: tuple[int, ...]):
+            if len(args) not in {2, 3}:
+                raise VMError(f"{symbol} expects value,expected[,probability]")
+            return args[0]
+
+        return llvm_expect
+
+    m = re.fullmatch(r"__mm_llvm_is_constant_.+", symbol)
+    if m:
+        def llvm_is_constant(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects one value")
+            # Reaching the reference VM means compile-time constant folding
+            # did not prove the operand manifestly constant.
+            return 0
+
+        return llvm_is_constant
+
     m = re.fullmatch(r"__mm_llvm_bswap_i(16|32|64)", symbol)
     if m:
         bits = int(m.group(1))
