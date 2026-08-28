@@ -212,6 +212,61 @@ def dump_linux_memory_state(vm) -> None:
             )
 
 
+def probe_linux_memory_helpers(vm) -> None:
+    def run(name: str, args: tuple[int, ...], result_count: int = 1):
+        if name not in vm.program.functions:
+            print(f"BOOT_EXEC_PROBE function={name} missing=1", flush=True)
+            return None
+        try:
+            result = vm.run_function(
+                name,
+                args,
+                result_count=result_count,
+                max_steps=500_000,
+            )
+        except VMError as exc:
+            print(
+                f"BOOT_EXEC_PROBE function={name} error={exc}",
+                flush=True,
+            )
+            return None
+        print(
+            f"BOOT_EXEC_PROBE function={name} result={result}",
+            flush=True,
+        )
+        return result
+
+    start = vm.alloc_bytes(8, align=8)
+    end = vm.alloc_bytes(8, align=8)
+    run("get_pfn_range_for_nid", (0, start, end), result_count=0)
+    start_pfn = vm.memory.read(start, 64)
+    end_pfn = vm.memory.read(end, 64)
+    print(
+        "BOOT_EXEC_PROBE_PFN "
+        f"start={start_pfn} end={end_pfn}",
+        flush=True,
+    )
+
+    if end_pfn >= start_pfn:
+        run(
+            "__absent_pages_in_range",
+            (0, start_pfn, end_pfn),
+        )
+
+        zone_start = vm.alloc_bytes(8, align=8)
+        zone_end = vm.alloc_bytes(8, align=8)
+        run(
+            "zone_spanned_pages_in_node",
+            (0, 0, start_pfn, end_pfn, zone_start, zone_end),
+        )
+        print(
+            "BOOT_EXEC_PROBE_ZONE "
+            f"start={vm.memory.read(zone_start, 64)} "
+            f"end={vm.memory.read(zone_end, 64)}",
+            flush=True,
+        )
+
+
 def current_instruction(vm):
     if vm.current_function is None or vm.current_block is None:
         return None
@@ -330,6 +385,7 @@ def main() -> int:
             print(f"BOOT_EXEC_NEXT {inst!r}", flush=True)
             dump_instruction_slots(vm, inst)
         dump_linux_memory_state(vm)
+        probe_linux_memory_helpers(vm)
         return 1
 
     print(
