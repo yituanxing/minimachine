@@ -196,6 +196,57 @@ class RuntimeTests(unittest.TestCase):
         vm.ecall_handler = lambda _vm, args: (args[0], args[0] + 4)
         self.assertEqual(vm.run_function("ecall_user", (9,)), (4,))
 
+    def test_vector_state_snapshot_and_restore_execute(self):
+        fn = muir.Function(
+            "vector_state_user",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Sys(
+                            "vector_state_snapshot",
+                            (),
+                            (
+                                muir.Slot("a"),
+                                muir.Slot("b"),
+                                muir.Slot("c"),
+                                muir.Slot("d"),
+                                muir.Slot("e"),
+                            ),
+                        ),
+                        muir.Sys(
+                            "vector_state_restore",
+                            (
+                                muir.Imm(11),
+                                muir.Imm(12),
+                                muir.Imm(13),
+                                muir.Imm(14),
+                            ),
+                            None,
+                        ),
+                        muir.Sys(
+                            "vector_state_snapshot",
+                            (),
+                            (
+                                muir.Slot("a2"),
+                                muir.Slot("b2"),
+                                muir.Slot("c2"),
+                                muir.Slot("d2"),
+                                muir.Slot("e2"),
+                            ),
+                        ),
+                        muir.Ret(muir.Slot("e2")),
+                    ],
+                )
+            ],
+            {"a","b","c","d","e","a2","b2","c2","d2","e2"},
+        )
+        program = executable([fn])
+        vm = program.new_vm()
+        vm.vector_state = (1, 2, 3, 4, 64)
+        self.assertEqual(vm.run_function("vector_state_user"), (64,))
+        self.assertEqual(vm.vector_state, (11, 12, 13, 14, 64))
+
     def test_pointer_scaled_helper_executes(self):
         fn = muir.Function(
             "ptr",
