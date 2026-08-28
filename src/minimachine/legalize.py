@@ -1158,18 +1158,163 @@ def _parallel_copies(copies, temp_index: list[int]):
     return out
 
 
-def _typed_aggregate_operand(text: str) -> tuple[str, muir.Value]:
+def _split_typed_value(text: str) -> tuple[str, str]:
     raw = text.strip()
-    m = re.search(
-        r"(%[-A-Za-z$._0-9]+|@[-A-Za-z$._0-9]+|-?[0-9]+|true|false|null|zeroinitializer|poison|undef)$",
-        raw,
-    )
+    if not raw:
+        raise ValueError("empty typed value")
+
+    if raw[0] in "[{<":
+        stack: list[str] = []
+        close_to_open = {"]": "[", "}": "{", ">": "<"}
+        for i, ch in enumerate(raw):
+            if ch in "[{<":
+                stack.append(ch)
+            elif ch in close_to_open:
+                if not stack or stack[-1] != close_to_open[ch]:
+                    raise ValueError(f"unbalanced typed value: {text}")
+                stack.pop()
+                if not stack:
+                    ty = raw[: i + 1].strip()
+                    value = raw[i + 1 :].strip()
+                    if not value:
+                        raise ValueError(f"typed value has no value: {text}")
+                    return ty, value
+        raise ValueError(f"unterminated aggregate type: {text}")
+
+    m = re.match(r"(%[-A-Za-z$._0-9]+|ptr(?:\s+addrspace\(\d+\))?|i\d+|half|float|double|fp128)\s+(.+)$", raw)
     if not m:
-        raise ValueError(f"cannot parse aggregate operand: {text}")
-    ty = raw[:m.start()].strip()
-    if not ty:
-        raise ValueError(f"aggregate operand has no type: {text}")
-    return ty, _value(m.group(1))
+        raise ValueError(f"cannot split typed value: {text}")
+    return m.group(1).strip(), m.group(2).strip()
+
+
+def _typed_aggregate_operand(text: str) -> tuple[str, muir.Value]:
+    ty, value_text = _split_typed_value(text)
+    if value_text.startswith(("[", "{", "<")):
+        raise ValueError(f"aggregate literal needs materialization: {text}")
+    return ty, _value(value_text)
+
+
+def _literal_is_zero(layout: DataLayout, ty: str, value_text: str) -> bool:
+    value = value_text.strip()
+    if value in {"0", "false", "null", "zeroinitializer"}:
+        return True
+    if value in {"poison", "undef"}:
+        return False
+
+    info = layout.info(ty)
+    if info.fields is not None:
+        if not (value.startswith("{") and value.endswith("}")):
+            return False
+        fields = _split_top_commas(value[1:-1].strip())
+        if len(fields) != len(info.fields):
+            return False
+        for field_ty, field_text in zip(info.fields, fields):
+            parsed_ty, parsed_value = _split_typed_value(field_text)
+            if parsed_ty != field_ty:
+                return False
+            if not _literal_is_zero(layout, field_ty, parsed_value):
+                return False
+        return True
+
+    if info.element is not None:
+        if not (
+            (value.startswith("[") and value.endswith("]"))
+            or (value.startswith("<") and value.endswith(">"))
+        ):
+            return False
+        items = _split_top_commas(value[1:-1].strip())
+        if info.count is None or len(items) != info.count:
+            return False
+        for item in items:
+            parsed_ty, parsed_value = _split_typed_value(item)
+            if parsed_ty != info.element:
+                return False
+            if not _literal_is_zero(layout, info.element, parsed_value):
+                return False
+        return True
+
+    return False
+
+
+def _literal_zero_outside_insert_path(
+    layout: DataLayout,
+    ty: str,
+    value_text: str,
+    indices: tuple[int, ...],
+) -> bool:
+    value = value_text.strip()
+    if value == "zeroinitializer":
+        return True
+    if not indices:
+        # The whole value is overwritten by insertvalue, so its old content is
+        # semantically irrelevant, including poison/undef.
+        return True
+
+    info = layout.info(ty)
+    index = indices[0]
+    rest = indices[1:]
+
+    if info.fields is not None:
+        if index < 0 or index >= len(info.fields):
+            return False
+        if not (value.startswith("{") and value.endswith("}")):
+            return False
+        fields = _split_top_commas(value[1:-1].strip())
+        if len(fields) != len(info.fields):
+            return False
+        for i, (field_ty, field_text) in enumerate(zip(info.fields, fields)):
+            parsed_ty, parsed_value = _split_typed_value(field_text)
+            if parsed_ty != field_ty:
+                return False
+            if i == index:
+                if not _literal_zero_outside_insert_path(
+                    layout, field_ty, parsed_value, rest
+                ):
+                    return False
+            elif not _literal_is_zero(layout, field_ty, parsed_value):
+                return False
+        return True
+
+    if info.element is not None:
+        if info.count is None or index < 0 or index >= info.count:
+            return False
+        if not (
+            (value.startswith("[") and value.endswith("]"))
+            or (value.startswith("<") and value.endswith(">"))
+        ):
+            return False
+        items = _split_top_commas(value[1:-1].strip())
+        if len(items) != info.count:
+            return False
+        for i, item in enumerate(items):
+            parsed_ty, parsed_value = _split_typed_value(item)
+            if parsed_ty != info.element:
+                return False
+            if i == index:
+                if not _literal_zero_outside_insert_path(
+                    layout, info.element, parsed_value, rest
+                ):
+                    return False
+            elif not _literal_is_zero(layout, info.element, parsed_value):
+                return False
+        return True
+
+    return False
+
+
+def _insert_base_operand(
+    layout: DataLayout,
+    typed_text: str,
+    indices: tuple[int, ...],
+) -> tuple[str, muir.Value]:
+    ty, value_text = _split_typed_value(typed_text)
+    if value_text.startswith(("[", "{", "<")):
+        if _literal_zero_outside_insert_path(layout, ty, value_text, indices):
+            return ty, muir.Imm(0)
+        raise ValueError(
+            f"aggregate literal contains live nonzero/poison data: {typed_text}"
+        )
+    return ty, _value(value_text)
 
 
 def _aggregate_index_layout(
@@ -1964,12 +2109,14 @@ def legalize_function(
                     parts = _split_top_commas(body)
                     if len(parts) < 3:
                         raise ValueError(f"cannot parse insertvalue: {inst.text}")
-                    aggregate_ty, aggregate_value = _typed_aggregate_operand(parts[0])
-                    _, inserted_value = _typed_aggregate_operand(parts[1])
                     try:
                         indices = tuple(int(x.strip(), 0) for x in parts[2:])
                     except ValueError as e:
                         raise ValueError(f"non-constant insertvalue index: {inst.text}") from e
+                    aggregate_ty, aggregate_value = _insert_base_operand(
+                        layout, parts[0], indices
+                    )
+                    _, inserted_value = _typed_aggregate_operand(parts[1])
 
                     aggregate_size = layout.info(aggregate_ty).size
                     offset, field_ty, field_size, field_is_blob = _aggregate_index_layout(
