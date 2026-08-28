@@ -27,7 +27,7 @@
 #include <asm/ptrace.h>
 #include <asm/sections.h>
 
-#define MINIMACHINE_BOOT_RAM_SIZE (64UL * 1024 * 1024)
+#define MINIMACHINE_BOOT_RAM_SIZE (32UL * 1024 * 1024)
 
 extern char _end[];
 
@@ -49,6 +49,10 @@ static const char setup_arch_entered[] =
 	"Linux/MiniMachine: setup_arch entered\n";
 static const char setup_arch_ready[] =
 	"Linux/MiniMachine: setup_arch ready\n";
+static const char mem_init_entered[] =
+	"Linux/MiniMachine: mem_init entered\n";
+static const char mem_init_ready[] =
+	"Linux/MiniMachine: mem_init ready\n";
 
 static __always_inline void minimachine_boot_console(const char *text,
 						      unsigned long len)
@@ -124,7 +128,11 @@ void __init paging_init(void)
 
 void __init mem_init(void)
 {
+	minimachine_boot_console(mem_init_entered,
+				 sizeof(mem_init_entered) - 1);
 	memblock_free_all();
+	minimachine_boot_console(mem_init_ready,
+				 sizeof(mem_init_ready) - 1);
 }
 
 void __init setup_arch(char **cmdline_p)
