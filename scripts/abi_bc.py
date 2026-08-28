@@ -52,7 +52,11 @@ def _asm_template(text: str) -> str:
 
 def _escape_key(inst: muir.ArchEscape) -> str:
     if "asm" in inst.text:
-        return f"{inst.kind}|{_asm_template(inst.text)}"
+        template = _asm_template(inst.text)
+        if template == "<unparsed-asm>":
+            raw = re.sub(r"\s+", " ", inst.text).strip()[:220]
+            return f"{inst.kind}|<unparsed-asm>|{raw}"
+        return f"{inst.kind}|{template}"
     return f"{inst.kind}|<control>"
 
 
