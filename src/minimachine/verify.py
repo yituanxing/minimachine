@@ -38,6 +38,9 @@ def verify_muir(function: muir.Function) -> None:
             elif isinstance(inst, muir.Helper):
                 if not inst.symbol:
                     raise VerifyError("HELPER requires a runtime symbol")
+            elif isinstance(inst, muir.Sys):
+                if not inst.op:
+                    raise VerifyError("SYS requires a system operation name")
             elif isinstance(inst, muir.ArchEscape):
                 for target in inst.targets:
                     _check_target(target, labels)
