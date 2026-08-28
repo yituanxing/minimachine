@@ -69,8 +69,11 @@ def scan_one(path: Path, root: Path, llvm_dis: str):
         words = rhs.split()
         linkage = classify_linkage(words[:6])
 
-        # Pure external global declarations are not definitions.
-        if re.search(r"\bexternal\s+(?:global|constant)\b", rhs):
+        # Explicit external/extern_weak globals are declarations,
+        # even when dso_local/visibility/thread-local attributes appear before
+        # the eventual global/constant keyword.
+        first = rhs.split(None, 1)[0] if rhs.split() else ""
+        if first in {"external", "extern_weak"}:
             continue
 
         kind = "alias" if re.search(r"\balias\b", rhs) else "global"
@@ -119,7 +122,10 @@ def main() -> int:
             # duplicates are the corpus-quality problem we care about.
             strongish = [
                 e for e in nonlocal_entries
-                if e[2] not in {"weak", "weak_odr", "linkonce", "linkonce_odr", "available_externally"}
+                if e[2] not in {
+                    "weak", "weak_odr", "linkonce", "linkonce_odr",
+                    "available_externally", "appending", "common",
+                }
             ]
             if len(strongish) >= 2:
                 strong_duplicates.append((name, strongish))
