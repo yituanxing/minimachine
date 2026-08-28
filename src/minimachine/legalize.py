@@ -39,6 +39,8 @@ class LegalizeStats:
     arch_escapes: int = 0
     dropped_compiler_barriers: int = 0
     lowered_linux_bug: int = 0
+    dropped_pause_hints: int = 0
+    lowered_counter_reads: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -52,6 +54,8 @@ class LegalizeStats:
             "arch_escapes": self.arch_escapes,
             "dropped_compiler_barriers": self.dropped_compiler_barriers,
             "lowered_linux_bug": self.lowered_linux_bug,
+            "dropped_pause_hints": self.dropped_pause_hints,
+            "lowered_counter_reads": self.lowered_counter_reads,
         }
 
 
@@ -383,6 +387,23 @@ def _inline_asm_template(text: str) -> str | None:
 
 def _is_linux_bug_asm(template: str) -> bool:
     return "ebreak" in template and "__bug_table" in template
+
+
+def _normalize_inline_asm(template: str) -> str:
+    return re.sub(r"\s+", " ", template.replace("\t", " ").strip())
+
+
+def _counter_read_helper(template: str) -> str | None:
+    normalized = _normalize_inline_asm(template)
+    mapping = {
+        "csrr $0, 0xc00": "__mm_sys_read_cycle",
+        "csrr $0, cycle": "__mm_sys_read_cycle",
+        "csrr $0, 0xc01": "__mm_sys_read_time",
+        "csrr $0, time": "__mm_sys_read_time",
+        "csrr $0, 0xc02": "__mm_sys_read_instret",
+        "csrr $0, instret": "__mm_sys_read_instret",
+    }
+    return mapping.get(normalized)
 
 
 def _parse_call(inst: TextInst, layout: DataLayout):
@@ -852,6 +873,15 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                             # reordering, so no runtime instruction is required.
                             stats.dropped_compiler_barriers += 1
                             continue
+                        if result is None and template is not None and _normalize_inline_asm(template) == "pause":
+                            stats.dropped_pause_hints += 1
+                            continue
+                        if result is not None and template is not None:
+                            helper_symbol = _counter_read_helper(template)
+                            if helper_symbol is not None:
+                                stats.lowered_counter_reads += 1
+                                out.append(muir.Helper(helper_symbol, (), result))
+                                continue
                         if result is None and template is not None and _is_linux_bug_asm(template):
                             # Linux BUG() is a deliberate non-returning trap.
                             # Preserve the runtime fault, not the RISC-V ebreak
