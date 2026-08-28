@@ -1,0 +1,57 @@
+name: Linux MiniMachine Target Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - configs/linux-6.6.143-minimachine.env
+      - linux-overlay/arch/minimachine/**
+      - scripts/check-minimachine-target.sh
+      - .github/workflows/linux-minimachine-target.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minimachine-linux-target-gate
+  cancel-in-progress: true
+
+jobs:
+  kconfig:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CACHE_ROOT: ${{ github.workspace }}/.cache/minimachine
+      BUILD_ROOT: ${{ github.workspace }}/build/linux-6.6.143-minimachine-target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install target-gate dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends             clang-18 llvm-18 lld-18 xz-utils
+
+      - name: Restore pinned Linux archive
+        id: source-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/minimachine/source/linux-6.6.143.tar.xz
+          key: minimachine-linux-source-6.6.143-dace1f8dc9c0dbf5
+
+      - name: Validate MiniMachine target boundary
+        run: bash scripts/check-minimachine-target.sh
+
+      - name: Save pinned Linux archive
+        if: always() && steps.source-cache.outputs.cache-hit != 'true' && hashFiles('.cache/minimachine/source/linux-6.6.143.tar.xz') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/minimachine/source/linux-6.6.143.tar.xz
+          key: minimachine-linux-source-6.6.143-dace1f8dc9c0dbf5
+
+      - name: Upload target config
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-linux-target-${{ github.run_id }}
+          path: build/linux-6.6.143-minimachine-target/kconfig/.config
+          retention-days: 14
