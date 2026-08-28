@@ -13,7 +13,7 @@ _LOCAL_RE = re.compile(r"%[-A-Za-z$._0-9]+")
 _VALUE_TOKEN_RE = re.compile(
     r"(%[-A-Za-z$._0-9]+|@[-A-Za-z$._0-9]+|-?[0-9]+|true|false|null)"
 )
-_INT_TYPE_RE = re.compile(r"\bi(1|8|16|32|64)\b")
+_INT_TYPE_RE = re.compile(r"\bi(\d+)\b")
 _PHI_IN_RE = re.compile(r"\[\s*([^,]+),\s*%([-A-Za-z$._0-9]+)\s*\]")
 _LABEL_USE_RE = re.compile(r"label\s+%([-A-Za-z$._0-9]+)")
 
@@ -68,10 +68,22 @@ def _width(bits: int) -> muir.Width:
     }[bits]
 
 
+def _storage_width(bits: int) -> muir.Width:
+    if bits <= 8:
+        return muir.Width.I8
+    if bits <= 16:
+        return muir.Width.I16
+    if bits <= 32:
+        return muir.Width.I32
+    if bits <= 64:
+        return muir.Width.I64
+    raise ValueError(f"integer width exceeds one MiniMachine slot: i{bits}")
+
+
 def _first_width(text: str, *, default_pointer: bool = False) -> muir.Width:
     m = _INT_TYPE_RE.search(text)
     if m:
-        return _width(int(m.group(1)))
+        return _storage_width(int(m.group(1)))
     if default_pointer and re.search(r"\bptr\b", text):
         return muir.Width.I64
     raise ValueError(f"cannot determine supported width from: {text}")
@@ -309,7 +321,7 @@ def _parse_gep(inst: TextInst, layout: DataLayout):
     return base,constant_offset,dynamic_terms
 
 
-def _call_args(text: str, callee_end: int) -> tuple[muir.Value, ...]:
+def _call_args(text: str, callee_end: int, layout: DataLayout) -> tuple[muir.Value, ...]:
     open_paren = text.find("(", callee_end)
     if open_paren < 0:
         raise ValueError(f"call has no argument list: {text}")
@@ -341,14 +353,18 @@ def _call_args(text: str, callee_end: int) -> tuple[muir.Value, ...]:
         if c == "," and depth == 0:
             segment = "".join(part).strip()
             if segment:
-                args.append(_value(segment))
+                if "getelementptr" in segment:
+                    pos = segment.find("getelementptr")
+                    args.append(_const_gep_value(segment[pos:], layout))
+                else:
+                    args.append(_value(segment))
             part = []
         else:
             part.append(c)
     return tuple(args)
 
 
-def _parse_call(inst: TextInst):
+def _parse_call(inst: TextInst, layout: DataLayout):
     text = inst.text
     if re.search(r"\basm\b", text):
         return "inline_asm", None, (), None
@@ -356,13 +372,13 @@ def _parse_call(inst: TextInst):
     direct = re.search(r"@([-A-Za-z$._0-9]+)\s*\(", text)
     if direct:
         symbol = direct.group(1)
-        args = _call_args(text, direct.end() - 1)
+        args = _call_args(text, direct.end() - 1, layout)
         return "direct", symbol, args, None
 
     # Indirect call: find the SSA callee immediately before '('.
     indirect = re.search(r"(%[-A-Za-z$._0-9]+)\s*\(", text)
     if indirect:
-        args = _call_args(text, indirect.end() - 1)
+        args = _call_args(text, indirect.end() - 1, layout)
         return "indirect", None, args, _slot(indirect.group(1))
 
     raise ValueError(f"cannot parse call target: {text}")
@@ -463,19 +479,21 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     continue
 
                 if op == "add":
-                    m = re.search(r"add(?:\s+\w+)*\s+(i(?:8|16|32|64))\s+(.+?),\s*(.+)$", inst.text)
+                    m = re.search(r"add(?:\s+\w+)*\s+(i\d+)\s+(.+?),\s*(.+)$", inst.text)
                     if not m or result is None:
                         raise ValueError(f"cannot parse add: {inst.text}")
-                    width = _width(int(m.group(1)[1:]))
+                    bits = int(m.group(1)[1:])
                     a, b = _value(m.group(2)), _value(m.group(3))
-                    if isinstance(b, muir.Imm):
+                    if bits > 64:
+                        stats.temporary_helpers += 1
+                        out.append(muir.Helper(f"__mm_add_{bits}", (a, b), result))
+                        continue
+                    width = _storage_width(bits)
+                    if bits not in {8,16,32,64}:
+                        stats.temporary_helpers += 1
+                        out.append(muir.Helper(f"__mm_add_{bits}", (a, b), result))
+                    elif isinstance(b, muir.Imm):
                         out.append(muir.Sub(width, result, a, muir.Imm(-b.value)))
-                    elif isinstance(a, muir.Imm):
-                        temp_counter[0] += 1
-                        neg = muir.Slot(f"__add_neg{temp_counter[0]}")
-                        frame_slots.add(neg.name)
-                        out.append(muir.Sub(width, neg, muir.Imm(0), b))
-                        out.append(muir.Sub(width, result, a, neg))
                     else:
                         temp_counter[0] += 1
                         neg = muir.Slot(f"__add_neg{temp_counter[0]}")
@@ -682,30 +700,49 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     continue
 
                 if op == "freeze":
-                    m = re.search(r"freeze\s+(i(?:1|8|16|32|64)|ptr)\s+(.+)$", inst.text)
-                    if not m or result is None:
-                        raise ValueError(f"cannot parse freeze: {inst.text}")
-                    width = muir.Width.I64 if m.group(1) == "ptr" else _width(int(m.group(1)[1:]))
-                    out.append(muir.Mov(width, result, _value(m.group(2))))
+                    if result is None:
+                        raise ValueError("freeze has no result")
+                    m = re.match(r"freeze\s+(i\d+|ptr)\s+(.+)$", inst.text)
+                    if m:
+                        ty=m.group(1)
+                        value=_value(m.group(2))
+                        if ty=="ptr":
+                            out.append(muir.Mov(muir.Width.I64,result,value))
+                        else:
+                            bits=int(ty[1:])
+                            if bits in {1,8,16,32,64}:
+                                out.append(muir.Mov(_storage_width(bits),result,value))
+                            else:
+                                stats.temporary_helpers += 1
+                                out.append(muir.Helper(f"__mm_freeze_{bits}",(value,),result))
+                    else:
+                        value=_value(inst.text)
+                        stats.temporary_helpers += 1
+                        out.append(muir.Helper("__mm_freeze_aggregate",(value,),result))
                     continue
 
+
                 if op == "select":
-                    m = re.search(
-                        r"select\s+i1\s+(.+?),\s+(i(?:1|8|16|32|64)|ptr)\s+(.+?),\s+\2\s+(.+?)(?:,\s*!.*)?$",
-                        inst.text,
-                    )
-                    if not m or result is None:
+                    if result is None:
+                        raise ValueError("select has no result")
+                    body=inst.text[len("select "):]
+                    parts=_split_top_commas(body)
+                    if len(parts) != 3:
                         raise ValueError(f"cannot parse select: {inst.text}")
-                    width = muir.Width.I64 if m.group(2) == "ptr" else _width(int(m.group(2)[1:]))
+                    cm=re.match(r"i1\s+(.+)$",parts[0])
+                    if not cm:
+                        raise ValueError(f"cannot parse select condition: {inst.text}")
+                    cond=_value(cm.group(1))
+                    try:
+                        tv=_value(parts[1])
+                        fv=_value(parts[2])
+                    except ValueError as e:
+                        raise ValueError(f"cannot parse select values: {inst.text}") from e
+                    type_tag=_sanitize(re.sub(r"\s+(?:%[-A-Za-z$._0-9]+|@[-A-Za-z$._0-9]+|-?\d+|poison|undef|zeroinitializer)\s*$","",parts[1]))
                     stats.temporary_helpers += 1
-                    out.append(
-                        muir.Helper(
-                            f"__mm_select_{width.value}",
-                            (_value(m.group(1)), _value(m.group(3)), _value(m.group(4))),
-                            result,
-                        )
-                    )
+                    out.append(muir.Helper(f"__mm_select_{type_tag or 'opaque'}",(cond,tv,fv),result))
                     continue
+
 
                 if op in {"and", "or", "xor", "shl", "lshr", "ashr", "mul", "udiv", "sdiv", "urem", "srem"}:
                     m = re.search(
@@ -726,7 +763,7 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     continue
 
                 if op == "call":
-                    kind, symbol, args, callee_slot = _parse_call(inst)
+                    kind, symbol, args, callee_slot = _parse_call(inst, layout)
                     if kind == "inline_asm":
                         stats.arch_escapes += 1
                         out.append(muir.ArchEscape("inline_asm", inst.text))
