@@ -39,7 +39,28 @@ def parse_args():
     p.add_argument("--max-arch-escape-sites", type=int)
     p.add_argument("--require-runtime-closed", action="store_true")
     p.add_argument("--require-image-installed", action="store_true")
+    p.add_argument(
+        "--symbol-alias",
+        action="append",
+        default=[],
+        metavar="NAME=TARGET",
+        help="define a target linker symbol alias before image relocation",
+    )
     return p.parse_args()
+
+
+def _parse_symbol_aliases(items: list[str]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"invalid symbol alias: {item}")
+        name, target = item.split("=", 1)
+        name = name.strip()
+        target = target.strip()
+        if not name or not target:
+            raise ValueError(f"invalid symbol alias: {item}")
+        aliases[name] = target
+    return aliases
 
 
 def _trap_symbol(reason: str) -> str:
@@ -104,10 +125,15 @@ def _p3_references(function: p3.Function):
                 yield from _target_symbols(inst.false_target)
 
 
-def _image_unresolved(program: Program, image) -> tuple[set[str], set[str]]:
+def _image_unresolved(
+    program: Program,
+    image,
+    symbol_aliases: dict[str, str],
+) -> tuple[set[str], set[str]]:
     future_symbols = set(program.symbol_addresses)
     future_symbols.update(obj.name for obj in image.objects)
     future_symbols.update(alias.name for alias in image.aliases)
+    future_symbols.update(symbol_aliases)
 
     missing_symbols: set[str] = set()
     missing_blocks: set[str] = set()
@@ -115,6 +141,9 @@ def _image_unresolved(program: Program, image) -> tuple[set[str], set[str]]:
     for alias in image.aliases:
         if alias.target.symbol not in future_symbols:
             missing_symbols.add(alias.target.symbol)
+    for target in symbol_aliases.values():
+        if target not in future_symbols:
+            missing_symbols.add(target)
 
     for obj in image.objects:
         for reloc in obj.relocations:
@@ -134,10 +163,12 @@ def _program_unresolved(
     program: Program,
     functions: list[p3.Function],
     image,
+    symbol_aliases: dict[str, str],
 ) -> tuple[Counter[str], Counter[str]]:
     future_symbols = set(program.symbol_addresses)
     future_symbols.update(obj.name for obj in image.objects)
     future_symbols.update(alias.name for alias in image.aliases)
+    future_symbols.update(symbol_aliases)
 
     missing_symbols: Counter[str] = Counter()
     missing_blocks: Counter[str] = Counter()
@@ -173,6 +204,7 @@ def main() -> int:
     text = args.input.read_text()
 
     try:
+        symbol_aliases = _parse_symbol_aliases(args.symbol_alias)
         functions, _legal_stats = legalize_module(text)
         image = parse_module_image(text)
 
@@ -207,15 +239,19 @@ def main() -> int:
         _register_traps(program, trap_reasons)
 
         p3_missing_symbols, p3_missing_blocks = _program_unresolved(
-            program, p3_functions, image
+            program, p3_functions, image, symbol_aliases
         )
         image_missing_symbols, image_missing_blocks = _image_unresolved(
-            program, image
+            program, image, symbol_aliases
         )
 
         image_installed = False
         if not image_missing_symbols and not image_missing_blocks:
-            install_module_image(program, image)
+            install_module_image(
+                program,
+                image,
+                symbol_aliases=symbol_aliases,
+            )
             image_installed = True
 
     except (
@@ -248,6 +284,7 @@ def main() -> int:
         f"image_relocations={image.relocation_count} "
         f"external_data={len(image.external_data)} "
         f"external_functions={len(image.external_functions)} "
+        f"linker_aliases={len(symbol_aliases)} "
         f"image_installed={int(image_installed)} "
         f"p3_unresolved_symbols={len(p3_missing_symbols)} "
         f"p3_unresolved_blocks={len(p3_missing_blocks)} "
