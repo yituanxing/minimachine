@@ -89,6 +89,39 @@ class LegalizerTests(unittest.TestCase):
         self.assertIsInstance(fn.blocks[0].instructions[0], muir.Call)
         self.assertEqual(fn.blocks[0].instructions[0].callee.symbol, "foo")
 
+    def test_system_asm_maps_to_explicit_sys_contract(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @sys_contract() {
+            entry:
+              call void asm sideeffect "fence rw,rw", "~{memory}"()
+              %s = call i64 asm sideeffect "csrr $0, 0x100", "=r,~{memory}"()
+              call void asm sideeffect "sfence.vma", "~{memory}"()
+              call void asm sideeffect "wfi", ""()
+              ret i64 %s
+            }
+            """
+        )
+        sysops = [
+            i
+            for b in fn.blocks
+            for i in b.instructions
+            if isinstance(i, muir.Sys)
+        ]
+        self.assertEqual(
+            [i.op for i in sysops],
+            [
+                "fence",
+                "state_read_status",
+                "tlb_flush_all",
+                "wait_interrupt",
+            ],
+        )
+        self.assertEqual(stats.lowered_system_fence, 1)
+        self.assertEqual(stats.lowered_system_state, 1)
+        self.assertEqual(stats.lowered_system_tlb, 1)
+        self.assertEqual(stats.lowered_system_wait, 1)
+
     def test_bitwise_routes_to_explicit_helper(self):
         fn, stats = self.lower_one(
             """
