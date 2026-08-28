@@ -20,9 +20,10 @@ CALLER_SP = 0
 RET_PC = 8
 ENTRY = 16
 FRAME_SIZE = 24
-RETVAL = 32
-RESUME_PC = 40
-ARG_COUNT = 48
+RESULT_PTR = 32
+RESULT_COUNT = 40
+RESUME_PC = 48
+ARG_COUNT = 56
 HEADER_SIZE = 64
 WORD = 8
 
@@ -109,6 +110,16 @@ def _descriptor(callee: muir.Callee) -> muir.Value:
     raise AbiError("invalid callee variant")
 
 
+def _result_slots(result: muir.Result) -> tuple[muir.Slot, ...]:
+    if result is None:
+        return ()
+    if isinstance(result, muir.Slot):
+        return (result,)
+    if not isinstance(result, tuple) or not all(isinstance(x, muir.Slot) for x in result):
+        raise AbiError("call/helper/system results must be slots")
+    return result
+
+
 def _prologue(builder: _Builder, args: tuple[str, ...], stats: AbiStats) -> list[muir.Instr]:
     if not args:
         return []
@@ -134,7 +145,8 @@ def _call_sequence(
     callee: muir.Callee,
     args: tuple[muir.Value, ...],
     continuation: str,
-) -> list[muir.Instr]:
+    result_count: int,
+) -> tuple[list[muir.Instr], muir.Slot]:
     desc = _descriptor(callee)
     frame_size = builder.temp("callee_frame_size")
     entry = builder.temp("callee_entry")
@@ -142,14 +154,20 @@ def _call_sequence(
     new_sp = builder.temp("new_sp")
     neg_frame_size = builder.temp("neg_callee_frame_size")
     arg_base = builder.temp("arg_base")
+    result_base = builder.temp("result_base")
 
     arg_bytes = len(args) * WORD
+    # A one-word scratch result area is always present. This keeps a callee
+    # returning a value safe even when the caller discards that value.
+    result_words = max(1, result_count)
+    result_bytes = result_words * WORD
+    tail_bytes = arg_bytes + result_bytes
+
     out: list[muir.Instr] = [
         muir.Mov(muir.Width.I64, entry, _mem(desc, DESC_ENTRY)),
         muir.Mov(muir.Width.I64, frame_size, _mem(desc, DESC_FRAME_SIZE)),
-        # total_size = frame_size + argument bytes
-        muir.Sub(muir.Width.I64, total_size, frame_size, muir.Imm(-arg_bytes)),
-        # Stack grows downward.
+        # total_size = fixed frame + argument tail + result tail
+        muir.Sub(muir.Width.I64, total_size, frame_size, muir.Imm(-tail_bytes)),
         muir.Sub(muir.Width.I64, new_sp, muir.Special.SP, total_size),
         muir.Mov(muir.Width.I64, _mem(new_sp, CALLER_SP), muir.Special.SP),
         muir.Mov(
@@ -160,20 +178,16 @@ def _call_sequence(
         muir.Mov(muir.Width.I64, _mem(new_sp, ENTRY), entry),
         muir.Mov(muir.Width.I64, _mem(new_sp, FRAME_SIZE), frame_size),
         muir.Mov(muir.Width.I64, _mem(new_sp, ARG_COUNT), muir.Imm(len(args))),
+        muir.Mov(muir.Width.I64, _mem(new_sp, RESULT_COUNT), muir.Imm(result_count)),
+        muir.Sub(muir.Width.I64, neg_frame_size, muir.Imm(0), frame_size),
+        muir.Sub(muir.Width.I64, arg_base, new_sp, neg_frame_size),
+        # result_base = arg_base + arg_bytes
+        muir.Sub(muir.Width.I64, result_base, arg_base, muir.Imm(-arg_bytes)),
+        muir.Mov(muir.Width.I64, _mem(new_sp, RESULT_PTR), result_base),
     ]
 
-    if args:
-        # arg_base = new_sp + fixed frame_size. Arguments live directly after
-        # the callee's fixed frame, so variadic call sites do not change local
-        # slot offsets.
-        out.extend(
-            [
-                muir.Sub(muir.Width.I64, neg_frame_size, muir.Imm(0), frame_size),
-                muir.Sub(muir.Width.I64, arg_base, new_sp, neg_frame_size),
-            ]
-        )
-        for i, value in enumerate(args):
-            out.append(muir.Mov(muir.Width.I64, _mem(arg_base, i * WORD), value))
+    for i, value in enumerate(args):
+        out.append(muir.Mov(muir.Width.I64, _mem(arg_base, i * WORD), value))
 
     out.extend(
         [
@@ -181,16 +195,13 @@ def _call_sequence(
             _uncond(_indirect_from_sp(ENTRY)),
         ]
     )
-    return out
+    return out, result_base
 
 
 def _return_sequence(builder: _Builder, value: muir.Value | None) -> list[muir.Instr]:
     caller_sp = builder.temp("caller_sp")
     out: list[muir.Instr] = [
         muir.Mov(muir.Width.I64, caller_sp, _mem(muir.Special.SP, CALLER_SP)),
-        # Copy the continuation into the still-live caller frame before SP is
-        # restored. After the MOV to SP, the branch can read it at a fixed
-        # caller-frame offset without relying on a callee temporary.
         muir.Mov(
             muir.Width.I64,
             _mem(caller_sp, RESUME_PC),
@@ -198,7 +209,17 @@ def _return_sequence(builder: _Builder, value: muir.Value | None) -> list[muir.I
         ),
     ]
     if value is not None:
-        out.append(muir.Mov(muir.Width.I64, _mem(caller_sp, RETVAL), value))
+        result_ptr = builder.temp("result_ptr")
+        out.extend(
+            [
+                muir.Mov(
+                    muir.Width.I64,
+                    result_ptr,
+                    _mem(muir.Special.SP, RESULT_PTR),
+                ),
+                muir.Mov(muir.Width.I64, _mem(result_ptr, 0), value),
+            ]
+        )
     out.extend(
         [
             muir.Mov(muir.Width.I64, muir.Special.SP, caller_sp),
@@ -209,7 +230,7 @@ def _return_sequence(builder: _Builder, value: muir.Value | None) -> list[muir.I
 
 
 def expand_function(function: muir.Function) -> tuple[muir.Function, AbiStats]:
-    """Expand CALL/HELPER/RET into the MOV/SUB/BR ABI.
+    """Expand CALL/HELPER/SYS/RET into the MOV/SUB/BR ABI.
 
     This is a sub-pass of the μIR -> P3 machine descent, not a new IR layer.
     Trap is lowered to an external system BR. ArchEscape intentionally remains
@@ -272,16 +293,24 @@ def expand_function(function: muir.Function) -> tuple[muir.Function, AbiStats]:
                 result = pseudo.result
                 stats.system_ops += 1
 
-            sequence = before + _call_sequence(builder, callee, args, continuation)
+            result_slots = _result_slots(result)
+            call_sequence, result_base = _call_sequence(
+                builder,
+                callee,
+                args,
+                continuation,
+                len(result_slots),
+            )
+            sequence = before + call_sequence
             output.append(muir.Block(current_label, sequence))
 
             resume: list[muir.Instr] = []
-            if result is not None:
+            for i, slot in enumerate(result_slots):
                 resume.append(
                     muir.Mov(
                         muir.Width.I64,
-                        result,
-                        _mem(muir.Special.SP, RETVAL),
+                        slot,
+                        _mem(result_base, i * WORD),
                     )
                 )
             pending = resume + after
