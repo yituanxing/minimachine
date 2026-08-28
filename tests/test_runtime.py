@@ -2,6 +2,7 @@ import unittest
 
 from src.minimachine import muir
 from src.minimachine.abi import expand_function
+from src.minimachine.image import install_module_image, parse_module_image
 from src.minimachine.legalize import legalize_module
 from src.minimachine.lower_p3 import lower_function
 from src.minimachine.runtime import (
@@ -536,6 +537,29 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(
             program.new_vm().run_function("gep_pointer_value_store", (base,)),
             (base + 1,),
+        )
+
+    def test_constant_gep_stored_as_pointer_value_executes(self):
+        llvm = """
+            %struct.sample = type { i8, i64, i64 }
+
+            @sample = global %struct.sample zeroinitializer, align 8
+
+            define ptr @field_pointer() {
+            entry:
+              %slot = alloca ptr, align 8
+              store ptr getelementptr inbounds (%struct.sample, ptr @sample, i32 0, i32 2), ptr %slot, align 8
+              %got = load ptr, ptr %slot, align 8
+              ret ptr %got
+            }
+        """
+        functions, _ = legalize_module(llvm)
+        program = executable(functions)
+        install_module_image(program, parse_module_image(llvm))
+
+        self.assertEqual(
+            program.new_vm().run_function("field_pointer"),
+            (program.symbol_addresses["sample"] + 16,),
         )
 
     def test_dynamic_alloca_and_gep_execute(self):

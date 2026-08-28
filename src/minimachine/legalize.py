@@ -1742,7 +1742,10 @@ def legalize_function(
                     pm=re.match(r"ptr(?:\s+addrspace\(\d+\))?\s+(.+)$",parts[1].strip())
                     if not pm:
                         raise ValueError(f"cannot parse store pointer: {inst.text}")
-                    src=_value(value_text)
+                    if value_text.startswith("getelementptr"):
+                        src = _const_gep_value(value_text, layout)
+                    else:
+                        src = _value(value_text)
                     ptr_text=pm.group(1).strip()
                     if ptr_text.startswith("getelementptr"):
                         cv=_const_gep_value(ptr_text,layout)
