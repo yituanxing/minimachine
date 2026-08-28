@@ -53,6 +53,10 @@ class LegalizeStats:
     lowered_system_ecall: int = 0
     lowered_system_faultable: int = 0
     lowered_system_lrsc: int = 0
+    lowered_cpu_feature_branch: int = 0
+    lowered_system_icache: int = 0
+    lowered_system_vector: int = 0
+    lowered_alternative_tlb: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -80,6 +84,10 @@ class LegalizeStats:
             "lowered_system_ecall": self.lowered_system_ecall,
             "lowered_system_faultable": self.lowered_system_faultable,
             "lowered_system_lrsc": self.lowered_system_lrsc,
+            "lowered_cpu_feature_branch": self.lowered_cpu_feature_branch,
+            "lowered_system_icache": self.lowered_system_icache,
+            "lowered_system_vector": self.lowered_system_vector,
+            "lowered_alternative_tlb": self.lowered_alternative_tlb,
         }
 
 
@@ -636,6 +644,66 @@ def _lrsc_sys_spec(template: str) -> tuple[str, int, str] | None:
     return kind, bits, ordering
 
 
+def _lower_alternative_tlb_sys(
+    template: str,
+    text: str,
+    result: muir.Slot | None,
+    layout: DataLayout,
+) -> muir.Sys | None:
+    if result is not None or ".alternative" not in template:
+        return None
+    normalized = _normalize_inline_asm(template)
+    primary = normalized.split("887 :", 1)[0]
+    args = _inline_asm_args(text, layout)
+
+    if re.search(r"sfence\.vma\s+\$0\s*,\s*\$1", primary) and len(args) == 2:
+        return muir.Sys("tlb_flush_address_asid", args, None)
+    if re.search(r"sfence\.vma\s+x0\s*,\s*\$0", primary) and len(args) == 1:
+        return muir.Sys("tlb_flush_asid", args, None)
+    if re.search(r"sfence\.vma\s+\$0", primary) and len(args) == 1:
+        return muir.Sys("tlb_flush_address", args, None)
+    return None
+
+
+def _lower_vector_system_sys(
+    template: str,
+    text: str,
+    inst: TextInst,
+    scalar_result: muir.Slot | None,
+    layout: DataLayout,
+    frame_slots: set[str],
+    aggregate_results: dict[str, tuple[tuple[muir.Slot, muir.Width], ...]],
+) -> muir.Sys | None:
+    normalized = _normalize_inline_asm(template).rstrip(";").strip()
+
+    if normalized == "csrr $0, 0xc22" and scalar_result is not None:
+        return muir.Sys("vector_length_bytes", (), scalar_result)
+
+    if (
+        "csrr $0, 0x8" in normalized
+        and "csrr $1, 0xc21" in normalized
+        and "csrr $2, 0xc20" in normalized
+        and "csrr $3, 0xf" in normalized
+        and "csrr $4, 0xc22" in normalized
+    ):
+        sys_result, widths = _prepare_inline_asm_result(
+            inst, scalar_result, frame_slots, aggregate_results
+        )
+        if len(widths) == 5:
+            return muir.Sys("vector_state_snapshot", (), sys_result)
+
+    if (
+        "vsetvl x0, $2, $1" in normalized
+        and "csrw 0x8, $0" in normalized
+        and "csrw 0xf, $3" in normalized
+    ):
+        args = _inline_asm_args(text, layout)
+        if scalar_result is None and len(args) == 4:
+            return muir.Sys("vector_state_restore", args, None)
+
+    return None
+
+
 def _lower_wait_sys(template: str, result: muir.Slot | None) -> muir.Sys | None:
     if result is None and _normalize_inline_asm(template) == "wfi":
         return muir.Sys("wait_interrupt", (), None)
@@ -754,6 +822,53 @@ def _lower_plain_asm_memory(
         return muir.Mov(width, muir.Mem(muir.Address(address, 0), width), value)
 
     return None
+
+
+def _lower_cpu_feature_callbr(
+    inst: TextInst,
+    layout: DataLayout,
+    temp_counter: list[int],
+    frame_slots: set[str],
+) -> list[muir.Instr] | None:
+    template = _inline_asm_template(inst.text)
+    if template is None or ".alternative" not in template:
+        return None
+    normalized = _normalize_inline_asm(template)
+    if "__jump_table" in normalized:
+        return None
+
+    labels = _LABEL_USE_RE.findall(inst.text)
+    args = _inline_asm_args(inst.text, layout)
+    if len(labels) != 2 or len(args) != 1:
+        return None
+
+    primary = normalized.split("887 :", 1)[0]
+    replacement = normalized.split("888 :", 1)[1] if "888 :" in normalized else ""
+    primary_jumps = re.search(r"\bj\s+\$\{?1(?::l)?\}?", primary) is not None
+    replacement_jumps = re.search(r"\bj\s+\$\{?1(?::l)?\}?", replacement) is not None
+    if primary_jumps == replacement_jumps:
+        return None
+
+    temp_counter[0] += 1
+    cond = muir.Slot(f"__cpu_feature{temp_counter[0]}")
+    frame_slots.add(cond.name)
+    fallthrough, alt_target = labels
+
+    # SYS cpu_feature returns 1 when the alternative feature is available.
+    true_target = alt_target if replacement_jumps else fallthrough
+    false_target = alt_target if primary_jumps else fallthrough
+
+    return [
+        muir.Sys("cpu_feature", (args[0],), cond),
+        muir.Br(
+            muir.Width.I8,
+            muir.Cond.EQ,
+            cond,
+            muir.Imm(0),
+            muir.Target(label=false_target),
+            muir.Target(label=true_target),
+        ),
+    ]
 
 
 def _lower_jump_label_callbr(
@@ -1345,6 +1460,33 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                                 out.append(state_sys)
                                 continue
 
+                            if _normalize_inline_asm(template).rstrip(";").strip() == "fence.i" and result is None:
+                                stats.lowered_system_icache += 1
+                                out.append(muir.Sys("icache_sync", (), None))
+                                continue
+
+                            vector_sys = _lower_vector_system_sys(
+                                template,
+                                inst.text,
+                                inst,
+                                result,
+                                layout,
+                                frame_slots,
+                                aggregate_results,
+                            )
+                            if vector_sys is not None:
+                                stats.lowered_system_vector += 1
+                                out.append(vector_sys)
+                                continue
+
+                            alt_tlb_sys = _lower_alternative_tlb_sys(
+                                template, inst.text, result, layout
+                            )
+                            if alt_tlb_sys is not None:
+                                stats.lowered_alternative_tlb += 1
+                                out.append(alt_tlb_sys)
+                                continue
+
                             tlb_sys = _lower_simple_tlb_sys(template, inst.text, result, layout)
                             if tlb_sys is not None:
                                 stats.lowered_system_tlb += 1
@@ -1495,6 +1637,14 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
 
                 if op in {"callbr", "indirectbr"}:
                     if op == "callbr":
+                        cpu_feature_branch = _lower_cpu_feature_callbr(
+                            inst, layout, temp_counter, frame_slots
+                        )
+                        if cpu_feature_branch is not None:
+                            stats.lowered_cpu_feature_branch += 1
+                            out.extend(cpu_feature_branch)
+                            continue
+
                         static_branch = _lower_jump_label_callbr(
                             inst, layout, temp_counter, frame_slots
                         )
