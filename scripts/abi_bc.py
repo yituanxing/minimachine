@@ -154,12 +154,14 @@ def main() -> int:
                 continue
 
             kind = gm.group(1)
-            counts[kind] += 1
             tail = rhs[gm.end():].strip()
 
-            if tail.startswith(("external ", "extern_weak ")):
+            first = rhs.split(None, 1)[0] if rhs.split() else ""
+            if first in {"external", "extern_weak"}:
                 counts[f"{kind}:external"] += 1
                 continue
+
+            counts[kind] += 1
 
             if "zeroinitializer" in tail:
                 counts[f"{kind}:zeroinitializer"] += 1
