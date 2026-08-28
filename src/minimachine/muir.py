@@ -75,14 +75,32 @@ Operand = Union[Value, Mem]
 @dataclass(frozen=True)
 class Target:
     label: str | None = None
+    symbol: str | None = None
     slot: Slot | None = None
     address: Address | None = None
 
     def is_direct(self) -> bool:
-        return self.label is not None and self.slot is None and self.address is None
+        return (
+            self.label is not None
+            and self.symbol is None
+            and self.slot is None
+            and self.address is None
+        )
+
+    def is_external(self) -> bool:
+        return (
+            self.symbol is not None
+            and self.label is None
+            and self.slot is None
+            and self.address is None
+        )
 
     def is_indirect(self) -> bool:
-        return self.label is None and ((self.slot is not None) ^ (self.address is not None))
+        return (
+            self.label is None
+            and self.symbol is None
+            and ((self.slot is not None) ^ (self.address is not None))
+        )
 
 
 @dataclass(frozen=True)
