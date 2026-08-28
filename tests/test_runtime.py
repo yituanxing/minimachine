@@ -247,6 +247,38 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(vm.run_function("vector_state_user"), (64,))
         self.assertEqual(vm.vector_state, (11, 12, 13, 14, 64))
 
+    def test_llvm_fixed_register_reads_execute(self):
+        functions, stats = legalize_module(
+            """
+            define i64 @read_sp() {
+            entry:
+              %v = call i64 @llvm.read_register.i64(metadata !0)
+              ret i64 %v
+            }
+
+            define i64 @read_tp() {
+            entry:
+              %v = call i64 @llvm.read_register.i64(metadata !1)
+              ret i64 %v
+            }
+
+            !0 = !{!"sp"}
+            !1 = !{!"tp"}
+            """
+        )
+        self.assertEqual(stats.lowered_read_sp, 1)
+        self.assertEqual(stats.lowered_read_thread_pointer, 1)
+
+        program = executable(functions)
+
+        sp_vm = program.new_vm()
+        sp_result = sp_vm.run_function("read_sp")
+        self.assertEqual(sp_result[0], sp_vm.stack_top - program.functions["read_sp"].frame_size - 8)
+
+        tp_vm = program.new_vm()
+        tp_vm.system_state["thread_pointer"] = 0xABCDEF
+        self.assertEqual(tp_vm.run_function("read_tp"), (0xABCDEF,))
+
     def test_pointer_scaled_helper_executes(self):
         fn = muir.Function(
             "ptr",
