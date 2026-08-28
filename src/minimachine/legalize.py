@@ -603,7 +603,7 @@ def _faultable_sys_spec(template: str) -> tuple[str, int] | None:
     if "__ex_table" not in template:
         return None
     normalized = _normalize_inline_asm(template)
-    m = re.match(r"1:\s*;\s*(lb|lh|lw|ld|sb|sh|sw|sd)\b", normalized)
+    m = re.match(r"1:\s*;?\s*(lb|lh|lw|ld|sb|sh|sw|sd)\b", normalized)
     if not m:
         return None
     mnemonic = m.group(1)
