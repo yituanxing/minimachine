@@ -364,6 +364,52 @@ def _parse_align(parts: list[str], default: int) -> int:
     return default
 
 
+def _find_top_level_keyword(
+    text: str,
+    keywords: set[str],
+) -> tuple[str, int, int] | None:
+    in_string = False
+    escape = False
+    depth = 0
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if c == '"':
+            in_string = True
+            i += 1
+            continue
+        if c in "([{<":
+            depth += 1
+            i += 1
+            continue
+        if c in ")]}>":
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+
+        if depth == 0 and (c.isalpha() or c == "_"):
+            j = i + 1
+            while j < len(text) and (text[j].isalnum() or text[j] == "_"):
+                j += 1
+            word = text[i:j]
+            if word in keywords:
+                return word, i, j
+            i = j
+            continue
+        i += 1
+    return None
+
+
 def _parse_alias(name: str, rhs: str) -> ImageAlias:
     m = re.search(r"\balias\b", rhs)
     if not m:
@@ -459,17 +505,18 @@ def parse_module_image(text: str) -> ModuleImage:
             continue
         name, rhs = gm.groups()
 
-        if re.search(r"\balias\b", rhs):
+        alias_kw = _find_top_level_keyword(rhs, {"alias"})
+        if alias_kw is not None:
             aliases.append(_parse_alias(name, rhs))
             continue
-        if re.search(r"\bifunc\b", rhs):
+        if _find_top_level_keyword(rhs, {"ifunc"}) is not None:
             raise ImageError(f"ifunc is not supported in image: @{name}")
 
-        kind_match = re.search(r"\b(global|constant)\b", rhs)
-        if not kind_match:
+        kind_match = _find_top_level_keyword(rhs, {"global", "constant"})
+        if kind_match is None:
             # Metadata-like global value forms that are not runtime storage.
             continue
-        kind = kind_match.group(1)
+        kind, kind_start, kind_end = kind_match
 
         first = rhs.split(None, 1)[0] if rhs.split() else ""
         if first in {"external", "extern_weak"}:
@@ -480,7 +527,7 @@ def parse_module_image(text: str) -> ModuleImage:
             skipped.append(name)
             continue
 
-        tail = rhs[kind_match.end() :].strip()
+        tail = rhs[kind_end:].strip()
         parts = _split_top_commas(tail)
         if not parts:
             raise ImageError(f"global @{name} has no initializer")
