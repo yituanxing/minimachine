@@ -598,8 +598,10 @@ def install_module_image(
     image: ModuleImage,
     *,
     external_symbols: dict[str, int] | None = None,
+    symbol_aliases: dict[str, str] | None = None,
 ) -> None:
     external_symbols = external_symbols or {}
+    symbol_aliases = symbol_aliases or {}
 
     for name, address in external_symbols.items():
         if name in program.symbol_addresses:
@@ -619,8 +621,14 @@ def install_module_image(
         )
         object_addresses[obj.name] = address
 
-    # Aliases may chain. Resolve until fixed point.
+    # Aliases may chain. Resolve until fixed point.  Linker-defined aliases
+    # (for example Linux's jiffies = jiffies_64) use the same relocation
+    # machinery as LLVM aliases, but are supplied by the target link contract.
     pending = list(image.aliases)
+    pending.extend(
+        ImageAlias(name, SymbolExpr(target))
+        for name, target in sorted(symbol_aliases.items())
+    )
     while pending:
         next_pending: list[ImageAlias] = []
         progress = False
