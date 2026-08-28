@@ -131,7 +131,72 @@ def main() -> int:
 
     jobs = args.jobs or max(1, os.cpu_count() or 1)
 
-    def one(path: Path):
+    def _global_shape_counts(text: str) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("@") or " = " not in line:
+            continue
+
+        lhs, rhs = line.split(" = ", 1)
+        counts["symbols"] += 1
+
+        if re.search(r"\balias\b", rhs):
+            counts["alias"] += 1
+            continue
+        if re.search(r"\bifunc\b", rhs):
+            counts["ifunc"] += 1
+            continue
+
+        gm = re.search(r"\b(global|constant)\b", rhs)
+        if not gm:
+            counts["other_symbol"] += 1
+            continue
+
+        kind = gm.group(1)
+        counts[kind] += 1
+        tail = rhs[gm.end():].strip()
+
+        if tail.startswith(("external ", "extern_weak ")):
+            counts[f"{kind}:external"] += 1
+            continue
+
+        # Split the leading type from the initializer only well enough to
+        # classify the initializer shape. Exact parsing belongs in the image
+        # linker, not in this census.
+        if "zeroinitializer" in tail:
+            counts[f"{kind}:zeroinitializer"] += 1
+        elif re.search(r'\bc"', tail):
+            counts[f"{kind}:cstring"] += 1
+        elif "getelementptr" in tail:
+            counts[f"{kind}:gep_reloc"] += 1
+        elif "bitcast" in tail or "addrspacecast" in tail:
+            counts[f"{kind}:cast_reloc"] += 1
+        elif "blockaddress" in tail:
+            counts[f"{kind}:blockaddress"] += 1
+        elif re.search(r"@\w|@[-A-Za-z$._0-9]+", tail):
+            counts[f"{kind}:symbol_reloc"] += 1
+        elif re.search(r"\[[^\]]*\]", tail):
+            counts[f"{kind}:array"] += 1
+        elif "<{" in tail or re.search(r"\{.*\}", tail):
+            counts[f"{kind}:struct"] += 1
+        elif re.search(r"\b(?:i\d+|ptr|float|double|half|bfloat)\b", tail):
+            counts[f"{kind}:scalar"] += 1
+        else:
+            counts[f"{kind}:other_initializer"] += 1
+    return counts
+
+
+def _declaration_counts(text: str) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("declare "):
+            counts["function_declarations"] += 1
+    return counts
+
+
+def one(path: Path):
         rel = path.relative_to(args.input).as_posix() if args.input.is_dir() else path.name
         try:
             proc = subprocess.run(
@@ -142,6 +207,8 @@ def main() -> int:
                 stderr=subprocess.PIPE,
             )
             functions, legal_stats = legalize_module(proc.stdout)
+            global_shapes = _global_shape_counts(proc.stdout)
+            declaration_shapes = _declaration_counts(proc.stdout)
             abi_stats = {
                 "calls": 0,
                 "helpers": 0,
@@ -209,6 +276,8 @@ def main() -> int:
                 "escape_samples": escape_samples,
                 "helper_symbols": dict(helper_symbols),
                 "system_ops_used": dict(system_ops_used),
+                "global_shapes": dict(global_shapes),
+                "declaration_shapes": dict(declaration_shapes),
             }
         except (
             subprocess.CalledProcessError,
@@ -242,6 +311,8 @@ def main() -> int:
         "escape_samples": {},
         "helper_symbols": {},
         "system_ops_used": {},
+        "global_shapes": {},
+        "declaration_shapes": {},
     }
 
     print(f"ABI_START files={len(files)} jobs={jobs}")
@@ -277,6 +348,10 @@ def main() -> int:
                     totals["helper_symbols"][key] = totals["helper_symbols"].get(key, 0) + value
                 for key, value in rec["system_ops_used"].items():
                     totals["system_ops_used"][key] = totals["system_ops_used"].get(key, 0) + value
+                for key, value in rec["global_shapes"].items():
+                    totals["global_shapes"][key] = totals["global_shapes"].get(key, 0) + value
+                for key, value in rec["declaration_shapes"].items():
+                    totals["declaration_shapes"][key] = totals["declaration_shapes"].get(key, 0) + value
 
             if done % 25 == 0 or rec["status"] == "FAIL" or done == len(files):
                 tail = f" FAIL {rec['file']} :: {rec['error']}" if rec["status"] == "FAIL" else ""
@@ -319,6 +394,24 @@ def main() -> int:
     print(
         f"RUNTIME_SURFACE helper_kinds={len(totals['helper_symbols'])} "
         f"system_op_kinds={len(totals['system_ops_used'])}"
+    )
+    print(
+        "GLOBAL_SURFACE " + " ".join(
+            f"{k}={v}"
+            for k, v in sorted(
+                totals["global_shapes"].items(),
+                key=lambda x: (-x[1], x[0]),
+            )
+        )
+    )
+    print(
+        "DECL_SURFACE " + " ".join(
+            f"{k}={v}"
+            for k, v in sorted(
+                totals["declaration_shapes"].items(),
+                key=lambda x: (-x[1], x[0]),
+            )
+        )
     )
     resolved_helpers = {
         key for key in totals["helper_symbols"]
