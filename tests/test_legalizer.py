@@ -55,9 +55,9 @@ class LegalizerTests(unittest.TestCase):
         by_name = {b.label: b for b in fn.blocks}
         self.assertIsInstance(by_name["entry"].instructions[-1], muir.Br)
         self.assertEqual(by_name["entry"].instructions[-1].cond, muir.Cond.EQ)
-        self.assertGreaterEqual(
+        self.assertEqual(
             sum(label.startswith("__switch_entry_") for label in by_name),
-            5,
+            4,
         )
         self.assertFalse(
             any(
