@@ -159,6 +159,18 @@ def _value(segment: str) -> muir.Value:
     return muir.Imm(int(token))
 
 
+def _strip_memory_qualifiers(text: str) -> str:
+    value = text.strip()
+    while True:
+        changed = False
+        for qualifier in ("volatile ", "atomic "):
+            if value.startswith(qualifier):
+                value = value[len(qualifier):].lstrip()
+                changed = True
+        if not changed:
+            return value
+
+
 def _sanitize(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]+", "_", text).strip("_")
 
@@ -1294,7 +1306,7 @@ def legalize_function(
                     parts=_split_top_commas(body)
                     if len(parts) < 2 or result is None:
                         raise ValueError(f"cannot parse load: {inst.text}")
-                    ty=parts[0].strip()
+                    ty=_strip_memory_qualifiers(parts[0])
                     ptr_part=parts[1].strip()
                     pm=re.match(r"ptr(?:\s+addrspace\(\d+\))?\s+(.+)$",ptr_part)
                     if not pm:
@@ -1356,7 +1368,8 @@ def legalize_function(
                     parts=_split_top_commas(body)
                     if len(parts) < 2:
                         raise ValueError(f"cannot parse store: {inst.text}")
-                    vm=re.match(r"(.+?)\s+(.+)$",parts[0].strip())
+                    value_part = _strip_memory_qualifiers(parts[0])
+                    vm=re.match(r"(.+?)\s+(.+)$",value_part)
                     pm=re.match(r"ptr(?:\s+addrspace\(\d+\))?\s+(.+)$",parts[1].strip())
                     if not vm or not pm:
                         raise ValueError(f"cannot parse store operands: {inst.text}")
