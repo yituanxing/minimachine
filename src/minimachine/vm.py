@@ -24,6 +24,7 @@ MASK64 = (1 << 64) - 1
 CODE_BASE = 0x8000_0000_0000_0000
 DATA_BASE = 0x0000_0000_0001_0000
 DEFAULT_STACK_TOP = 0x0000_0001_0000_0000
+HEAP_BASE = 0x0000_0000_1000_0000
 
 
 class VMError(RuntimeError):
@@ -176,6 +177,18 @@ class VM:
         # Abstract vector architectural state used by the system contract:
         # (vstart, vtype, vl, vcsr, vlenb)
         self.vector_state = (0, 0, 0, 0, 0)
+        self.heap_next = HEAP_BASE
+
+    def alloc_bytes(self, size: int, *, align: int = 8) -> int:
+        if size < 0:
+            raise VMError("negative allocation size")
+        if align <= 0 or (align & (align - 1)):
+            raise VMError("allocation alignment must be a power of two")
+        address = (self.heap_next + align - 1) & ~(align - 1)
+        self.heap_next = address + max(1, size)
+        if self.heap_next >= self.stack_top:
+            raise VMError("VM heap collided with stack")
+        return address
 
     @staticmethod
     def _mask(bits: int) -> int:
