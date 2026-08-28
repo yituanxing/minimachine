@@ -643,6 +643,17 @@ def install_module_image(
                     members.append((index, obj))
 
             if not members:
+                if group.empty_after is None:
+                    continue
+                anchor = group_spans.get(group.empty_after)
+                if anchor is None:
+                    continue
+                point = (
+                    (anchor[1] + group.align - 1)
+                    // group.align
+                    * group.align
+                )
+                group_spans[group.name] = (point, point)
                 continue
 
             start_address: int | None = None
