@@ -1,0 +1,83 @@
+name: Linux Full-All ABI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/minimachine/**
+      - scripts/abi_bc.py
+      - scripts/normalize-corpus.sh
+      - .github/workflows/linux-full-all-abi.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minimachine-linux-full-all-abi
+  cancel-in-progress: true
+
+jobs:
+  full_all:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ROOT: ${{ github.workspace }}/build/abi-full-all
+      RAW: ${{ github.workspace }}/build/linux-6.6.143-riscv-full-all/full-all-corpus
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-18 clang-18
+          echo "nproc=$(nproc)"
+
+      - name: Restore full-all corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: build/linux-6.6.143-riscv-full-all/full-all-corpus
+          key: minimachine-linux-6.6.143-riscv-defconfig-llvm18-full-all-v1-${{ hashFiles('configs/linux-6.6.143-riscv.env', 'scripts/materialize-linux.sh', 'scripts/select-corpus.py', 'scripts/export-corpus.py') }}
+          restore-keys: |
+            minimachine-linux-6.6.143-riscv-defconfig-llvm18-full-all-v1-
+
+      - name: Verify full-all
+        run: |
+          test -s "$RAW/manifest.jsonl"
+          test "$(find "$RAW" -type f -name '*.bc' | wc -l)" -eq 2053
+
+      - name: Normalize full-all
+        run: JOBS="$(nproc)" bash scripts/normalize-corpus.sh "$RAW" "$ROOT/normalized"
+
+      - name: ABI + strict P3 full-all
+        run: |
+          mkdir -p "$ROOT/reports"
+          python3 scripts/abi_bc.py "$ROOT/normalized" \
+            --llvm-major 18 --jobs "$(nproc)" \
+            --json "$ROOT/reports/abi.json"
+
+      - name: Full-all summary
+        run: |
+          python3 - <<'PY'
+          import json
+          r=json.load(open("build/abi-full-all/reports/abi.json"))
+          t=r["totals"]
+          print(
+              f"ABI_FULL_ALL pass={r['pass']}/2053 fail={r['fail']} "
+              f"functions={t['functions']} calls={t['calls']} helpers={t['helpers']} "
+              f"returns={t['returns']} p3_pass={t['p3_function_pass']} "
+              f"p3_skip_escape={t['p3_function_skip_escape']} "
+              f"traps={t['trap_sites']} arch={t['arch_escape_sites']} "
+              f"p3_instructions={t['p3_instructions']}"
+          )
+          for x in r["records"]:
+              if x["status"]=="FAIL":
+                  print(f"FAIL {x['file']} :: {x['error']}")
+          PY
+
+      - name: Upload full-all ABI report
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-abi-full-all-${{ github.run_id }}
+          path: build/abi-full-all/reports/abi.json
+          retention-days: 30
