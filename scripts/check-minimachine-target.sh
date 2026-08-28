@@ -53,11 +53,11 @@ cp -a "$root/linux-overlay/arch/minimachine/." "$src/arch/minimachine/"
 
 printf 'TARGET_KCONFIG start ARCH=%s LLVM=%s target=%s\n'     "$ARCH" "$LLVM_MAJOR" "$KCONFIG_TARGET"
 
-make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     "$KCONFIG_TARGET"
+make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR" CLANG_TARGET_FLAGS="$LLVM_CARRIER_TRIPLE"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     "$KCONFIG_TARGET"
 
 # Re-resolve defaults once. This catches target Kconfig symbols that only
 # become visible after the initial defconfig merge.
-make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     olddefconfig
+make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR" CLANG_TARGET_FLAGS="$LLVM_CARRIER_TRIPLE"     KBUILD_BUILD_USER=minimachine KBUILD_BUILD_HOST=minimachine     KBUILD_BUILD_TIMESTAMP=1970-01-01T00:00:00Z     olddefconfig
 
 config="$out/.config"
 
