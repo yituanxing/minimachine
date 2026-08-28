@@ -413,6 +413,23 @@ class LegalizerTests(unittest.TestCase):
         self.assertEqual(len(sysops[0].result), 3)
         self.assertEqual(stats.lowered_faultable_atomic, 1)
 
+    def test_sext_preserves_exact_source_bit_width(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @sx(i1 %x) {
+            entry:
+              %y = sext i1 %x to i64
+              ret i64 %y
+            }
+            """
+        )
+        mov = next(
+            i for b in fn.blocks for i in b.instructions
+            if isinstance(i, muir.Mov) and i.dst == muir.Slot("y")
+        )
+        self.assertEqual(mov.extend, "sext")
+        self.assertEqual(mov.src_bits, 1)
+
     def test_bitwise_routes_to_explicit_helper(self):
         fn, stats = self.lower_one(
             """
