@@ -105,6 +105,9 @@ if ! make -C "$src" O="$out" ARCH="$ARCH" LLVM="-$LLVM_MAJOR" CLANG_TARGET_FLAGS
     exit 1
 fi
 printf 'TARGET_KERNEL_CLUSTER_BUILD_PASS path=kernel/\n'
+# kernel/bounds.bc is a prepare-time generator whose inline .ascii markers
+# produce bounds.h; it is not linked into the runtime kernel image.
+rm -f "$out/kernel/bounds.bc"
 python3 "$root/scripts/legalize_bc.py" "$out/kernel" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/kernel-cluster-legalize.json"
 python3 "$root/scripts/abi_bc.py" "$out/kernel" --llvm-major "$LLVM_MAJOR" --strict --json "$build_root/kernel-cluster-abi.json"
 printf 'TARGET_KERNEL_CLUSTER_PASS path=kernel/\n'
