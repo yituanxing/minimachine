@@ -14,7 +14,7 @@ def _check_target(target: muir.Target, labels: set[str]) -> None:
         return
     if target.is_indirect():
         return
-    raise VerifyError("target must be exactly one of direct label or indirect slot")
+    raise VerifyError("target must be exactly one of local label, indirect slot, or indirect address")
 
 
 def verify_muir(function: muir.Function) -> None:
