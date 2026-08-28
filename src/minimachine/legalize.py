@@ -1423,7 +1423,15 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                     dst_bits=int(m.group(3)[1:])
                     if src_bits in {1,8,16,32,64} and dst_bits in {1,8,16,32,64}:
                         dst_width=_width(dst_bits)
-                        out.append(muir.Mov(dst_width,result,_value(m.group(2)),extend=op))
+                        out.append(
+                            muir.Mov(
+                                dst_width,
+                                result,
+                                _value(m.group(2)),
+                                extend=op,
+                                src_bits=src_bits,
+                            )
+                        )
                     else:
                         stats.temporary_helpers += 1
                         out.append(
