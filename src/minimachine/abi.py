@@ -31,6 +31,7 @@ WORD = 8
 class AbiStats:
     calls: int = 0
     helpers: int = 0
+    system_ops: int = 0
     returns: int = 0
     continuation_blocks: int = 0
     argument_loads: int = 0
@@ -39,6 +40,7 @@ class AbiStats:
         return {
             "calls": self.calls,
             "helpers": self.helpers,
+            "system_ops": self.system_ops,
             "returns": self.returns,
             "continuation_blocks": self.continuation_blocks,
             "argument_loads": self.argument_loads,
@@ -60,6 +62,13 @@ def _indirect_from_sp(offset: int) -> muir.Target:
 def _system_symbol(reason: str) -> str:
     tag = re.sub(r"[^A-Za-z0-9_]+", "_", reason).strip("_")
     return "__mm_trap_" + (tag or "unknown")
+
+
+def _sysop_symbol(op: str) -> str:
+    tag = re.sub(r"[^A-Za-z0-9_]+", "_", op).strip("_")
+    if not tag:
+        raise AbiError("empty system operation")
+    return "__mm_sys_" + tag
 
 
 def _uncond(target: muir.Target) -> muir.Br:
@@ -223,7 +232,7 @@ def expand_function(function: muir.Function) -> tuple[muir.Function, AbiStats]:
                 (
                     i
                     for i, inst in enumerate(pending)
-                    if isinstance(inst, (muir.Call, muir.Helper))
+                    if isinstance(inst, (muir.Call, muir.Helper, muir.Sys))
                 ),
                 None,
             )
@@ -251,11 +260,17 @@ def expand_function(function: muir.Function) -> tuple[muir.Function, AbiStats]:
                 args = pseudo.args
                 result = pseudo.result
                 stats.calls += 1
-            else:
+            elif isinstance(pseudo, muir.Helper):
                 callee = muir.Callee(symbol=pseudo.symbol)
                 args = pseudo.args
                 result = pseudo.result
                 stats.helpers += 1
+            else:
+                assert isinstance(pseudo, muir.Sys)
+                callee = muir.Callee(symbol=_sysop_symbol(pseudo.op))
+                args = pseudo.args
+                result = pseudo.result
+                stats.system_ops += 1
 
             sequence = before + _call_sequence(builder, callee, args, continuation)
             output.append(muir.Block(current_label, sequence))
@@ -286,7 +301,7 @@ def expand_function(function: muir.Function) -> tuple[muir.Function, AbiStats]:
 def verify_abi_normalized(function: muir.Function) -> None:
     for block in function.blocks:
         for inst in block.instructions:
-            if isinstance(inst, (muir.Call, muir.Helper, muir.Ret, muir.Trap)):
+            if isinstance(inst, (muir.Call, muir.Helper, muir.Sys, muir.Ret, muir.Trap)):
                 raise VerifyError(
                     f"ABI pseudo survived in {function.name}:{block.label}: "
                     f"{type(inst).__name__}"
