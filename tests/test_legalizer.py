@@ -144,6 +144,28 @@ class LegalizerTests(unittest.TestCase):
         self.assertEqual(sysops[0].result, muir.Slot("old"))
         self.assertEqual(stats.lowered_system_atomic, 1)
 
+    def test_jump_label_callbr_becomes_static_branch_sysop(self):
+        fn, stats = self.lower_one(
+            """
+            define i1 @static_key(ptr %key) {
+            entry:
+              callbr void asm sideeffect "nop # __jump_table", "i,!i"(ptr %key) to label %fallthrough [label %taken]
+            fallthrough:
+              ret i1 false
+            taken:
+              ret i1 true
+            }
+            """
+        )
+        entry = fn.blocks[0].instructions
+        self.assertIsInstance(entry[0], muir.Sys)
+        self.assertEqual(entry[0].op, "static_branch")
+        self.assertEqual(entry[0].args, (muir.Slot("key"),))
+        self.assertIsInstance(entry[1], muir.Br)
+        self.assertEqual(entry[1].true_target.label, "fallthrough")
+        self.assertEqual(entry[1].false_target.label, "taken")
+        self.assertEqual(stats.lowered_static_branch, 1)
+
     def test_bitwise_routes_to_explicit_helper(self):
         fn, stats = self.lower_one(
             """
