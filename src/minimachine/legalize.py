@@ -1158,6 +1158,43 @@ def _parallel_copies(copies, temp_index: list[int]):
     return out
 
 
+def _typed_aggregate_operand(text: str) -> tuple[str, muir.Value]:
+    raw = text.strip()
+    m = re.search(
+        r"(%[-A-Za-z$._0-9]+|@[-A-Za-z$._0-9]+|zeroinitializer|poison|undef)$",
+        raw,
+    )
+    if not m:
+        raise ValueError(f"cannot parse aggregate operand: {text}")
+    ty = raw[:m.start()].strip()
+    if not ty:
+        raise ValueError(f"aggregate operand has no type: {text}")
+    return ty, _value(m.group(1))
+
+
+def _aggregate_index_layout(
+    layout: DataLayout,
+    aggregate_ty: str,
+    indices: tuple[int, ...],
+) -> tuple[int, str, int, bool]:
+    current = aggregate_ty.strip()
+    offset = 0
+    for index in indices:
+        next_ty, scale, field_offset = layout.gep_step(current, index)
+        if scale:
+            offset += scale * index
+        else:
+            offset += field_offset
+        current = next_ty
+    info = layout.info(current)
+    is_blob = (
+        info.size > 8
+        or info.fields is not None
+        or info.element is not None
+    )
+    return offset, current, info.size, is_blob
+
+
 def _register_metadata(text: str) -> dict[int, str]:
     out: dict[int, str] = {}
     for raw in text.splitlines():
@@ -1876,6 +1913,9 @@ def legalize_function(
                 if op == "extractvalue":
                     if result is None:
                         raise ValueError("extractvalue has no result")
+
+                    # Aggregate results from multi-result SYS/CALL already have
+                    # concrete result slots and do not use blob storage.
                     m = re.search(
                         r"extractvalue\s+.+?\s+(%[-A-Za-z$._0-9]+)\s*,\s*(\d+)\s*$",
                         inst.text,
@@ -1889,17 +1929,67 @@ def legalize_function(
                         src_slot, width = fields[index]
                         out.append(muir.Mov(width, result, src_slot))
                         continue
+
+                    body = inst.text[len("extractvalue "):]
+                    parts = _split_top_commas(body)
+                    if len(parts) < 2:
+                        raise ValueError(f"cannot parse extractvalue: {inst.text}")
+                    aggregate_ty, aggregate_value = _typed_aggregate_operand(parts[0])
+                    try:
+                        indices = tuple(int(x.strip(), 0) for x in parts[1:])
+                    except ValueError as e:
+                        raise ValueError(f"non-constant extractvalue index: {inst.text}") from e
+                    offset, field_ty, field_size, field_is_blob = _aggregate_index_layout(
+                        layout, aggregate_ty, indices
+                    )
                     stats.temporary_helpers += 1
-                    values = tuple(_value(x) for x in _LOCAL_RE.findall(inst.text))
-                    out.append(muir.Helper("__mm_extractvalue", values, result))
+                    out.append(
+                        muir.Helper(
+                            "__mm_extractvalue",
+                            (
+                                aggregate_value,
+                                muir.Imm(offset),
+                                muir.Imm(field_size),
+                                muir.Imm(1 if field_is_blob else 0),
+                            ),
+                            result,
+                        )
+                    )
                     continue
 
                 if op == "insertvalue":
                     if result is None:
                         raise ValueError("insertvalue has no result")
+                    body = inst.text[len("insertvalue "):]
+                    parts = _split_top_commas(body)
+                    if len(parts) < 3:
+                        raise ValueError(f"cannot parse insertvalue: {inst.text}")
+                    aggregate_ty, aggregate_value = _typed_aggregate_operand(parts[0])
+                    _, inserted_value = _typed_aggregate_operand(parts[1])
+                    try:
+                        indices = tuple(int(x.strip(), 0) for x in parts[2:])
+                    except ValueError as e:
+                        raise ValueError(f"non-constant insertvalue index: {inst.text}") from e
+
+                    aggregate_size = layout.info(aggregate_ty).size
+                    offset, field_ty, field_size, field_is_blob = _aggregate_index_layout(
+                        layout, aggregate_ty, indices
+                    )
                     stats.temporary_helpers += 1
-                    values = tuple(_value(x) for x in _LOCAL_RE.findall(inst.text))
-                    out.append(muir.Helper("__mm_insertvalue", values, result))
+                    out.append(
+                        muir.Helper(
+                            "__mm_insertvalue",
+                            (
+                                aggregate_value,
+                                muir.Imm(aggregate_size),
+                                muir.Imm(offset),
+                                inserted_value,
+                                muir.Imm(field_size),
+                                muir.Imm(1 if field_is_blob else 0),
+                            ),
+                            result,
+                        )
+                    )
                     continue
 
                 if op in {"callbr", "indirectbr"}:
