@@ -1,0 +1,116 @@
+{
+  "aliases": {
+    "jiffies": "jiffies_64"
+  },
+  "groups": [
+    {
+      "name": "init_setup",
+      "sections": [".init.setup"],
+      "align": 16
+    },
+    {
+      "name": "initcall_early",
+      "sections": [".initcallearly.init"],
+      "align": 8
+    },
+    {
+      "name": "initcall0",
+      "sections": [".initcall0.init", ".initcall0s.init"],
+      "align": 8
+    },
+    {
+      "name": "initcall1",
+      "sections": [".initcall1.init", ".initcall1s.init"],
+      "align": 8
+    },
+    {
+      "name": "initcall2",
+      "sections": [".initcall2.init", ".initcall2s.init"],
+      "align": 8
+    },
+    {
+      "name": "initcall3",
+      "sections": [".initcall3.init", ".initcall3s.init"],
+      "align": 8
+    },
+    {
+      "name": "initcall4",
+      "sections": [".initcall4.init", ".initcall4s.init"],
+      "align": 8
+    },
+    {
+      "name": "initcall5",
+      "sections": [".initcall5.init", ".initcall5s.init"],
+      "align": 8
+    },
+    {
+      "name": "initcall_rootfs",
+      "sections": [".initcallrootfs.init"],
+      "align": 8
+    },
+    {
+      "name": "initcall6",
+      "sections": [".initcall6.init", ".initcall6s.init"],
+      "align": 8
+    },
+    {
+      "name": "initcall7",
+      "sections": [".initcall7.init", ".initcall7s.init"],
+      "align": 8
+    },
+    {
+      "name": "con_initcall",
+      "sections": [".con_initcall.init"],
+      "align": 8
+    },
+    {
+      "name": "lsm_info",
+      "sections": [".lsm_info.init"],
+      "align": 8
+    },
+    {
+      "name": "sched_classes",
+      "sections": [
+        "__stop_sched_class",
+        "__dl_sched_class",
+        "__rt_sched_class",
+        "__fair_sched_class",
+        "__idle_sched_class"
+      ],
+      "align": 32
+    },
+    {
+      "name": "governor_thermal",
+      "sections": ["__governor_thermal_table"],
+      "align": 8
+    }
+  ],
+  "boundaries": [
+    {"symbol": "__setup_start", "group": "init_setup", "edge": "start"},
+    {"symbol": "__setup_end", "group": "init_setup", "edge": "end"},
+
+    {"symbol": "__initcall_start", "group": "initcall_early", "edge": "start"},
+    {"symbol": "__initcall0_start", "group": "initcall0", "edge": "start"},
+    {"symbol": "__initcall1_start", "group": "initcall1", "edge": "start"},
+    {"symbol": "__initcall2_start", "group": "initcall2", "edge": "start"},
+    {"symbol": "__initcall3_start", "group": "initcall3", "edge": "start"},
+    {"symbol": "__initcall4_start", "group": "initcall4", "edge": "start"},
+    {"symbol": "__initcall5_start", "group": "initcall5", "edge": "start"},
+    {"symbol": "__initcallrootfs_start", "group": "initcall_rootfs", "edge": "start"},
+    {"symbol": "__initcall6_start", "group": "initcall6", "edge": "start"},
+    {"symbol": "__initcall7_start", "group": "initcall7", "edge": "start"},
+    {"symbol": "__initcall_end", "group": "initcall7", "edge": "end"},
+
+    {"symbol": "__con_initcall_start", "group": "con_initcall", "edge": "start"},
+    {"symbol": "__con_initcall_end", "group": "con_initcall", "edge": "end"},
+
+    {"symbol": "__start_lsm_info", "group": "lsm_info", "edge": "start"},
+    {"symbol": "__end_lsm_info", "group": "lsm_info", "edge": "end"},
+
+    {"symbol": "__sched_class_highest", "group": "sched_classes", "edge": "start"},
+    {"symbol": "__sched_class_lowest", "group": "sched_classes", "edge": "end"},
+
+    {"symbol": "__governor_thermal_table", "group": "governor_thermal", "edge": "start"},
+    {"symbol": "__governor_thermal_table_end", "group": "governor_thermal", "edge": "end"}
+  ]
+}
