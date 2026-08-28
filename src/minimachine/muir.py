@@ -110,6 +110,7 @@ class Mov:
     dst: Operand
     src: Operand
     extend: str | None = None
+    src_bits: int | None = None
 
 
 @dataclass(frozen=True)
