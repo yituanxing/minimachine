@@ -283,6 +283,36 @@ class RuntimeTests(unittest.TestCase):
         tp_vm.system_state["thread_pointer"] = 0xABCDEF
         self.assertEqual(tp_vm.run_function("read_tp"), (0xABCDEF,))
 
+    def test_anonymous_array_load_store_round_trip_executes(self):
+        functions, _ = legalize_module(
+            """
+            define void @copy_array(ptr %src, ptr %dst) {
+            entry:
+              %v = load [2 x i64], ptr %src
+              store [2 x i64] %v, ptr %dst
+              ret void
+            }
+            """
+        )
+        program = executable(functions)
+        vm = program.new_vm()
+        source = 0x3A00
+        dest = 0x3B00
+        vm.memory.write(source + 0, 64, 0x1122334455667788)
+        vm.memory.write(source + 8, 64, 0x99AABBCCDDEEFF00)
+        self.assertEqual(
+            vm.run_function("copy_array", (source, dest), result_count=0),
+            (),
+        )
+        self.assertEqual(
+            vm.memory.read(dest + 0, 64),
+            0x1122334455667788,
+        )
+        self.assertEqual(
+            vm.memory.read(dest + 8, 64),
+            0x99AABBCCDDEEFF00,
+        )
+
     def test_aggregate_load_store_round_trip_executes(self):
         functions, _ = legalize_module(
             """
