@@ -162,6 +162,44 @@ def helper_callback(symbol: str):
 
         return alloca
 
+    if symbol == "__mm_llvm_va_start":
+        def va_start(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("__mm_llvm_va_start expects va_list,fixed_count")
+            va_list, fixed_count = args
+            from .abi import CALLER_SP, FRAME_SIZE, ARG_COUNT, WORD
+            caller_sp = vm.memory.read(vm.sp + CALLER_SP, 64)
+            frame_size = vm.memory.read(caller_sp + FRAME_SIZE, 64)
+            total_args = vm.memory.read(caller_sp + ARG_COUNT, 64)
+            if fixed_count > total_args:
+                raise VMError(
+                    f"va_start fixed_count {fixed_count} exceeds argc {total_args}"
+                )
+            first_vararg = caller_sp + frame_size + fixed_count * WORD
+            vm.memory.write(va_list, 64, first_vararg)
+            return None
+
+        return va_start
+
+    if symbol == "__mm_llvm_va_copy":
+        def va_copy(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("__mm_llvm_va_copy expects dst,src")
+            dst, src = args
+            vm.memory.write(dst, 64, vm.memory.read(src, 64))
+            return None
+
+        return va_copy
+
+    if symbol == "__mm_llvm_va_end":
+        def va_end(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError("__mm_llvm_va_end expects va_list")
+            return None
+
+        return va_end
+
+
     m = re.fullmatch(
         r"__mm_(and|or|xor|shl|lshr|ashr|mul|udiv|sdiv|urem|srem)_(\d+)",
         symbol,
