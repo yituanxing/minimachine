@@ -59,6 +59,15 @@ MINIMACHINE_ATOMIC64_FETCH_OP(and, &)
 MINIMACHINE_ATOMIC64_FETCH_OP(or, |)
 MINIMACHINE_ATOMIC64_FETCH_OP(xor, ^)
 
+#define arch_atomic64_add_return arch_atomic64_add_return
+#define arch_atomic64_sub_return arch_atomic64_sub_return
+
+#define arch_atomic64_fetch_add arch_atomic64_fetch_add
+#define arch_atomic64_fetch_sub arch_atomic64_fetch_sub
+#define arch_atomic64_fetch_and arch_atomic64_fetch_and
+#define arch_atomic64_fetch_or  arch_atomic64_fetch_or
+#define arch_atomic64_fetch_xor arch_atomic64_fetch_xor
+
 #undef MINIMACHINE_ATOMIC64_FETCH_OP
 #undef MINIMACHINE_ATOMIC64_OP_RETURN
 #undef MINIMACHINE_ATOMIC64_OP
