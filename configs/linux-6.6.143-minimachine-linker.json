@@ -155,6 +155,13 @@
       ],
       "align": 16384,
       "empty_after": "con_initcall"
+    },
+    {
+      "name": "kernel_params",
+      "sections": [
+        "__param"
+      ],
+      "align": 8
     }
   ],
   "boundaries": [
@@ -301,6 +308,16 @@
     {
       "symbol": "__end_init_task",
       "group": "init_task",
+      "edge": "end"
+    },
+    {
+      "symbol": "__start___param",
+      "group": "kernel_params",
+      "edge": "start"
+    },
+    {
+      "symbol": "__stop___param",
+      "group": "kernel_params",
       "edge": "end"
     }
   ]
