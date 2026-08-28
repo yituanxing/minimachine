@@ -113,8 +113,8 @@ def _slot(name: str) -> muir.Slot:
 class _DeferredIcmp:
     pred: str
     bits: int
-    a: muir.Value
-    b: muir.Value
+    lhs_text: str
+    rhs_text: str
 
 
 def _width(bits: int) -> muir.Width:
@@ -480,10 +480,12 @@ def _parse_phi(inst: TextInst, layout: DataLayout):
                     if value_text.startswith("getelementptr"):
                         value=_const_gep_value(value_text, layout)
                     elif value_text.startswith("icmp "):
-                        pred, bits, _cmp_width, a, b = _parse_inline_icmp(
-                            value_text, layout
+                        pred, bits, _cmp_width, lhs_text, rhs_text = (
+                            _parse_inline_icmp_operands(value_text)
                         )
-                        value=_DeferredIcmp(pred, bits, a, b)
+                        value=_DeferredIcmp(
+                            pred, bits, lhs_text, rhs_text
+                        )
                     else:
                         value=_value(value_text)
                     incoming.append((value, parts[1][1:]))
@@ -1346,14 +1348,9 @@ def _split_typed_value(text: str) -> tuple[str, str]:
     return m.group(1).strip(), m.group(2).strip()
 
 
-def _parse_inline_icmp(
+def _parse_inline_icmp_operands(
     text: str,
-    layout: DataLayout,
-    *,
-    out: list[muir.Instr] | None = None,
-    temp_counter: list[int] | None = None,
-    frame_slots: set[str] | None = None,
-) -> tuple[str, int, muir.Width | None, muir.Value, muir.Value]:
+) -> tuple[str, int, muir.Width | None, str, str]:
     raw = text.strip()
     m = re.fullmatch(r"icmp\s+([a-z]+)\s*\((.*)\)", raw)
     if not m:
@@ -1371,6 +1368,27 @@ def _parse_inline_icmp(
             f"inline icmp type mismatch {lhs_ty} vs {rhs_ty}: {text}"
         )
 
+    if lhs_ty == "ptr" or lhs_ty.startswith("ptr addrspace("):
+        return pred, 64, muir.Width.I64, lhs_text, rhs_text
+
+    mty = re.fullmatch(r"i(\d+)", lhs_ty)
+    if not mty:
+        raise ValueError(f"unsupported inline icmp type {lhs_ty}: {text}")
+    bits = int(mty.group(1))
+    width = _width(bits) if bits in {1, 8, 16, 32, 64} else None
+    return pred, bits, width, lhs_text, rhs_text
+
+
+def _parse_inline_icmp(
+    text: str,
+    layout: DataLayout,
+    *,
+    out: list[muir.Instr] | None = None,
+    temp_counter: list[int] | None = None,
+    frame_slots: set[str] | None = None,
+) -> tuple[str, int, muir.Width | None, muir.Value, muir.Value]:
+    pred, bits, width, lhs_text, rhs_text = _parse_inline_icmp_operands(text)
+
     if out is None:
         a = _const_scalar_value(lhs_text, layout)
         b = _const_scalar_value(rhs_text, layout)
@@ -1384,14 +1402,6 @@ def _parse_inline_icmp(
             rhs_text, layout, out, temp_counter, frame_slots
         )
 
-    if lhs_ty == "ptr" or lhs_ty.startswith("ptr addrspace("):
-        return pred, 64, muir.Width.I64, a, b
-
-    mty = re.fullmatch(r"i(\d+)", lhs_ty)
-    if not mty:
-        raise ValueError(f"unsupported inline icmp type {lhs_ty}: {text}")
-    bits = int(mty.group(1))
-    width = _width(bits) if bits in {1, 8, 16, 32, 64} else None
     return pred, bits, width, a, b
 
 
@@ -2155,7 +2165,7 @@ def legalize_function(
                         inst.text[len("br i1 ") :]
                     )
                     if (
-                        len(branch_parts) == 3
+                        len(branch_parts) >= 3
                         and branch_parts[0].strip().startswith("icmp ")
                         and len(labels) == 2
                     ):
@@ -2900,13 +2910,27 @@ def legalize_function(
         ] = []
         for dst, src, width in copies:
             if isinstance(src, _DeferredIcmp):
+                a = _materialize_scalar_value(
+                    src.lhs_text,
+                    layout,
+                    prelude,
+                    temp_counter,
+                    frame_slots,
+                )
+                b = _materialize_scalar_value(
+                    src.rhs_text,
+                    layout,
+                    prelude,
+                    temp_counter,
+                    frame_slots,
+                )
                 temp_counter[0] += 1
                 value = muir.Slot(f"__phi_icmp{temp_counter[0]}")
                 frame_slots.add(value.name)
                 prelude.append(
                     muir.Helper(
                         f"__mm_icmp_{src.pred}_{src.bits}",
-                        (src.a, src.b),
+                        (a, b),
                         value,
                     )
                 )
