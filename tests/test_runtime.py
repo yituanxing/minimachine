@@ -371,6 +371,101 @@ class RuntimeTests(unittest.TestCase):
             (1,),
         )
 
+    def test_funnel_shift_intrinsics_execute_with_distinct_halves(self):
+        functions, _ = legalize_module(
+            """
+            declare i32 @llvm.fshl.i32(i32, i32, i32)
+            declare i32 @llvm.fshr.i32(i32, i32, i32)
+
+            define i32 @left(i32 %a, i32 %b, i32 %s) {
+            entry:
+              %r = call i32 @llvm.fshl.i32(i32 %a, i32 %b, i32 %s)
+              ret i32 %r
+            }
+
+            define i32 @right(i32 %a, i32 %b, i32 %s) {
+            entry:
+              %r = call i32 @llvm.fshr.i32(i32 %a, i32 %b, i32 %s)
+              ret i32 %r
+            }
+            """
+        )
+        program = executable(functions)
+        a = 0x12345678
+        b = 0x9ABCDEF0
+        self.assertEqual(program.new_vm().run_function("left", (a, b, 0)), (a,))
+        self.assertEqual(program.new_vm().run_function("right", (a, b, 0)), (b,))
+        self.assertEqual(
+            program.new_vm().run_function("left", (a, b, 4)),
+            (0x23456789,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function("right", (a, b, 4)),
+            (0x89ABCDEF,),
+        )
+        # Shift amount is modulo the element width.
+        self.assertEqual(
+            program.new_vm().run_function("left", (a, b, 36)),
+            (0x23456789,),
+        )
+
+    def test_odd_width_i24_memory_executes(self):
+        functions, _ = legalize_module(
+            """
+            define i24 @roundtrip(ptr %p, i24 %x) {
+            entry:
+              store i24 %x, ptr %p
+              %r = load i24, ptr %p
+              ret i24 %r
+            }
+            """
+        )
+        program = executable(functions)
+        vm = program.new_vm()
+        self.assertEqual(
+            vm.run_function("roundtrip", (0x8100, 0xABCDEF)),
+            (0xABCDEF,),
+        )
+        self.assertEqual(vm.memory.read(0x8100, 8), 0xEF)
+        self.assertEqual(vm.memory.read(0x8101, 8), 0xCD)
+        self.assertEqual(vm.memory.read(0x8102, 8), 0xAB)
+
+    def test_bit_count_intrinsics_execute(self):
+        functions, _ = legalize_module(
+            """
+            declare i64 @llvm.cttz.i64(i64, i1 immarg)
+            declare i32 @llvm.ctlz.i32(i32, i1 immarg)
+            declare i64 @llvm.ctpop.i64(i64)
+
+            define i64 @tz(i64 %x) {
+            entry:
+              %r = call i64 @llvm.cttz.i64(i64 %x, i1 false)
+              ret i64 %r
+            }
+
+            define i32 @lz(i32 %x) {
+            entry:
+              %r = call i32 @llvm.ctlz.i32(i32 %x, i1 false)
+              ret i32 %r
+            }
+
+            define i64 @pop(i64 %x) {
+            entry:
+              %r = call i64 @llvm.ctpop.i64(i64 %x)
+              ret i64 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(program.new_vm().run_function("tz", (0x1000,)), (12,))
+        self.assertEqual(program.new_vm().run_function("tz", (0,)), (64,))
+        self.assertEqual(program.new_vm().run_function("lz", (1,)), (31,))
+        self.assertEqual(program.new_vm().run_function("lz", (0,)), (32,))
+        self.assertEqual(
+            program.new_vm().run_function("pop", (0xF0F0F0F0F0F0F0F0,)),
+            (32,),
+        )
+
     def test_pointer_scaled_helper_executes(self):
         fn = muir.Function(
             "ptr",
