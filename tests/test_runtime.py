@@ -539,6 +539,29 @@ class RuntimeTests(unittest.TestCase):
             (base + 1,),
         )
 
+    def test_nested_linker_symbol_constant_expression_executes(self):
+        llvm = """
+            @endmarker = external global i8
+
+            define i64 @align_endmarker() {
+            entry:
+              %aligned = and i64 add (i64 ptrtoint (ptr @endmarker to i64), i64 4095), -4096
+              ret i64 %aligned
+            }
+        """
+        functions, _ = legalize_module(llvm)
+        program = executable(functions)
+        install_module_image(
+            program,
+            parse_module_image(llvm),
+            external_symbols={"endmarker": 0x12345},
+        )
+
+        self.assertEqual(
+            program.new_vm().run_function("align_endmarker"),
+            (0x13000,),
+        )
+
     def test_constant_gep_stored_as_pointer_value_executes(self):
         llvm = """
             %struct.sample = type { i8, i64, i64 }

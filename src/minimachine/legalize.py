@@ -387,6 +387,57 @@ def _const_gep_value(text: str, layout: DataLayout) -> muir.Value:
     raise ValueError(f"non-symbol constant-expression GEP needs materialization: {text}")
 
 
+def _const_scalar_value(text: str, layout: DataLayout) -> muir.Value:
+    text = text.strip()
+    if text.startswith("getelementptr"):
+        return _const_gep_value(text, layout)
+
+    cast = re.match(
+        r"^(ptrtoint|inttoptr|bitcast|addrspacecast)\s*\((.+)\s+to\s+.+\)$",
+        text,
+    )
+    if cast:
+        _ty, value_text = _split_typed_value(cast.group(2).strip())
+        return _const_scalar_value(value_text, layout)
+
+    binary = re.match(r"^(add|sub)(?:\s+\w+)*\s*\((.*)\)$", text)
+    if binary:
+        parts = _split_top_commas(binary.group(2))
+        if len(parts) != 2:
+            raise ValueError(f"cannot parse constant expression: {text}")
+        _lhs_ty, lhs_text = _split_typed_value(parts[0])
+        _rhs_ty, rhs_text = _split_typed_value(parts[1])
+        lhs = _const_scalar_value(lhs_text, layout)
+        rhs = _const_scalar_value(rhs_text, layout)
+
+        if isinstance(lhs, muir.Imm) and isinstance(rhs, muir.Imm):
+            value = (
+                lhs.value + rhs.value
+                if binary.group(1) == "add"
+                else lhs.value - rhs.value
+            )
+            return muir.Imm(value)
+
+        if isinstance(lhs, muir.Symbol):
+            lhs = muir.Reloc(lhs.name, 0)
+        if isinstance(rhs, muir.Symbol):
+            rhs = muir.Reloc(rhs.name, 0)
+
+        if isinstance(lhs, muir.Reloc) and isinstance(rhs, muir.Imm):
+            delta = rhs.value if binary.group(1) == "add" else -rhs.value
+            return muir.Reloc(lhs.symbol, lhs.addend + delta)
+        if (
+            binary.group(1) == "add"
+            and isinstance(lhs, muir.Imm)
+            and isinstance(rhs, muir.Reloc)
+        ):
+            return muir.Reloc(rhs.symbol, rhs.addend + lhs.value)
+
+        raise ValueError(f"unsupported relocatable constant expression: {text}")
+
+    return _value(text)
+
+
 def _parse_phi(inst: TextInst, layout: DataLayout):
     width = _first_width(inst.text, default_pointer=True)
     incoming=[]
@@ -1585,19 +1636,36 @@ def legalize_function(
                     continue
 
                 if op == "sub":
-                    m = re.search(r"sub(?:\s+\w+)*\s+(i(?:8|16|32|64))\s+(.+?),\s*(.+)$", inst.text)
+                    m = re.match(
+                        r"sub(?:\s+\w+)*\s+(i(?:8|16|32|64))\s+(.+)$",
+                        inst.text,
+                    )
                     if not m or result is None:
                         raise ValueError(f"cannot parse sub: {inst.text}")
+                    operands = _split_top_commas(m.group(2))
+                    if len(operands) != 2:
+                        raise ValueError(f"cannot parse sub operands: {inst.text}")
                     width = _width(int(m.group(1)[1:]))
-                    out.append(muir.Sub(width, result, _value(m.group(2)), _value(m.group(3))))
+                    out.append(
+                        muir.Sub(
+                            width,
+                            result,
+                            _const_scalar_value(operands[0], layout),
+                            _const_scalar_value(operands[1], layout),
+                        )
+                    )
                     continue
 
                 if op == "add":
-                    m = re.search(r"add(?:\s+\w+)*\s+(i\d+)\s+(.+?),\s*(.+)$", inst.text)
+                    m = re.match(r"add(?:\s+\w+)*\s+(i\d+)\s+(.+)$", inst.text)
                     if not m or result is None:
                         raise ValueError(f"cannot parse add: {inst.text}")
+                    operands = _split_top_commas(m.group(2))
+                    if len(operands) != 2:
+                        raise ValueError(f"cannot parse add operands: {inst.text}")
                     bits = int(m.group(1)[1:])
-                    a, b = _value(m.group(2)), _value(m.group(3))
+                    a = _const_scalar_value(operands[0], layout)
+                    b = _const_scalar_value(operands[1], layout)
                     if bits > 64:
                         a = _materialize_wide_value(
                             a, bits, out, temp_counter, frame_slots
@@ -2104,15 +2172,20 @@ def legalize_function(
 
 
                 if op in {"and", "or", "xor", "shl", "lshr", "ashr", "mul", "udiv", "sdiv", "urem", "srem"}:
-                    m = re.search(
-                        rf"{op}(?:\s+\w+)*\s+(i\d+)\s+(.+?),\s*(.+)$",
+                    m = re.match(
+                        rf"{op}(?:\s+\w+)*\s+(i\d+)\s+(.+)$",
                         inst.text,
                     )
                     if not m or result is None:
                         raise ValueError(f"cannot parse helper op {op}: {inst.text}")
+                    operands = _split_top_commas(m.group(2))
+                    if len(operands) != 2:
+                        raise ValueError(
+                            f"cannot parse helper operands {op}: {inst.text}"
+                        )
                     width = int(m.group(1)[1:])
-                    lhs = _value(m.group(2))
-                    rhs = _value(m.group(3))
+                    lhs = _const_scalar_value(operands[0], layout)
+                    rhs = _const_scalar_value(operands[1], layout)
                     if width > 64:
                         lhs = _materialize_wide_value(
                             lhs, width, out, temp_counter, frame_slots
