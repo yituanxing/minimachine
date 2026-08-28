@@ -307,6 +307,53 @@ class RuntimeTests(unittest.TestCase):
         copied = bytes(vm.memory.read(dest + i, 8) for i in range(len(raw)))
         self.assertEqual(copied, raw)
 
+    def test_extractvalue_uses_struct_padding_offset(self):
+        functions, _ = legalize_module(
+            """
+            %Padded = type { i8, i32 }
+
+            define i32 @get_second(ptr %src) {
+            entry:
+              %v = load %Padded, ptr %src
+              %x = extractvalue %Padded %v, 1
+              ret i32 %x
+            }
+            """
+        )
+        program = executable(functions)
+        vm = program.new_vm()
+        source = 0x6000
+        vm.memory.write(source + 0, 8, 0x7F)
+        vm.memory.write(source + 4, 32, 0xA1B2C3D4)
+        self.assertEqual(
+            vm.run_function("get_second", (source,)),
+            (0xA1B2C3D4,),
+        )
+
+    def test_nested_insertvalue_round_trip_executes(self):
+        functions, _ = legalize_module(
+            """
+            %Outer = type { i8, [2 x i32] }
+
+            define void @put_nested(ptr %dst, i32 %x) {
+            entry:
+              %v = insertvalue %Outer zeroinitializer, i32 %x, 1, 1
+              store %Outer %v, ptr %dst
+              ret void
+            }
+            """
+        )
+        program = executable(functions)
+        vm = program.new_vm()
+        dest = 0x7000
+        self.assertEqual(
+            vm.run_function("put_nested", (dest, 0x11223344), result_count=0),
+            (),
+        )
+        self.assertEqual(vm.memory.read(dest + 0, 8), 0)
+        self.assertEqual(vm.memory.read(dest + 4, 32), 0)
+        self.assertEqual(vm.memory.read(dest + 8, 32), 0x11223344)
+
     def test_pointer_scaled_helper_executes(self):
         fn = muir.Function(
             "ptr",
