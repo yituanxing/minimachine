@@ -270,7 +270,11 @@ def _parse_gep(inst: TextInst, layout: DataLayout):
     pm=re.match(r"ptr(?:\s+addrspace\(\d+\))?\s+(.+)$", parts[1])
     if not pm:
         raise ValueError(f"cannot parse gep base: {text}")
-    base=_value(pm.group(1))
+    base_text=pm.group(1).strip()
+    if base_text.startswith("getelementptr"):
+        base=_const_gep_value(base_text,layout)
+    else:
+        base=_value(base_text)
     indices=[]
     for raw in parts[2:]:
         m=re.match(r"i(?:32|64)\s+(.+)$", raw)
