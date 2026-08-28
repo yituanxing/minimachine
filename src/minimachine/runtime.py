@@ -5,6 +5,7 @@ import re
 from typing import Iterable
 
 from . import muir
+from .abi import CALLER_SP, RET_PC
 from .vm import MASK64, Program, VM, VMError
 
 
@@ -101,6 +102,50 @@ def _icmp(pred: str, bits: int, a: int, b: int) -> int:
         return int(table[pred])
     except KeyError as exc:
         raise VMError(f"unknown icmp predicate: {pred}") from exc
+
+
+def _int_abi_align(bits: int) -> int:
+    size = max(1, (bits + 7) // 8)
+    if bits <= 8:
+        return 1
+    if bits <= 16:
+        return 2
+    if bits <= 32:
+        return 4
+    if bits <= 64:
+        return 8
+    return 16
+
+
+def _overflow_blob(vm: VM, bits: int, value: int, overflow: bool) -> int:
+    size = max(1, (bits + 7) // 8)
+    align = _int_abi_align(bits)
+    overflow_offset = size
+    total_size = ((overflow_offset + 1 + align - 1) // align) * align
+    blob = vm.alloc_bytes(total_size, align=align)
+    for i in range(total_size):
+        vm.memory.write(blob + i, 8, 0)
+    masked = value & _mask(bits)
+    for i in range(size):
+        vm.memory.write(
+            blob + i,
+            8,
+            (masked >> (8 * i)) & 0xFF,
+        )
+    vm.memory.write(blob + overflow_offset, 8, int(overflow))
+    return blob
+
+
+def _caller_frame(vm: VM, depth: int) -> int:
+    if depth < 0:
+        raise VMError("negative frame depth")
+    frame = vm.memory.read(vm.sp + CALLER_SP, 64)
+    for _ in range(depth):
+        parent = vm.memory.read(frame + CALLER_SP, 64)
+        if parent == 0 or parent == frame:
+            raise VMError("frame depth exceeds MiniMachine call chain")
+        frame = parent
+    return frame
 
 
 def helper_callback(symbol: str):
@@ -286,6 +331,123 @@ def helper_callback(symbol: str):
             # VM deliberately models it as a no-op performance hint.
             return None
         return prefetch
+
+    m = re.fullmatch(r"__mm_llvm_abs_i(8|16|32|64)", symbol)
+    if m:
+        bits = int(m.group(1))
+        mask = _mask(bits)
+        minimum = -(1 << (bits - 1))
+
+        def llvm_abs(vm: VM, args: tuple[int, ...]):
+            if len(args) not in {1, 2}:
+                raise VMError(f"{symbol} expects value[,min_is_poison]")
+            value = _signed(args[0], bits)
+            min_is_poison = bool(args[1]) if len(args) == 2 else False
+            if value == minimum and min_is_poison:
+                raise VMError(f"{symbol} reached LLVM poison INT_MIN input")
+            return abs(value) & mask
+
+        return llvm_abs
+
+    m = re.fullmatch(r"__mm_llvm_(uadd|usub|sadd|ssub)_sat_i(8|16|32|64)", symbol)
+    if m:
+        op, bits_text = m.groups()
+        bits = int(bits_text)
+        mask = _mask(bits)
+        signed_min = -(1 << (bits - 1))
+        signed_max = (1 << (bits - 1)) - 1
+
+        def saturating(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError(f"{symbol} expects two operands")
+            if op == "uadd":
+                return min((args[0] & mask) + (args[1] & mask), mask)
+            if op == "usub":
+                return max((args[0] & mask) - (args[1] & mask), 0)
+            a = _signed(args[0], bits)
+            b = _signed(args[1], bits)
+            raw = a + b if op == "sadd" else a - b
+            return min(max(raw, signed_min), signed_max) & mask
+
+        return saturating
+
+    m = re.fullmatch(
+        r"__mm_llvm_([us])(add|sub|mul)_with_overflow_i(8|16|32|64)",
+        symbol,
+    )
+    if m:
+        signedness, op, bits_text = m.groups()
+        bits = int(bits_text)
+        mask = _mask(bits)
+        signed_min = -(1 << (bits - 1))
+        signed_max = (1 << (bits - 1)) - 1
+
+        def with_overflow(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError(f"{symbol} expects two operands")
+            if signedness == "u":
+                a = args[0] & mask
+                b = args[1] & mask
+                if op == "add":
+                    raw = a + b
+                    overflow = raw > mask
+                elif op == "sub":
+                    raw = a - b
+                    overflow = a < b
+                else:
+                    raw = a * b
+                    overflow = raw > mask
+                return _overflow_blob(vm, bits, raw, overflow)
+
+            a = _signed(args[0], bits)
+            b = _signed(args[1], bits)
+            if op == "add":
+                raw = a + b
+            elif op == "sub":
+                raw = a - b
+            else:
+                raw = a * b
+            overflow = raw < signed_min or raw > signed_max
+            return _overflow_blob(vm, bits, raw, overflow)
+
+        return with_overflow
+
+    m = re.fullmatch(r"__mm_llvm_bitreverse_i(\d+)", symbol)
+    if m:
+        bits = int(m.group(1))
+        if bits <= 64:
+            mask = _mask(bits)
+
+            def bitreverse(vm: VM, args: tuple[int, ...]):
+                if len(args) != 1:
+                    raise VMError(f"{symbol} expects one argument")
+                value = args[0] & mask
+                out = 0
+                for i in range(bits):
+                    out = (out << 1) | ((value >> i) & 1)
+                return out & mask
+
+            return bitreverse
+
+    if symbol == "__mm_llvm_returnaddress":
+        def returnaddress(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError("llvm.returnaddress expects depth")
+            frame = _caller_frame(vm, args[0])
+            return vm.memory.read(frame + RET_PC, 64)
+        return returnaddress
+
+    if symbol.startswith("__mm_llvm_frameaddress"):
+        def frameaddress(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError("llvm.frameaddress expects depth")
+            return _caller_frame(vm, args[0])
+        return frameaddress
+
+    if symbol == "__mm_llvm_experimental_noalias_scope_decl":
+        def noalias_scope_decl(vm: VM, args: tuple[int, ...]):
+            return None
+        return noalias_scope_decl
 
     m = re.fullmatch(r"__mm_llvm_(u|s)(min|max)_i(8|16|32|64)", symbol)
     if m:
