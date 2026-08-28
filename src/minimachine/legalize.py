@@ -58,6 +58,7 @@ class LegalizeStats:
     lowered_system_vector: int = 0
     lowered_alternative_tlb: int = 0
     lowered_generic_csr: int = 0
+    lowered_faultable_atomic: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -90,6 +91,7 @@ class LegalizeStats:
             "lowered_system_vector": self.lowered_system_vector,
             "lowered_alternative_tlb": self.lowered_alternative_tlb,
             "lowered_generic_csr": self.lowered_generic_csr,
+            "lowered_faultable_atomic": self.lowered_faultable_atomic,
         }
 
 
@@ -678,6 +680,23 @@ def _faultable_sys_spec(template: str) -> tuple[str, int] | None:
     mnemonic = m.group(1)
     kind = "load" if mnemonic.startswith("l") else "store"
     return kind, _FAULT_WIDTH[mnemonic]
+
+
+def _faultable_atomic_sys_spec(template: str) -> tuple[str, int, str] | None:
+    if "__ex_table" not in template:
+        return None
+    normalized = _normalize_inline_asm(template)
+
+    m = re.search(r"\bamo(add|and|or|xor|swap)\.(w|d)\.aqrl\b", normalized)
+    if m:
+        kind, width_tag = m.groups()
+        return kind, 32 if width_tag == "w" else 64, "acq_rel"
+
+    m = re.search(r"\blr\.(w|d)\.aqrl\b", normalized)
+    if m and re.search(r"\bsc\.[wd]\.aqrl\b", normalized) and re.search(r"\bbne\b", normalized):
+        return "cmpxchg", 32 if m.group(1) == "w" else 64, "acq_rel"
+
+    return None
 
 
 def _lrsc_sys_spec(template: str) -> tuple[str, int, str] | None:
@@ -1622,6 +1641,34 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                                     )
                                 )
                                 stats.lowered_system_faultable += 1
+                                continue
+
+                            fault_atomic_spec = _faultable_atomic_sys_spec(template)
+                            if fault_atomic_spec is not None:
+                                kind, bits, ordering = fault_atomic_spec
+                                sys_result, _ = _prepare_inline_asm_result(
+                                    inst, result, frame_slots, aggregate_results
+                                )
+                                fault_atomic_args = _inline_asm_args(inst.text, layout)
+                                # Linux futex asm carries an error accumulator
+                                # initialized to zero and repeats the memory
+                                # operand. The MiniMachine system contract
+                                # exposes only semantic inputs.
+                                if (
+                                    len(fault_atomic_args) >= 4
+                                    and fault_atomic_args[-1] == fault_atomic_args[0]
+                                    and isinstance(fault_atomic_args[-2], muir.Imm)
+                                    and fault_atomic_args[-2].value == 0
+                                ):
+                                    fault_atomic_args = fault_atomic_args[:-2]
+                                out.append(
+                                    muir.Sys(
+                                        f"faultable_atomic_{kind}_i{bits}_{ordering}",
+                                        fault_atomic_args,
+                                        sys_result,
+                                    )
+                                )
+                                stats.lowered_faultable_atomic += 1
                                 continue
 
                             lrsc_spec = _lrsc_sys_spec(template)
