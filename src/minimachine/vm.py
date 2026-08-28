@@ -170,6 +170,9 @@ class VM:
         self.steps = 0
         self.system_state: dict[str, int] = {}
         self.csr: dict[int, int] = {}
+        self.static_keys: dict[int, int] = {}
+        self.cpu_features: set[int] = set()
+        self.ecall_handler = None
 
     @staticmethod
     def _mask(bits: int) -> int:
