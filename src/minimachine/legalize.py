@@ -13,7 +13,7 @@ _LOCAL_RE = re.compile(r"%[-A-Za-z$._0-9]+")
 _VALUE_TOKEN_RE = re.compile(
     r"(%[-A-Za-z$._0-9]+|@[-A-Za-z$._0-9]+|-?[0-9]+|true|false|null)"
 )
-_INT_TYPE_RE = re.compile(r"\bi(\d+)\b")
+_INT_TYPE_RE = re.compile(r"(?<![%@A-Za-z0-9_.$])i(\d+)(?![-A-Za-z0-9_.$])")
 _PHI_IN_RE = re.compile(r"\[\s*([^,]+),\s*%([-A-Za-z$._0-9]+)\s*\]")
 _LABEL_USE_RE = re.compile(r"label\s+%([-A-Za-z$._0-9]+)")
 
@@ -727,8 +727,10 @@ def legalize_function(fn: TextFunction, layout: DataLayout) -> tuple[muir.Functi
                         raise ValueError("select has no result")
                     body=inst.text[len("select "):]
                     parts=_split_top_commas(body)
-                    if len(parts) != 3:
+                    semantic_parts=[p for p in parts if not p.lstrip().startswith("!")]
+                    if len(semantic_parts) != 3:
                         raise ValueError(f"cannot parse select: {inst.text}")
+                    parts=semantic_parts
                     cm=re.match(r"i1\s+(.+)$",parts[0])
                     if not cm:
                         raise ValueError(f"cannot parse select condition: {inst.text}")
