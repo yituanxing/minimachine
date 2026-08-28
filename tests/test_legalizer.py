@@ -33,6 +33,26 @@ class LegalizerTests(unittest.TestCase):
         self.assertIsInstance(entry[-1], muir.Br)
         self.assertEqual(entry[-1].cond, muir.Cond.ULT)
 
+    def test_undef_indirectbr_refines_to_declared_successor(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @f(i1 %cond) {
+            entry:
+              indirectbr ptr undef, [label %left, label %right]
+            left:
+              ret i64 11
+            right:
+              ret i64 22
+            }
+            """
+        )
+        self.assertEqual(stats.lowered_indirectbr, 1)
+        self.assertEqual(stats.lowered_undef_indirectbr, 1)
+        entry = fn.blocks[0]
+        self.assertIsInstance(entry.instructions[-1], muir.Br)
+        self.assertEqual(entry.instructions[-1].true_target.label, "left")
+        self.assertEqual(entry.instructions[-1].false_target.label, "left")
+
     def test_switch_lowers_to_direct_branch_chain(self):
         fn, stats = self.lower_one(
             """
