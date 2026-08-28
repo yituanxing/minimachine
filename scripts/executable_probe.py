@@ -21,6 +21,7 @@ from src.minimachine.image import (
     parse_module_image,
 )
 from src.minimachine.legalize import LegalizeError, legalize_module
+from src.minimachine.linker import LinkerContract, LinkerContractError
 from src.minimachine.lower_p3 import MachineLoweringError, lower_function
 from src.minimachine.runtime import collect_runtime_surface, install_runtime
 from src.minimachine.verify import VerifyError, verify_muir, verify_p3
@@ -45,6 +46,11 @@ def parse_args():
         default=[],
         metavar="NAME=TARGET",
         help="define a target linker symbol alias before image relocation",
+    )
+    p.add_argument(
+        "--linker-contract",
+        type=Path,
+        help="JSON target linker contract with section groups and boundaries",
     )
     return p.parse_args()
 
@@ -129,11 +135,13 @@ def _image_unresolved(
     program: Program,
     image,
     symbol_aliases: dict[str, str],
+    linker_symbols: set[str],
 ) -> tuple[set[str], set[str]]:
     future_symbols = set(program.symbol_addresses)
     future_symbols.update(obj.name for obj in image.objects)
     future_symbols.update(alias.name for alias in image.aliases)
     future_symbols.update(symbol_aliases)
+    future_symbols.update(linker_symbols)
 
     missing_symbols: set[str] = set()
     missing_blocks: set[str] = set()
@@ -164,11 +172,13 @@ def _program_unresolved(
     functions: list[p3.Function],
     image,
     symbol_aliases: dict[str, str],
+    linker_symbols: set[str],
 ) -> tuple[Counter[str], Counter[str]]:
     future_symbols = set(program.symbol_addresses)
     future_symbols.update(obj.name for obj in image.objects)
     future_symbols.update(alias.name for alias in image.aliases)
     future_symbols.update(symbol_aliases)
+    future_symbols.update(linker_symbols)
 
     missing_symbols: Counter[str] = Counter()
     missing_blocks: Counter[str] = Counter()
@@ -205,8 +215,31 @@ def main() -> int:
 
     try:
         symbol_aliases = _parse_symbol_aliases(args.symbol_alias)
+        linker_contract = (
+            LinkerContract.load(args.linker_contract)
+            if args.linker_contract is not None
+            else None
+        )
+        if linker_contract is not None:
+            for name, target in linker_contract.aliases.items():
+                previous = symbol_aliases.get(name)
+                if previous is not None and previous != target:
+                    raise ValueError(
+                        f"linker alias conflict for {name}: "
+                        f"{previous} != {target}"
+                    )
+                symbol_aliases[name] = target
+
         functions, _legal_stats = legalize_module(text)
         image = parse_module_image(text)
+        image_sections = {
+            obj.section for obj in image.objects if obj.section is not None
+        }
+        linker_symbols = (
+            linker_contract.active_boundary_symbols(image_sections)
+            if linker_contract is not None
+            else set()
+        )
 
         strict_source: list[muir.Function] = []
         p3_functions: list[p3.Function] = []
@@ -239,10 +272,17 @@ def main() -> int:
         _register_traps(program, trap_reasons)
 
         p3_missing_symbols, p3_missing_blocks = _program_unresolved(
-            program, p3_functions, image, symbol_aliases
+            program,
+            p3_functions,
+            image,
+            symbol_aliases,
+            linker_symbols,
         )
         image_missing_symbols, image_missing_blocks = _image_unresolved(
-            program, image, symbol_aliases
+            program,
+            image,
+            symbol_aliases,
+            linker_symbols,
         )
 
         image_installed = False
@@ -251,12 +291,14 @@ def main() -> int:
                 program,
                 image,
                 symbol_aliases=symbol_aliases,
+                linker_contract=linker_contract,
             )
             image_installed = True
 
     except (
         ImageError,
         LegalizeError,
+        LinkerContractError,
         MachineLoweringError,
         VerifyError,
         VMError,
@@ -285,6 +327,7 @@ def main() -> int:
         f"external_data={len(image.external_data)} "
         f"external_functions={len(image.external_functions)} "
         f"linker_aliases={len(symbol_aliases)} "
+        f"linker_boundaries={len(linker_symbols)} "
         f"image_installed={int(image_installed)} "
         f"p3_unresolved_symbols={len(p3_missing_symbols)} "
         f"p3_unresolved_blocks={len(p3_missing_blocks)} "
