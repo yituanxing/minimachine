@@ -100,12 +100,13 @@ def _escape_family(inst: muir.ArchEscape) -> str:
     return "other"
 
 
-def _has_system_escape(fn: muir.Function) -> tuple[int, int, Counter[str], Counter[str], Counter[str]]:
+def _has_system_escape(fn: muir.Function) -> tuple[int, int, Counter[str], Counter[str], Counter[str], dict[str, str]]:
     traps = 0
     arch = 0
     kinds: Counter[str] = Counter()
     groups: Counter[str] = Counter()
     families: Counter[str] = Counter()
+    samples: dict[str, str] = {}
     for block in fn.blocks:
         for inst in block.instructions:
             if isinstance(inst, muir.Trap):
@@ -113,9 +114,11 @@ def _has_system_escape(fn: muir.Function) -> tuple[int, int, Counter[str], Count
             elif isinstance(inst, muir.ArchEscape):
                 arch += 1
                 kinds[inst.kind] += 1
-                groups[_escape_key(inst)] += 1
+                key = _escape_key(inst)
+                groups[key] += 1
                 families[_escape_family(inst)] += 1
-    return traps, arch, kinds, groups, families
+                samples.setdefault(key, re.sub(r"\s+", " ", inst.text).strip()[:1200])
+    return traps, arch, kinds, groups, families, samples
 
 
 def main() -> int:
@@ -153,6 +156,7 @@ def main() -> int:
             escape_kinds: Counter[str] = Counter()
             escape_groups: Counter[str] = Counter()
             escape_families: Counter[str] = Counter()
+            escape_samples: dict[str, str] = {}
 
             for fn in functions:
                 verify_muir(fn)
@@ -160,12 +164,14 @@ def main() -> int:
                 for key, value in stats.as_dict().items():
                     abi_stats[key] += value
 
-                traps, arch, kinds, groups, families = _has_system_escape(expanded)
+                traps, arch, kinds, groups, families, samples = _has_system_escape(expanded)
                 trap_sites += traps
                 arch_sites += arch
                 escape_kinds.update(kinds)
                 escape_groups.update(groups)
                 escape_families.update(families)
+                for key, sample in samples.items():
+                    escape_samples.setdefault(key, sample)
 
                 if traps or arch:
                     p3_skip_escape += 1
@@ -190,6 +196,7 @@ def main() -> int:
                 "escape_kinds": dict(escape_kinds),
                 "escape_groups": dict(escape_groups),
                 "escape_families": dict(escape_families),
+                "escape_samples": escape_samples,
             }
         except (
             subprocess.CalledProcessError,
@@ -219,6 +226,7 @@ def main() -> int:
         "escape_kinds": {},
         "escape_groups": {},
         "escape_families": {},
+        "escape_samples": {},
     }
 
     print(f"ABI_START files={len(files)} jobs={jobs}")
@@ -248,6 +256,8 @@ def main() -> int:
                     totals["escape_groups"][key] = totals["escape_groups"].get(key, 0) + value
                 for key, value in rec["escape_families"].items():
                     totals["escape_families"][key] = totals["escape_families"].get(key, 0) + value
+                for key, sample in rec["escape_samples"].items():
+                    totals["escape_samples"].setdefault(key, sample)
 
             if done % 25 == 0 or rec["status"] == "FAIL" or done == len(files):
                 tail = f" FAIL {rec['file']} :: {rec['error']}" if rec["status"] == "FAIL" else ""
