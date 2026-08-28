@@ -33,6 +33,77 @@ class LegalizerTests(unittest.TestCase):
         self.assertIsInstance(entry[-1], muir.Br)
         self.assertEqual(entry[-1].cond, muir.Cond.ULT)
 
+    def test_switch_lowers_to_direct_branch_chain(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @f(i32 %x) {
+            entry:
+              switch i32 %x, label %other [
+                i32 0, label %zero
+                i32 7, label %seven
+              ]
+            zero:
+              ret i64 10
+            seven:
+              ret i64 17
+            other:
+              ret i64 99
+            }
+            """
+        )
+        self.assertEqual(stats.lowered_switch, 1)
+        by_name = {b.label: b for b in fn.blocks}
+        self.assertIsInstance(by_name["entry"].instructions[-1], muir.Br)
+        self.assertEqual(by_name["entry"].instructions[-1].cond, muir.Cond.EQ)
+        self.assertGreaterEqual(
+            sum(label.startswith("__switch_entry_") for label in by_name),
+            5,
+        )
+        self.assertFalse(
+            any(
+                isinstance(i, muir.ArchEscape)
+                for b in fn.blocks
+                for i in b.instructions
+            )
+        )
+
+    def test_switch_phi_copy_is_placed_on_selected_edge(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @f(i32 %x, i64 %a) {
+            entry:
+              switch i32 %x, label %other [
+                i32 1, label %chosen
+              ]
+            chosen:
+              %v = phi i64 [ %a, %entry ]
+              ret i64 %v
+            other:
+              ret i64 0
+            }
+            """
+        )
+        by_name = {b.label: b for b in fn.blocks}
+        self.assertFalse(
+            any(
+                isinstance(i, muir.Mov) and i.dst == muir.Slot("v")
+                for i in by_name["entry"].instructions
+            )
+        )
+        edge_blocks = [
+            b
+            for b in fn.blocks
+            if b.label.startswith("__switch_entry_case0_edge")
+        ]
+        self.assertEqual(len(edge_blocks), 1)
+        self.assertTrue(
+            any(
+                isinstance(i, muir.Mov) and i.dst == muir.Slot("v")
+                for i in edge_blocks[0].instructions
+            )
+        )
+        self.assertEqual(stats.phi_edge_moves, 1)
+
     def test_phi_becomes_edge_moves(self):
         fn, stats = self.lower_one(
             """
