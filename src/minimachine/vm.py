@@ -268,6 +268,60 @@ class VM:
         for address in range(before_data, after_data):
             self.memory.bytes[address] = self.program.initial_memory.bytes.get(address, 0)
 
+    def call_function_nested(
+        self,
+        name: str,
+        args: Iterable[int] = (),
+        *,
+        stack_top: int,
+        result_count: int = 1,
+        max_steps: int = 5_000_000,
+    ) -> tuple[int, ...]:
+        """Synchronously execute a linked P3 function and resume this context.
+
+        Host services use this to re-enter the Linux kernel from a runtime-loaded
+        user P3 program.  Memory and kernel state are shared; only the active P3
+        continuation is saved/restored.  Step accounting remains global.
+        """
+        if max_steps <= 0:
+            raise VMError("nested call max_steps must be positive")
+
+        saved = (
+            self.sp,
+            self.current_function,
+            self.current_block,
+            self.ip,
+            self.halted,
+        )
+        start_steps = self.steps
+        try:
+            self.enter_function(
+                name,
+                args,
+                stack_top=stack_top,
+                result_count=result_count,
+            )
+            result_ptr = self.memory.read(self.sp + RESULT_PTR, 64)
+            limit = start_steps + max_steps
+            while not self.halted:
+                if self.steps >= limit:
+                    raise VMError(
+                        f"nested call step limit exceeded: {name} max={max_steps}"
+                    )
+                self.step()
+            return tuple(
+                self.memory.read(result_ptr + i * WORD, 64)
+                for i in range(result_count)
+            )
+        finally:
+            (
+                self.sp,
+                self.current_function,
+                self.current_block,
+                self.ip,
+                self.halted,
+            ) = saved
+
     def alloc_bytes(self, size: int, *, align: int = 8) -> int:
         if size < 0:
             raise VMError("negative allocation size")
