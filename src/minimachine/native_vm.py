@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 from pathlib import Path
+import time
 
 from . import muir, p3
 from .vm import DEFAULT_STACK_TOP, MASK64, VM, VMError
@@ -331,21 +332,33 @@ class NativeVM(VM):
         raise VMError(f"invalid native branch target: {target!r}")
 
     def _pack_program(self, program):
+        started = time.perf_counter()
         host_by_symbol = {
             symbol: code for code, symbol in program.host_code.items()
         }
-        packed_insts = []
-        packed_blocks = []
+        ordered_blocks = sorted(program.code_block.items())
+        total_insts = 0
+        for _, (function_name, block_name) in ordered_blocks:
+            linked = program.functions[function_name]
+            total_insts += len(linked.block_map[block_name].instructions)
 
-        for code, (function_name, block_name) in sorted(
-            program.code_block.items()
+        # Allocate the final native-compatible buffers once.  The previous
+        # implementation first built Python lists of ctypes objects and then
+        # copied them into arrays, temporarily doubling an already-large Linux
+        # P3 image.
+        inst_array = (CInst * total_insts)()
+        block_array = (CBlock * len(ordered_blocks))()
+        inst_index = 0
+
+        for block_index, (code, (function_name, block_name)) in enumerate(
+            ordered_blocks
         ):
             linked = program.functions[function_name]
             block = linked.block_map[block_name]
-            first = len(packed_insts)
+            first = inst_index
 
             for inst in block.instructions:
-                out = CInst()
+                out = inst_array[inst_index]
                 if isinstance(inst, p3.Mov):
                     out.opcode = MM_OP_MOV
                     out.width = inst.width.value
@@ -356,24 +369,14 @@ class NativeVM(VM):
                         "trunc": MM_EXT_TRUNC,
                     }[inst.extend]
                     out.src_bits = inst.src_bits or 0
-                    out.dst = self._operand(
-                        inst.dst, linked, program
-                    )
-                    out.src = self._operand(
-                        inst.src, linked, program
-                    )
+                    out.dst = self._operand(inst.dst, linked, program)
+                    out.src = self._operand(inst.src, linked, program)
                 elif isinstance(inst, p3.Sub):
                     out.opcode = MM_OP_SUB
                     out.width = inst.width.value
-                    out.dst = self._operand(
-                        inst.dst, linked, program
-                    )
-                    out.a = self._operand(
-                        inst.a, linked, program
-                    )
-                    out.b = self._operand(
-                        inst.b, linked, program
-                    )
+                    out.dst = self._operand(inst.dst, linked, program)
+                    out.a = self._operand(inst.a, linked, program)
+                    out.b = self._operand(inst.b, linked, program)
                 elif isinstance(inst, p3.Br):
                     out.opcode = MM_OP_BR
                     out.width = inst.width.value
@@ -382,12 +385,8 @@ class NativeVM(VM):
                         muir.Cond.ULT: MM_COND_ULT,
                         muir.Cond.SLT: MM_COND_SLT,
                     }[inst.cond]
-                    out.a = self._operand(
-                        inst.a, linked, program
-                    )
-                    out.b = self._operand(
-                        inst.b, linked, program
-                    )
+                    out.a = self._operand(inst.a, linked, program)
+                    out.b = self._operand(inst.b, linked, program)
                     out.t = self._target(
                         inst.true_target,
                         function_name,
@@ -407,26 +406,25 @@ class NativeVM(VM):
                         "non-P3 instruction reached native packer: "
                         f"{type(inst).__name__}"
                     )
-                packed_insts.append(out)
+                inst_index += 1
 
-            packed_blocks.append(
-                CBlock(
-                    code=code,
-                    first=first,
-                    count=len(block.instructions),
-                )
+            block_array[block_index] = CBlock(
+                code=code,
+                first=first,
+                count=len(block.instructions),
             )
 
-        inst_array = (CInst * len(packed_insts))(*packed_insts)
-        block_array = (CBlock * len(packed_blocks))(*packed_blocks)
         host_codes = sorted(program.host_code)
-        host_array = (ctypes.c_uint64 * len(host_codes))(
-            *host_codes
-        )
-        self._packed = (
-            inst_array,
-            block_array,
-            host_array,
+        host_array = (ctypes.c_uint64 * len(host_codes))(*host_codes)
+        self._packed = (inst_array, block_array, host_array)
+        elapsed = time.perf_counter() - started
+        print(
+            "BOOT_EXEC_NATIVE_PACK "
+            f"seconds={elapsed:.3f} insts={total_insts} "
+            f"blocks={len(ordered_blocks)} hosts={len(host_codes)} "
+            f"inst_bytes={ctypes.sizeof(CInst) * total_insts} "
+            f"block_bytes={ctypes.sizeof(CBlock) * len(ordered_blocks)}",
+            flush=True,
         )
         return inst_array, block_array, host_array
 
@@ -486,10 +484,11 @@ class NativeVM(VM):
         self.ip = int(ip)
 
     def run(self, *, max_steps: int = 1_000_000) -> None:
+        native_limit = MASK64 if max_steps <= 0 else max_steps
         while not self.halted:
-            if self.steps >= max_steps:
+            if self.steps >= native_limit:
                 raise VMError(
-                    f"step limit exceeded: {max_steps}"
+                    f"step limit exceeded: {native_limit}"
                 )
 
             self._ensure_program_current()
@@ -503,7 +502,7 @@ class NativeVM(VM):
             )
             result = self._lib.mm_vm_run(
                 self._handle,
-                max_steps,
+                native_limit,
             )
             self.sp = int(result.sp)
             self.steps = int(result.steps)
@@ -514,7 +513,7 @@ class NativeVM(VM):
 
             if result.status == MM_STATUS_LIMIT:
                 raise VMError(
-                    f"step limit exceeded: {max_steps}"
+                    f"step limit exceeded: {native_limit}"
                 )
             if result.status == MM_STATUS_HALT:
                 self.halted = True
