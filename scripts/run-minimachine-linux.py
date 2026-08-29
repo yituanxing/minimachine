@@ -622,8 +622,49 @@ def main() -> int:
 
     sched_watch_installed = False
 
+    # Track initcall identity at the do_one_initcall ABI boundary.  A short
+    # diagnostic replay can then tell us exactly which Linux initcall owns a
+    # long stretch of P3 execution instead of requiring another blind 200M+
+    # step run.
+    symbols_by_address: dict[int, list[str]] = {}
+    for symbol, address in program.symbol_addresses.items():
+        symbols_by_address.setdefault(address, []).append(symbol)
+    active_initcall_frames: dict[int, int] = {}
+    last_initcall_enter_step: int | None = None
+    last_initcall_symbol = "<none>"
+
     def traced_step():
         nonlocal next_progress, last_milestone_function, sched_watch_installed
+        nonlocal last_initcall_enter_step, last_initcall_symbol
+
+        # A do_one_initcall frame may call deeply nested code.  Keep it active
+        # until execution returns to its recorded caller stack pointer, so
+        # nested returns are not misreported as new initcalls.
+        for frame_sp, caller_sp in tuple(active_initcall_frames.items()):
+            if vm.sp == caller_sp and vm.current_function != "do_one_initcall":
+                active_initcall_frames.pop(frame_sp, None)
+
+        if vm.current_function == "do_one_initcall" and vm.sp not in active_initcall_frames:
+            frame_size = vm.memory.read(vm.sp + 24, 64)
+            argc = vm.memory.read(vm.sp + 56, 64)
+            caller_sp = vm.memory.read(vm.sp + CALLER_SP, 64)
+            active_initcall_frames[vm.sp] = caller_sp
+            initcall_ptr = vm.memory.read(vm.sp + frame_size, 64) if argc else 0
+            names = symbols_by_address.get(initcall_ptr, ())
+            initcall_symbol = "|".join(sorted(names)[:4]) if names else "<unknown>"
+            since_previous = (
+                vm.steps - last_initcall_enter_step
+                if last_initcall_enter_step is not None
+                else 0
+            )
+            print(
+                "BOOT_EXEC_INITCALL_ENTER "
+                f"steps={vm.steps} since_previous={since_previous} "
+                f"ptr=0x{initcall_ptr:x} symbol={initcall_symbol}",
+                flush=True,
+            )
+            last_initcall_enter_step = vm.steps
+            last_initcall_symbol = initcall_symbol
 
         if vm.current_function == "sched_fork" and not sched_watch_installed:
             linked = vm.program.functions.get("sched_fork")
@@ -676,7 +717,8 @@ def main() -> int:
             print(
                 "BOOT_EXEC_PROGRESS "
                 f"steps={vm.steps} function={vm.current_function} "
-                f"block={vm.current_block} ip={vm.ip}",
+                f"block={vm.current_block} ip={vm.ip} "
+                f"last_initcall={last_initcall_symbol}",
                 flush=True,
             )
             next_progress += args.progress_every
