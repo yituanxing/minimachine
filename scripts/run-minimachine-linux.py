@@ -74,6 +74,14 @@ def parse_args():
         help="resume VM state from a checkpoint for the exact linked image",
     )
     p.add_argument(
+        "--inject-init",
+        type=Path,
+        help=(
+            "after restoring a checkpoint, create /init in the live Linux "
+            "rootfs through filp_open/kernel_write/fput before replay"
+        ),
+    )
+    p.add_argument(
         "--checkpoint-out",
         type=Path,
         help="write a resumable VM checkpoint during replay",
@@ -630,6 +638,125 @@ def probe_linux_memory_helpers(vm) -> None:
         )
 
 
+def _call_linux_function_preserving_control(
+    vm,
+    name: str,
+    args: tuple[int, ...],
+    *,
+    result_count: int,
+    max_extra_steps: int = 2_000_000,
+) -> tuple[int, ...]:
+    if name not in vm.program.functions:
+        raise VMError(f"rootfs injection missing Linux function: {name}")
+
+    saved = (
+        vm.sp,
+        vm.current_function,
+        vm.current_block,
+        vm.ip,
+        vm.halted,
+        vm.steps,
+    )
+    linked = vm.program.functions[name]
+    temp_stack_top = 0x0F00_0000
+    result_words = max(1, result_count)
+    total = linked.frame_size + len(args) * 8 + result_words * 8
+    callee_sp = temp_stack_top - total
+    result_base = callee_sp + linked.frame_size + len(args) * 8
+
+    try:
+        vm.enter_function(
+            name,
+            args,
+            stack_top=temp_stack_top,
+            result_count=result_count,
+        )
+        vm.run(max_steps=saved[5] + max_extra_steps)
+        return tuple(
+            vm.memory.read(result_base + i * 8, 64)
+            for i in range(result_count)
+        )
+    finally:
+        (
+            vm.sp,
+            vm.current_function,
+            vm.current_block,
+            vm.ip,
+            vm.halted,
+            vm.steps,
+        ) = saved
+
+
+def inject_live_root_init(vm, path: Path) -> None:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise VMError(f"cannot read injected /init image: {exc}") from exc
+    if not data:
+        raise VMError("injected /init image is empty")
+
+    guest_path = b"/init\0"
+    path_ptr = vm.alloc_bytes(len(guest_path), align=8)
+    for i, byte in enumerate(guest_path):
+        vm.memory.write(path_ptr + i, 8, byte)
+
+    data_ptr = vm.alloc_bytes(len(data), align=8)
+    for i, byte in enumerate(data):
+        vm.memory.write(data_ptr + i, 8, byte)
+
+    pos_ptr = vm.alloc_bytes(8, align=8)
+    vm.memory.write(pos_ptr, 64, 0)
+
+    # Linux asm-generic flags: O_WRONLY | O_CREAT | O_TRUNC.
+    open_flags = 0x1 | 0x40 | 0x200
+    file_ptr, = _call_linux_function_preserving_control(
+        vm,
+        "filp_open",
+        (path_ptr, open_flags, 0o755),
+        result_count=1,
+    )
+    if file_ptr >= (1 << 64) - 4095:
+        signed = file_ptr - (1 << 64)
+        raise VMError(f"filp_open(/init) failed: {signed}")
+
+    try:
+        written, = _call_linux_function_preserving_control(
+            vm,
+            "kernel_write",
+            (file_ptr, data_ptr, len(data), pos_ptr),
+            result_count=1,
+            max_extra_steps=8_000_000,
+        )
+        if written != len(data):
+            signed = written - (1 << 64) if written & (1 << 63) else written
+            raise VMError(
+                f"kernel_write(/init) wrote {signed}, expected {len(data)}"
+            )
+    finally:
+        _call_linux_function_preserving_control(
+            vm,
+            "fput",
+            (file_ptr,),
+            result_count=0,
+        )
+
+    access, = _call_linux_function_preserving_control(
+        vm,
+        "init_eaccess",
+        (path_ptr,),
+        result_count=1,
+    )
+    if access != 0:
+        signed = access - (1 << 64) if access & (1 << 63) else access
+        raise VMError(f"init_eaccess(/init) after injection failed: {signed}")
+
+    print(
+        "BOOT_EXEC_ROOTFS_INJECTED "
+        f"path=/init bytes={len(data)} mode=0755",
+        flush=True,
+    )
+
+
 def current_instruction(vm):
     if vm.current_function is None or vm.current_block is None:
         return None
@@ -841,6 +968,12 @@ def main() -> int:
             return 1
         vm.ecall_handler = linux_ecall
         resumed_from_checkpoint = True
+        if args.inject_init is not None:
+            try:
+                inject_live_root_init(vm, args.inject_init)
+            except VMError as exc:
+                print(f"BOOT_EXEC_BLOCKED stage=rootfs-inject error={exc}")
+                return 1
         print(
             "BOOT_EXEC_CHECKPOINT_RESTORED "
             f"path={args.checkpoint_in} steps={vm.steps} "
