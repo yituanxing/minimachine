@@ -926,6 +926,31 @@ def main() -> int:
         nonlocal checkpoint_written, checkpoint_after_armed
         nonlocal checkpoint_function_hits
 
+        if function == "panic":
+            frame_size = vm.memory.read(vm.sp + 24, 64)
+            argc = vm.memory.read(vm.sp + 56, 64)
+            arg_base = vm.sp + frame_size
+            raw_args = [
+                vm.memory.read(arg_base + 8 * i, 64)
+                for i in range(min(argc, 8))
+            ]
+            fmt_ptr = raw_args[0] if raw_args else 0
+            raw_fmt = bytearray()
+            if fmt_ptr:
+                for i in range(512):
+                    byte = vm.memory.read(fmt_ptr + i, 8)
+                    if byte == 0:
+                        break
+                    raw_fmt.append(byte)
+            print(
+                "BOOT_EXEC_PANIC_ENTER "
+                f"steps={vm.steps} argc={argc} "
+                f"fmt_ptr=0x{fmt_ptr:x} "
+                f"fmt={raw_fmt.decode('utf-8', errors='replace')!r} "
+                f"args={','.join(f'0x{x:x}' for x in raw_args)}",
+                flush=True,
+            )
+
         if function == "do_one_initcall":
             frame_size = vm.memory.read(vm.sp + 24, 64)
             argc = vm.memory.read(vm.sp + 56, 64)
