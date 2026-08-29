@@ -164,6 +164,58 @@ class VMTests(unittest.TestCase):
         self.assertNotEqual(vm.memory.read(descriptor, 64), 0)
         self.assertEqual(vm.run_function("runtime_user", ()), (7,))
 
+    def test_nested_function_call_preserves_outer_p3_continuation(self):
+        inner = muir.Function(
+            "inner",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Sub(
+                            muir.Width.I64,
+                            muir.Slot("out"),
+                            muir.Slot("x"),
+                            muir.Imm(1),
+                        ),
+                        muir.Ret(muir.Slot("out")),
+                    ],
+                )
+            ],
+            {"x", "out"},
+            ("x",),
+        )
+        outer = muir.Function(
+            "outer",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Sys("nested", (muir.Slot("x"),), muir.Slot("r")),
+                        muir.Ret(muir.Slot("r")),
+                    ],
+                )
+            ],
+            {"x", "r"},
+            ("x",),
+        )
+        expanded_inner, _ = expand_function(inner)
+        expanded_outer, _ = expand_function(outer)
+        program = Program([
+            lower_function(expanded_inner),
+            lower_function(expanded_outer),
+        ])
+
+        def nested(vm, args):
+            return vm.call_function_nested(
+                "inner",
+                args,
+                stack_top=vm.stack_top - 0x10000,
+                result_count=1,
+            )[0]
+
+        program.register_system("nested", nested)
+        self.assertEqual(program.new_vm().run_function("outer", (41,)), (40,))
+
     def test_multi_result_system_service_executes(self):
         fn = muir.Function(
             "sys_pair_user",
