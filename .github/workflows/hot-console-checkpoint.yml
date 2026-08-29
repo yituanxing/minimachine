@@ -1,10 +1,10 @@
-name: Linux MiniMachine Hot Console Checkpoint
+name: Linux MiniMachine Hot Init Access Checkpoint
 
 on:
   push:
     branches: [work/checkpoint-after-kallsyms]
     paths:
-      - .github/workflows/hot-console-checkpoint.yml
+      - .github/workflows/hot-init-access-checkpoint.yml
   workflow_dispatch:
 
 permissions:
@@ -50,24 +50,24 @@ jobs:
           cp "$(find checkpoint-source -name 'blake2s-fast-next.chk.gz' -print -quit)" replay-source/llvm/hot-592m.chk.gz
           cp "$(find p3-cache-source -name 'linux-p3-cache.pkl.gz' -print -quit)" replay-source/llvm/linux-p3-cache.pkl.gz
 
-      - name: Continue to console_on_rootfs
+      - name: Continue to init_eaccess
         run: |
           set +e
           set -o pipefail
-          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/hot-592m.chk.gz             --checkpoint-out replay-source/llvm/hot-console.chk.gz             --checkpoint-function console_on_rootfs             --checkpoint-function-hit 1             --stop-after-checkpoint             --checkpoint-at-limit             --checkpoint-on-error             --max-steps 70000000             --progress-every 0             2>&1 | tee replay-source/llvm/hot-console.log
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/hot-592m.chk.gz             --checkpoint-out replay-source/llvm/hot-init-access.chk.gz             --checkpoint-function init_eaccess             --checkpoint-function-hit 1             --stop-after-checkpoint             --checkpoint-at-limit             --checkpoint-on-error             --max-steps 70000000             --progress-every 0             2>&1 | tee replay-source/llvm/hot-init-access.log
           status=${PIPESTATUS[0]}
           set -e
-          echo "HOT_CONSOLE_STATUS $status"
-          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|CHECKPOINT_SAVED|CHECKPOINT_FUNCTION_PROGRESS|MILESTONE|PANIC_ENTER|BLOCKED|HALTED)' replay-source/llvm/hot-console.log | tail -n 220 || true
-          test -s replay-source/llvm/hot-console.chk.gz
+          echo "HOT_INIT_ACCESS_STATUS $status"
+          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|CHECKPOINT_SAVED|CHECKPOINT_FUNCTION_PROGRESS|MILESTONE|PANIC_ENTER|BLOCKED|HALTED)' replay-source/llvm/hot-init-access.log | tail -n 220 || true
+          test -s replay-source/llvm/hot-init-access.chk.gz
 
       - name: Upload console checkpoint
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: minimachine-hot-console-${{ github.run_id }}
+          name: minimachine-hot-init-access-${{ github.run_id }}
           path: |
-            replay-source/llvm/hot-console.log
-            replay-source/llvm/hot-console.chk.gz
+            replay-source/llvm/hot-init-access.log
+            replay-source/llvm/hot-init-access.chk.gz
           if-no-files-found: ignore
           retention-days: 14
