@@ -170,6 +170,14 @@
       ],
       "align": 8,
       "empty_after": "kernel_params"
+    },
+    {
+      "name": "notes",
+      "sections": [
+        ".note.Linux"
+      ],
+      "align": 4,
+      "empty_after": "exception_table"
     }
   ],
   "boundaries": [
@@ -336,6 +344,16 @@
     {
       "symbol": "__stop___ex_table",
       "group": "exception_table",
+      "edge": "end"
+    },
+    {
+      "symbol": "__start_notes",
+      "group": "notes",
+      "edge": "start"
+    },
+    {
+      "symbol": "__stop_notes",
+      "group": "notes",
       "edge": "end"
     }
   ],
