@@ -14,7 +14,7 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -45,26 +45,45 @@ jobs:
           name: minimachine-linux-boot-33245921667
           path: replay-source
 
+      - name: Build latest init payload
+        run: |
+          python3 scripts/build-minimachine-initramfs.py /tmp/minimachine-initramfs.cpio --init-output /tmp/minimachine-init.bflt
+
       - name: Prepare inputs
         run: |
           cp "$(find checkpoint-source -name 'blake2s-fast-next.chk.gz' -print -quit)" replay-source/llvm/hot-prepare.chk.gz
           cp "$(find p3-cache-source -name 'linux-p3-cache.pkl.gz' -print -quit)" replay-source/llvm/linux-p3-cache.pkl.gz
 
-      - name: Probe restored rootfs
+      - name: Restore rootfs inject init and continue
         run: |
           set +e
           set -o pipefail
-          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/hot-prepare.chk.gz             --probe-rootfs-after-checkpoint             --checkpoint-out replay-source/llvm/rootfs-probe.chk.gz             --checkpoint-at-limit             --checkpoint-on-error             --max-steps 1             --progress-every 0             2>&1 | tee replay-source/llvm/rootfs-probe.log
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz \
+            --checkpoint-in replay-source/llvm/hot-prepare.chk.gz \
+            --probe-rootfs-after-checkpoint \
+            --inject-init /tmp/minimachine-init.bflt \
+            --skip-prepare-namespace-after-inject \
+            --checkpoint-out replay-source/llvm/hot-init-next.chk.gz \
+            --checkpoint-at-limit \
+            --checkpoint-on-error \
+            --max-steps 25000000 \
+            --progress-every 500000 \
+            2>&1 | tee replay-source/llvm/hot-init-continue.log
           status=${PIPESTATUS[0]}
           set -e
-          echo "ROOTFS_PROBE_STATUS $status"
-          grep -E 'BOOT_EXEC_(ROOTFS_PROBE|CHECKPOINT_RESTORED|BLOCKED)' replay-source/llvm/rootfs-probe.log || true
+          echo "HOT_INIT_STATUS $status"
+          grep -E 'BOOT_EXEC_(ROOTFS_PROBE|CHECKPOINT_RESTORED|INJECT|MILESTONE|USER_HANDOFF|BLOCKED|HALTED|CHECKPOINT_SAVED)' replay-source/llvm/hot-init-continue.log || true
+          exit "$status"
 
-      - name: Upload probe
+      - name: Upload hot-init result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: minimachine-rootfs-probe-${{ github.run_id }}
-          path: replay-source/llvm/rootfs-probe.log
+          name: minimachine-hot-init-${{ github.run_id }}
+          path: |
+            replay-source/llvm/hot-init-continue.log
+            replay-source/llvm/hot-init-next.chk.gz
           if-no-files-found: ignore
           retention-days: 7
