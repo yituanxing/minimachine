@@ -35,6 +35,13 @@ class VMHalt(Exception):
     pass
 
 
+class _HostControlTransfer:
+    pass
+
+
+HOST_CONTROL_TRANSFER = _HostControlTransfer()
+
+
 class SparseMemory:
     def __init__(self, initial: dict[int, int] | None = None):
         self.bytes: dict[int, int] = dict(initial or {})
@@ -178,6 +185,55 @@ class VM:
         # (vstart, vtype, vl, vcsr, vlenb)
         self.vector_state = (0, 0, 0, 0, 0)
         self.heap_next = HEAP_BASE
+
+    def enter_function(
+        self,
+        name: str,
+        args: Iterable[int] = (),
+        *,
+        stack_top: int,
+        result_count: int = 0,
+    ) -> None:
+        """Transfer execution to a fresh P3 activation on a caller-owned stack.
+
+        This is the machine-level primitive used by host/platform code for
+        control transfers that do not return through the current host-service
+        frame, such as starting a newly scheduled kernel task.
+        """
+        if name not in self.program.functions:
+            raise VMError(f"unknown transfer target: {name}")
+        if result_count < 0:
+            raise VMError("negative result count")
+
+        linked = self.program.functions[name]
+        argv = tuple(value & MASK64 for value in args)
+        result_words = max(1, result_count)
+        total = linked.frame_size + len(argv) * WORD + result_words * WORD
+        callee_sp = (stack_top - total) & MASK64
+        arg_base = callee_sp + linked.frame_size
+        result_base = arg_base + len(argv) * WORD
+        entry = self.program.block_code[
+            (name, linked.function.blocks[0].label)
+        ]
+
+        # A fresh machine task has no P3 caller. Point CALLER_SP at the frame
+        # itself so an unexpected return writes RESUME_PC locally and halts.
+        self.memory.write(callee_sp + CALLER_SP, 64, callee_sp)
+        self.memory.write(callee_sp + RET_PC, 64, self.program.halt_code)
+        self.memory.write(callee_sp + ENTRY, 64, entry)
+        self.memory.write(callee_sp + FRAME_SIZE, 64, linked.frame_size)
+        self.memory.write(callee_sp + RESULT_PTR, 64, result_base)
+        self.memory.write(callee_sp + RESULT_COUNT, 64, result_count)
+        self.memory.write(callee_sp + RESUME_PC, 64, self.program.halt_code)
+        self.memory.write(callee_sp + ARG_COUNT, 64, len(argv))
+        for i, value in enumerate(argv):
+            self.memory.write(arg_base + i * WORD, 64, value)
+
+        self.sp = callee_sp
+        self.current_function = name
+        self.current_block = linked.function.blocks[0].label
+        self.ip = 0
+        self.halted = False
 
     def alloc_bytes(self, size: int, *, align: int = 8) -> int:
         if size < 0:
@@ -373,6 +429,8 @@ class VM:
         )
 
         raw_result = callback(self, args)
+        if raw_result is HOST_CONTROL_TRANSFER:
+            return
         if raw_result is None:
             results: tuple[int, ...] = ()
         elif isinstance(raw_result, int):
