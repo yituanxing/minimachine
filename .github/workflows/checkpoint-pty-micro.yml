@@ -1,0 +1,79 @@
+name: Linux MiniMachine PTY Micro Checkpoints
+
+on:
+  push:
+    branches: [work/checkpoint-after-kallsyms]
+    paths:
+      - .github/workflows/checkpoint-pty-micro.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  micro:
+    strategy:
+      fail-fast: false
+      matrix:
+        hit: [16, 32]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download pty-entry checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33248074874
+          github-token: ${{ github.token }}
+          name: minimachine-linux-replay-33248074874
+          path: checkpoint-source
+
+      - name: Find matching Linux LLVM artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(
+            gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/linux-minimachine-boot.yml/runs?status=completed&per_page=30"               --jq '.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main") | .id' |
+              head -n 1
+          )"
+          test -n "$run_id"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download linked Linux LLVM image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: minimachine-linux-boot-*
+          path: replay-source
+          merge-multiple: true
+
+      - name: Prepare checkpoint
+        run: |
+          checkpoint="$(find checkpoint-source -name 'pty-init.chk.gz' -print -quit)"
+          test -n "$checkpoint"
+          cp "$checkpoint" replay-source/llvm/pty-init.chk.gz
+
+      - name: Save micro PTY checkpoint
+        run: |
+          set -o pipefail
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --checkpoint-in replay-source/llvm/pty-init.chk.gz             --checkpoint-initcall pty_init             --checkpoint-out replay-source/llvm/pty-hit-${{ matrix.hit }}.chk.gz             --checkpoint-function tty_register_device             --checkpoint-function-hit ${{ matrix.hit }}             --stop-after-checkpoint             --max-steps 40000000             --progress-every 0             2>&1 | tee replay-source/llvm/pty-hit-${{ matrix.hit }}.log
+          grep -F "function=tty_register_device hit=${{ matrix.hit }}" replay-source/llvm/pty-hit-${{ matrix.hit }}.log
+          test -s replay-source/llvm/pty-hit-${{ matrix.hit }}.chk.gz
+          echo "PTY_MICRO_CHECKPOINT hit=${{ matrix.hit }} bytes=$(stat -c%s replay-source/llvm/pty-hit-${{ matrix.hit }}.chk.gz)"
+
+      - name: Upload micro checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-pty-micro-${{ matrix.hit }}-${{ github.run_id }}
+          path: |
+            replay-source/llvm/pty-hit-${{ matrix.hit }}.log
+            replay-source/llvm/pty-hit-${{ matrix.hit }}.chk.gz
+          if-no-files-found: ignore
+          retention-days: 14
