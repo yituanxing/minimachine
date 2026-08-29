@@ -201,6 +201,67 @@ def dump_instruction_slots(vm, inst) -> None:
         )
 
 
+def dump_current_call_frame(vm) -> None:
+    sp = vm.sp
+    header = (
+        ("caller_sp", CALLER_SP),
+        ("ret_pc", RET_PC),
+        ("entry", 16),
+        ("frame_size", 24),
+        ("result_ptr", RESULT_PTR),
+        ("result_count", RESULT_COUNT),
+        ("resume_pc", 48),
+        ("arg_count", 56),
+    )
+    print(
+        "BOOT_EXEC_CALL_FRAME "
+        + " ".join(
+            f"{name}=0x{vm.memory.read(sp + off, 64):x}"
+            for name, off in header
+        ),
+        flush=True,
+    )
+
+    caller_sp = vm.memory.read(sp + CALLER_SP, 64)
+    if not caller_sp or vm.current_function is None:
+        return
+    linked = vm.program.functions.get(vm.current_function)
+    if linked is None:
+        return
+
+    interesting = []
+    for name, off in sorted(linked.slot_offsets.items(), key=lambda item: item[1]):
+        value = vm.memory.read(caller_sp + off, 64)
+        if (
+            name.startswith("__abi_")
+            or value in vm.program.symbol_addresses.values()
+            or value >= 0x10000
+        ):
+            interesting.append((name, off, value))
+    for name, off, value in interesting[-80:]:
+        print(
+            "BOOT_EXEC_CALLER_SLOT "
+            f"name={name} offset={off} address=0x{caller_sp + off:x} "
+            f"value=0x{value:x}",
+            flush=True,
+        )
+
+    entry = vm.memory.read(sp + 16, 64)
+    descriptor_candidates = [
+        (name, value)
+        for name, _off, value in interesting
+        if value and vm.memory.read(value, 64) == entry
+    ]
+    for name, descriptor in descriptor_candidates[-20:]:
+        print(
+            "BOOT_EXEC_DESCRIPTOR "
+            f"slot={name} address=0x{descriptor:x} "
+            f"entry=0x{vm.memory.read(descriptor, 64):x} "
+            f"frame=0x{vm.memory.read(descriptor + 8, 64):x}",
+            flush=True,
+        )
+
+
 def dump_linux_memory_state(vm) -> None:
     def word(name: str, index: int = 0):
         address = vm.program.symbol_addresses.get(name)
@@ -503,6 +564,7 @@ def main() -> int:
         if inst is not None:
             print(f"BOOT_EXEC_NEXT {inst!r}", flush=True)
             dump_instruction_slots(vm, inst)
+        dump_current_call_frame(vm)
         dump_linux_memory_state(vm)
         probe_linux_memory_helpers(vm)
         return 1
