@@ -82,6 +82,11 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--probe-rootfs-after-checkpoint",
+        action="store_true",
+        help="probe live Linux rootfs paths and current task after checkpoint restore",
+    )
+    p.add_argument(
         "--skip-prepare-namespace-after-inject",
         action="store_true",
         help=(
@@ -728,6 +733,63 @@ def skip_prepare_namespace_after_hot_init(vm) -> None:
     )
 
 
+def probe_live_rootfs(vm) -> None:
+    def guest_cstring(text: str) -> int:
+        data = text.encode("utf-8") + b"\0"
+        ptr = vm.alloc_bytes(len(data), align=8)
+        for i, byte in enumerate(data):
+            vm.memory.write(ptr + i, 8, byte)
+        return ptr
+
+    current_addr = vm.program.symbol_addresses.get("minimachine_current_task")
+    current = vm.memory.read(current_addr, 64) if current_addr is not None else 0
+    print(
+        "BOOT_EXEC_ROOTFS_PROBE_CURRENT "
+        f"symbol=0x{(current_addr or 0):x} task=0x{current:x}",
+        flush=True,
+    )
+
+    for path in ("/", "/dev", "/dev/console", "/root", "/init"):
+        ptr = guest_cstring(path)
+        try:
+            result, = _call_linux_function_preserving_control(
+                vm,
+                "init_eaccess",
+                (ptr,),
+                result_count=1,
+            )
+        except VMError as exc:
+            print(
+                f"BOOT_EXEC_ROOTFS_PROBE path={path} error={exc}",
+                flush=True,
+            )
+            continue
+        signed = result - (1 << 64) if result & (1 << 63) else result
+        print(
+            f"BOOT_EXEC_ROOTFS_PROBE path={path} result={signed}",
+            flush=True,
+        )
+
+    tmp = guest_cstring("/mm-probe")
+    try:
+        result, = _call_linux_function_preserving_control(
+            vm,
+            "init_mkdir",
+            (tmp, 0o755),
+            result_count=1,
+        )
+        signed = result - (1 << 64) if result & (1 << 63) else result
+        print(
+            f"BOOT_EXEC_ROOTFS_PROBE mkdir=/mm-probe result={signed}",
+            flush=True,
+        )
+    except VMError as exc:
+        print(
+            f"BOOT_EXEC_ROOTFS_PROBE mkdir=/mm-probe error={exc}",
+            flush=True,
+        )
+
+
 def inject_live_root_init(vm, path: Path) -> None:
     try:
         data = path.read_bytes()
@@ -1009,6 +1071,12 @@ def main() -> int:
             return 1
         vm.ecall_handler = linux_ecall
         resumed_from_checkpoint = True
+        if args.probe_rootfs_after_checkpoint:
+            try:
+                probe_live_rootfs(vm)
+            except VMError as exc:
+                print(f"BOOT_EXEC_BLOCKED stage=rootfs-probe error={exc}")
+                return 1
         if args.inject_init is not None:
             try:
                 inject_live_root_init(vm, args.inject_init)
