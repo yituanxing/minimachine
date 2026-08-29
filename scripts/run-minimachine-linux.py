@@ -1099,6 +1099,13 @@ def main() -> int:
                 max_steps=args.max_steps,
             )
     except VMError as exc:
+        if args.checkpoint_function is not None:
+            print(
+                "BOOT_EXEC_CHECKPOINT_FUNCTION_PROGRESS "
+                f"function={args.checkpoint_function} "
+                f"hits={checkpoint_function_hits} steps={vm.steps}",
+                flush=True,
+            )
         inst = current_instruction(vm)
         print(
             "BOOT_EXEC_BLOCKED "
