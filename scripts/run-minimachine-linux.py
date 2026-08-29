@@ -25,6 +25,12 @@ from src.minimachine.layout import DataLayout
 from src.minimachine.kallsyms import install_p3_kallsyms
 from src.minimachine.linker import LinkerContract
 from src.minimachine.lower_p3 import lower_function
+from src.minimachine.program_cache import (
+    ProgramCache,
+    ProgramCacheError,
+    load_program_cache,
+    save_program_cache,
+)
 from src.minimachine.runtime import (
     accelerate_direct_runtime,
     collect_runtime_surface,
@@ -85,6 +91,16 @@ def parse_args():
         "--stop-after-checkpoint",
         action="store_true",
         help="stop replay immediately after writing a checkpoint",
+    )
+    p.add_argument(
+        "--program-cache-in",
+        type=Path,
+        help="load a lowered P3 program cache for the exact linked image",
+    )
+    p.add_argument(
+        "--program-cache-out",
+        type=Path,
+        help="write the lowered P3 program before runtime callbacks are bound",
     )
     return p.parse_args()
 
@@ -556,32 +572,84 @@ def main() -> int:
     linked_image_sha256 = image_fingerprint(llvm_text)
     linker_contract = LinkerContract.load(args.linker_contract)
 
-    functions, _stats = legalize_module(llvm_text)
-    image = parse_module_image(llvm_text)
+    if args.program_cache_in is not None:
+        try:
+            cached = load_program_cache(
+                args.program_cache_in,
+                image_sha256=linked_image_sha256,
+            )
+        except ProgramCacheError as exc:
+            print(f"BOOT_EXEC_BLOCKED stage=program-cache error={exc}")
+            return 1
+        program = cached.program
+        surface = cached.surface
+        reasons = set(cached.reasons)
+        blocked_functions = list(cached.blocked_functions)
+        image = cached.image
+        task_sched_class_offset = cached.task_sched_class_offset
+        p3_function_count = cached.function_count
+        print(
+            "BOOT_EXEC_PROGRAM_CACHE_LOADED "
+            f"path={args.program_cache_in} functions={p3_function_count}",
+            flush=True,
+        )
+    else:
+        functions, _stats = legalize_module(llvm_text)
+        image = parse_module_image(llvm_text)
+
+        strict_source = []
+        p3_functions = []
+        blocked_functions: list[tuple[str, int]] = []
+        reasons: set[str] = set()
+
+        for function in functions:
+            verify_muir(function)
+            reasons.update(trap_reasons(function))
+            expanded, _abi_stats = expand_function(function)
+            escapes = arch_escapes(expanded)
+            if escapes:
+                blocked_functions.append((function.name, len(escapes)))
+                continue
+            lowered = lower_function(expanded)
+            verify_p3(lowered)
+            strict_source.append(function)
+            p3_functions.append(lowered)
+
+        program = Program(p3_functions)
+        surface = collect_runtime_surface(strict_source)
+        layout = DataLayout.from_module(llvm_text)
+        task_info = layout.info("%struct.task_struct")
+        task_sched_class_offset = (
+            task_info.field_offsets[15]
+            if task_info.field_offsets is not None
+            and len(task_info.field_offsets) > 15
+            else None
+        )
+        p3_function_count = len(p3_functions)
+
+        if args.program_cache_out is not None:
+            save_program_cache(
+                ProgramCache(
+                    image_sha256=linked_image_sha256,
+                    program=program,
+                    surface=surface,
+                    reasons=frozenset(reasons),
+                    blocked_functions=tuple(blocked_functions),
+                    image=image,
+                    task_sched_class_offset=task_sched_class_offset,
+                ),
+                args.program_cache_out,
+            )
+            print(
+                "BOOT_EXEC_PROGRAM_CACHE_SAVED "
+                f"path={args.program_cache_out} functions={p3_function_count}",
+                flush=True,
+            )
+
     image_sections = {
         obj.section for obj in image.objects if obj.section is not None
     }
 
-    strict_source = []
-    p3_functions = []
-    blocked_functions: list[tuple[str, int]] = []
-    reasons: set[str] = set()
-
-    for function in functions:
-        verify_muir(function)
-        reasons.update(trap_reasons(function))
-        expanded, _abi_stats = expand_function(function)
-        escapes = arch_escapes(expanded)
-        if escapes:
-            blocked_functions.append((function.name, len(escapes)))
-            continue
-        lowered = lower_function(expanded)
-        verify_p3(lowered)
-        strict_source.append(function)
-        p3_functions.append(lowered)
-
-    program = Program(p3_functions)
-    surface = collect_runtime_surface(strict_source)
     install_runtime(program, surface)
     accelerated_runtime = accelerate_direct_runtime(program)
     if accelerated_runtime:
@@ -637,7 +705,7 @@ def main() -> int:
 
     print(
         "BOOT_EXEC_START "
-        f"entry={args.entry} functions={len(p3_functions)} "
+        f"entry={args.entry} functions={p3_function_count} "
         f"blocked_functions={len(blocked_functions)} "
         f"arch_escape_sites={sum(sites for _, sites in blocked_functions)} "
         f"image_objects={len(image.objects)} image_bytes={image.byte_size} "
@@ -651,10 +719,8 @@ def main() -> int:
     # Reserve the top 16 MiB for the boot task's existing P3 stack. New
     # Linux tasks receive independent P3 continuation stacks below it.
     vm.linux_shadow_stack_next = vm.stack_top - 0x01000000
-    layout = DataLayout.from_module(llvm_text)
-    task_info = layout.info("%struct.task_struct")
-    if task_info.field_offsets is not None and len(task_info.field_offsets) > 15:
-        vm.linux_task_sched_class_offset = task_info.field_offsets[15]
+    if task_sched_class_offset is not None:
+        vm.linux_task_sched_class_offset = task_sched_class_offset
 
     resumed_from_checkpoint = False
     if args.checkpoint_in is not None:
