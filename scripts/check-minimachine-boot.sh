@@ -86,6 +86,15 @@ if test "$status" -ne 0; then
     if test -n "$first"; then
         printf 'BOOT_GATE_FIRST %s\n' "$first"
     fi
+    undefined_symbols="$(
+        grep -E 'undefined symbol:|undefined reference to' "$log" |
+        sed -E 's/.*undefined symbol: ([^[:space:]]+).*/\1/; s/.*undefined reference to [\x27\x60]([^\x27\x60]+)[\x27\x60].*/\1/' |
+        sort -u |
+        tr '\n' ' '
+    )"
+    if test -n "$undefined_symbols"; then
+        printf 'BOOT_GATE_UNDEFINED symbols=%s\n' "$undefined_symbols"
+    fi
     tail -n 240 "$log"
     exit "$status"
 fi
