@@ -1585,6 +1585,14 @@ def main() -> int:
                 max_steps=args.max_steps,
             )
     except VMError as exc:
+        if args.native_vm and "step limit exceeded" in str(exc):
+            print(
+                "BOOT_EXEC_NATIVE_LIMIT "
+                f"steps={vm.steps} function={vm.current_function} "
+                f"block={vm.current_block} ip={vm.ip}",
+                flush=True,
+            )
+            return 0
         checkpoint_reason = None
         if args.checkpoint_on_error and args.checkpoint_out is not None:
             checkpoint_reason = "error"
