@@ -98,7 +98,10 @@ printf 'BOOT_GATE configure ARCH=%s LLVM=%s\n' "$ARCH" "$LLVM_MAJOR"
 
 config="$out/.config"
 test -s "$config"
-grep -q '^# CONFIG_LEGACY_PTYS is not set
+grep -Fqx '# CONFIG_LEGACY_PTYS is not set' "$config"
+grep -Fqx 'CONFIG_UNIX98_PTYS=y' "$config"
+printf 'BOOT_GATE_PTY_CONFIG legacy=off unix98=on\n'
+printf 'BOOT_GATE config_sha256=%s\n' "$(sha256sum "$config" | awk '{print $1}')"
 printf 'BOOT_GATE build target=vmlinux\n'
 set +e
 "${common_make[@]}" KCFLAGS="-save-temps=obj" -j"$(nproc)" vmlinux >"$log" 2>&1
