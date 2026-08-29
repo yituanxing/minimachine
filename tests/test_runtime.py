@@ -44,6 +44,43 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotEqual(host_entry, p3_entry)
         self.assertEqual(program.host_code[host_entry], "__mm_fast_memset")
 
+    def test_ror32_fast_path_matches_p3_body(self):
+        functions, _ = legalize_module(
+            """
+            define i32 @ror32(i32 %word, i32 %shift) {
+            entry:
+              %s = and i32 %shift, 31
+              %neg = sub i32 0, %shift
+              %s2 = and i32 %neg, 31
+              %a = lshr i32 %word, %s
+              %b = shl i32 %word, %s2
+              %r = or i32 %a, %b
+              ret i32 %r
+            }
+            """
+        )
+        program = executable(functions)
+
+        cases = (
+            (0x00000000, 0),
+            (0xFFFFFFFF, 1),
+            (0x12345678, 7),
+            (0x80000001, 31),
+            (0x89ABCDEF, 32),
+            (0x13579BDF, 63),
+        )
+        expected = [
+            program.new_vm().run_function("ror32", case)[0]
+            for case in cases
+        ]
+
+        self.assertEqual(accelerate_direct_runtime(program), ("ror32",))
+        actual = [
+            program.new_vm().run_function("ror32", case)[0]
+            for case in cases
+        ]
+        self.assertEqual(actual, expected)
+
     def test_scalar_helpers_execute_end_to_end(self):
         functions, _ = legalize_module(
             """
