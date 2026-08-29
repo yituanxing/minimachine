@@ -61,6 +61,14 @@ def parse_args():
         help="probe Linux kallsyms against one P3 function and exit",
     )
     p.add_argument(
+        "--initramfs",
+        type=Path,
+        help=(
+            "raw newc/cpio image backing Linux __initramfs_start in the "
+            "LLVM/P3 execution image"
+        ),
+    )
+    p.add_argument(
         "--checkpoint-in",
         type=Path,
         help="resume VM state from a checkpoint for the exact linked image",
@@ -753,6 +761,36 @@ def main() -> int:
             "BOOT_EXEC_KALLSYMS "
             f"generated={len(installed_kallsyms)} "
             f"symbols={program.initial_memory.read(program.symbol_addresses['kallsyms_num_syms'], 32)}",
+            flush=True,
+        )
+
+    if args.initramfs is not None:
+        try:
+            initramfs_data = args.initramfs.read_bytes()
+        except OSError as exc:
+            print(f"BOOT_EXEC_BLOCKED stage=initramfs error={exc}")
+            return 1
+        if not initramfs_data:
+            print("BOOT_EXEC_BLOCKED stage=initramfs error=empty image")
+            return 1
+        try:
+            initramfs_start = program.define_data_symbol(
+                "__initramfs_start",
+                initramfs_data,
+                align=4,
+            )
+            initramfs_size_addr = program.define_data_symbol(
+                "__initramfs_size",
+                len(initramfs_data).to_bytes(8, "little"),
+                align=8,
+            )
+        except VMError as exc:
+            print(f"BOOT_EXEC_BLOCKED stage=initramfs error={exc}")
+            return 1
+        print(
+            "BOOT_EXEC_INITRAMFS "
+            f"path={args.initramfs} bytes={len(initramfs_data)} "
+            f"start=0x{initramfs_start:x} size_symbol=0x{initramfs_size_addr:x}",
             flush=True,
         )
 
