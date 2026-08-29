@@ -254,6 +254,20 @@ class VM:
         self.ip = 0
         self.halted = False
 
+    def install_function(self, function: p3.Function) -> None:
+        """Install a P3 function after this VM has already been created.
+
+        Runtime-loaded MiniMachine userspace arrives through Linux bFLT, so its
+        P3 body is not necessarily known when Program/new_vm() are built.  Add
+        the function to the shared Program and mirror the newly allocated
+        descriptor bytes into this VM's live memory image.
+        """
+        before_data = self.program._next_data
+        self.program.add_function(function)
+        after_data = self.program._next_data
+        for address in range(before_data, after_data):
+            self.memory.bytes[address] = self.program.initial_memory.bytes.get(address, 0)
+
     def alloc_bytes(self, size: int, *, align: int = 8) -> int:
         if size < 0:
             raise VMError("negative allocation size")
