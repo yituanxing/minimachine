@@ -609,15 +609,54 @@ def main() -> int:
     install_runtime(program, surface)
 
     def user_milestone(_vm, args):
-        user_sp = args[0] if args else 0
+        value = args[0] if args else 0
         print(
             "BOOT_EXEC_USER_MILESTONE "
-            f"steps={_vm.steps} user_sp=0x{user_sp:x}",
+            f"steps={_vm.steps} value=0x{value:x}",
             flush=True,
         )
         return None
 
+    def linux_user_syscall(_vm, args):
+        if len(args) != 7:
+            raise VMError(
+                "MiniMachine Linux user syscall expects nr plus six arguments"
+            )
+        nr, a0, a1, a2, a3, a4, a5 = args
+        del a3, a4, a5
+
+        # asm-generic write(2) syscall number.  Start with the smallest real
+        # userspace proof: fd=1 must traverse Linux VFS and ttyMM0.
+        if nr == 64:
+            target = "ksys_write"
+            if target not in _vm.program.functions:
+                raise VMError("Linux ksys_write is missing from MiniMachine image")
+            shadow_top = getattr(_vm, "linux_syscall_shadow_stack_top", None)
+            if shadow_top is None:
+                shadow_top = _vm.linux_shadow_stack_next
+                _vm.linux_shadow_stack_next -= 0x01000000
+                if _vm.linux_shadow_stack_next <= _vm.heap_next:
+                    raise VMError("MiniMachine Linux syscall shadow stack exhausted")
+                _vm.linux_syscall_shadow_stack_top = shadow_top
+            result = _vm.call_function_nested(
+                target,
+                (a0, a1, a2),
+                stack_top=shadow_top,
+                result_count=1,
+                max_steps=10_000_000,
+            )[0]
+            print(
+                "BOOT_EXEC_USER_SYSCALL "
+                f"steps={_vm.steps} nr={nr} target={target} "
+                f"a0=0x{a0:x} a1=0x{a1:x} a2=0x{a2:x} result=0x{result:x}",
+                flush=True,
+            )
+            return result
+
+        raise VMError(f"unsupported MiniMachine Linux user syscall: {nr}")
+
     program.register_system("user_milestone", user_milestone)
+    program.register_system("linux_syscall", linux_user_syscall)
     accelerated_runtime = accelerate_direct_runtime(program)
     if accelerated_runtime:
         print(
