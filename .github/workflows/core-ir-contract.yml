@@ -5,6 +5,7 @@ on:
     branches: [main, "work/user-transition"]
     paths:
       - src/minimachine/**
+      - scripts/run-minimachine-linux.py
       - tests/**
       - .github/workflows/core-ir-contract.yml
   workflow_dispatch:
