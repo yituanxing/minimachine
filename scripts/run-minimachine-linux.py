@@ -590,8 +590,6 @@ def main() -> int:
     if task_info.field_offsets is not None and len(task_info.field_offsets) > 15:
         vm.linux_task_sched_class_offset = task_info.field_offsets[15]
 
-    original_step = vm.step
-    next_progress = args.progress_every
     last_milestone_function = None
     milestone_functions = {
         "sched_init",
@@ -632,31 +630,68 @@ def main() -> int:
 
     sched_watch_installed = False
 
-    # Track initcall identity at the do_one_initcall ABI boundary.  A short
-    # diagnostic replay can then tell us exactly which Linux initcall owns a
-    # long stretch of P3 execution instead of requiring another blind 200M+
-    # step run.
+    # Track initcall identity only on real function-entry transitions.  This
+    # avoids wrapping every P3 instruction just to discover coarse milestones.
     symbols_by_address: dict[int, list[str]] = {}
     for symbol, address in program.symbol_addresses.items():
         symbols_by_address.setdefault(address, []).append(symbol)
-    do_one_initcall_linked = vm.program.functions.get("do_one_initcall")
-    do_one_initcall_entry_block = (
-        do_one_initcall_linked.function.blocks[0].label
-        if do_one_initcall_linked is not None
-        else None
-    )
     last_initcall_enter_step: int | None = None
     last_initcall_symbol = "<none>"
 
-    def traced_step():
-        nonlocal next_progress, last_milestone_function, sched_watch_installed
+    def install_sched_watch() -> None:
+        nonlocal sched_watch_installed
+        if sched_watch_installed:
+            return
+        linked = vm.program.functions.get("sched_fork")
+        sched_off = getattr(vm, "linux_task_sched_class_offset", None)
+        if linked is None or sched_off is None:
+            return
+        frame_size = vm.memory.read(vm.sp + 24, 64)
+        argc = vm.memory.read(vm.sp + 56, 64)
+        if argc < 2:
+            return
+        arg_base = vm.sp + frame_size
+        task = vm.memory.read(arg_base + 8, 64)
+        watched = task + sched_off
+        print(
+            "BOOT_EXEC_SCHED_WATCH_START "
+            f"steps={vm.steps} task=0x{task:x} address=0x{watched:x} "
+            f"value=0x{vm.memory.read(watched, 64):x}",
+            flush=True,
+        )
+        original_memory_write = vm.memory.write
+
+        def watched_write(address, bits, value):
+            byte_count = bits // 8
+            if address <= watched < address + byte_count:
+                before = vm.memory.read(watched, 64)
+                original_memory_write(address, bits, value)
+                after = vm.memory.read(watched, 64)
+                print(
+                    "BOOT_EXEC_SCHED_WATCH_WRITE "
+                    f"steps={vm.steps} function={vm.current_function} "
+                    f"block={vm.current_block} ip={vm.ip} "
+                    f"address=0x{address:x} bits={bits} "
+                    f"before=0x{before:x} after=0x{after:x}",
+                    flush=True,
+                )
+                return
+            original_memory_write(address, bits, value)
+
+        vm.memory.write = watched_write
+        sched_watch_installed = True
+
+    def observe_function_entry(function: str, block: str | None) -> None:
+        nonlocal last_milestone_function
         nonlocal last_initcall_enter_step, last_initcall_symbol
 
-        if (
-            vm.current_function == "do_one_initcall"
-            and vm.current_block == do_one_initcall_entry_block
-            and vm.ip == 0
-        ):
+        linked = vm.program.functions.get(function)
+        if linked is None or not linked.function.blocks:
+            return
+        if block != linked.function.blocks[0].label:
+            return
+
+        if function == "do_one_initcall":
             frame_size = vm.memory.read(vm.sp + 24, 64)
             argc = vm.memory.read(vm.sp + 56, 64)
             initcall_ptr = vm.memory.read(vm.sp + frame_size, 64) if argc else 0
@@ -676,65 +711,61 @@ def main() -> int:
             last_initcall_enter_step = vm.steps
             last_initcall_symbol = initcall_symbol
 
-        if vm.current_function == "sched_fork" and not sched_watch_installed:
-            linked = vm.program.functions.get("sched_fork")
-            sched_off = getattr(vm, "linux_task_sched_class_offset", None)
-            if linked is not None and sched_off is not None:
-                frame_size = vm.memory.read(vm.sp + 24, 64)
-                argc = vm.memory.read(vm.sp + 56, 64)
-                if argc >= 2:
-                    arg_base = vm.sp + frame_size
-                    task = vm.memory.read(arg_base + 8, 64)
-                    watched = task + sched_off
-                    print(
-                        "BOOT_EXEC_SCHED_WATCH_START "
-                        f"steps={vm.steps} task=0x{task:x} address=0x{watched:x} "
-                        f"value=0x{vm.memory.read(watched, 64):x}",
-                        flush=True,
-                    )
-                    original_memory_write = vm.memory.write
+        if function == "sched_fork":
+            install_sched_watch()
 
-                    def watched_write(address, bits, value):
-                        byte_count = bits // 8
-                        if address <= watched < address + byte_count:
-                            before = vm.memory.read(watched, 64)
-                            original_memory_write(address, bits, value)
-                            after = vm.memory.read(watched, 64)
-                            print(
-                                "BOOT_EXEC_SCHED_WATCH_WRITE "
-                                f"steps={vm.steps} function={vm.current_function} "
-                                f"block={vm.current_block} ip={vm.ip} "
-                                f"address=0x{address:x} bits={bits} "
-                                f"before=0x{before:x} after=0x{after:x}",
-                                flush=True,
-                            )
-                            return
-                        original_memory_write(address, bits, value)
-
-                    vm.memory.write = watched_write
-                    sched_watch_installed = True
-        if (
-            vm.current_function in milestone_functions
-            and vm.current_function != last_milestone_function
-        ):
+        if function in milestone_functions:
             print(
                 "BOOT_EXEC_MILESTONE "
-                f"steps={vm.steps} function={vm.current_function}",
+                f"steps={vm.steps} function={function}",
                 flush=True,
             )
-            last_milestone_function = vm.current_function
-        if args.progress_every > 0 and vm.steps >= next_progress:
-            print(
-                "BOOT_EXEC_PROGRESS "
-                f"steps={vm.steps} function={vm.current_function} "
-                f"block={vm.current_block} ip={vm.ip} "
-                f"last_initcall={last_initcall_symbol}",
-                flush=True,
-            )
-            next_progress += args.progress_every
-        original_step()
+            last_milestone_function = function
 
-    vm.step = traced_step
+    original_set_code = vm._set_code
+
+    def traced_set_code(code: int) -> None:
+        target = vm.program.code_block.get(code)
+        original_set_code(code)
+        if target is not None:
+            function, block = target
+            observe_function_entry(function, block)
+
+    vm._set_code = traced_set_code
+
+    original_enter_function = vm.enter_function
+
+    def traced_enter_function(name, args=(), *, stack_top, result_count=0):
+        original_enter_function(
+            name,
+            args,
+            stack_top=stack_top,
+            result_count=result_count,
+        )
+        observe_function_entry(name, vm.current_block)
+
+    vm.enter_function = traced_enter_function
+
+    # Progress sampling is optional.  Production replay uses zero so the hot
+    # interpreter path is not wrapped once per P3 instruction.
+    if args.progress_every > 0:
+        original_step = vm.step
+        next_progress = args.progress_every
+
+        def progress_step():
+            nonlocal next_progress
+            if vm.steps >= next_progress:
+                print(
+                    "BOOT_EXEC_PROGRESS "
+                    f"steps={vm.steps} function={vm.current_function} "
+                    f"block={vm.current_block} ip={vm.ip} "
+                    f"last_initcall={last_initcall_symbol}",
+                    flush=True,
+                )
+                next_progress += args.progress_every
+            original_step()
+
+        vm.step = progress_step
 
     try:
         vm.run_function(
