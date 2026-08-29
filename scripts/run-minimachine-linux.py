@@ -102,6 +102,11 @@ def parse_args():
         type=Path,
         help="write the lowered P3 program before runtime callbacks are bound",
     )
+    p.add_argument(
+        "--checkpoint-at-limit",
+        action="store_true",
+        help="write --checkpoint-out when execution stops at the step limit",
+    )
     return p.parse_args()
 
 
@@ -1103,6 +1108,24 @@ def main() -> int:
                 max_steps=args.max_steps,
             )
     except VMError as exc:
+        if (
+            args.checkpoint_at_limit
+            and args.checkpoint_out is not None
+            and "step limit exceeded" in str(exc)
+        ):
+            save_checkpoint(
+                vm,
+                args.checkpoint_out,
+                image_sha256=linked_image_sha256,
+            )
+            checkpoint_written = True
+            print(
+                "BOOT_EXEC_CHECKPOINT_SAVED "
+                f"path={args.checkpoint_out} steps={vm.steps} "
+                f"reason=step_limit function={vm.current_function} "
+                f"block={vm.current_block} ip={vm.ip}",
+                flush=True,
+            )
         if args.checkpoint_function is not None:
             print(
                 "BOOT_EXEC_CHECKPOINT_FUNCTION_PROGRESS "
