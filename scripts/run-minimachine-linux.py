@@ -635,6 +635,7 @@ def main() -> int:
     symbols_by_address: dict[int, list[str]] = {}
     for symbol, address in program.symbol_addresses.items():
         symbols_by_address.setdefault(address, []).append(symbol)
+    current_task_slot = program.symbol_addresses.get("minimachine_current_task")
     last_initcall_enter_step: int | None = None
     last_initcall_symbol = "<none>"
     next_initcall_sample_step: int | None = None
@@ -742,10 +743,15 @@ def main() -> int:
             and last_initcall_enter_step is not None
             and vm.steps >= next_initcall_sample_step
         ):
+            current_task = (
+                vm.memory.read(current_task_slot, 64)
+                if current_task_slot is not None
+                else 0
+            )
             print(
                 "BOOT_EXEC_INITCALL_SAMPLE "
                 f"steps={vm.steps} elapsed={vm.steps - last_initcall_enter_step} "
-                f"initcall={last_initcall_symbol} "
+                f"initcall={last_initcall_symbol} task=0x{current_task:x} "
                 f"function={vm.current_function} block={vm.current_block} ip={vm.ip}",
                 flush=True,
             )
