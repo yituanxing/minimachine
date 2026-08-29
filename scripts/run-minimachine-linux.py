@@ -981,12 +981,20 @@ def inject_live_root_init_vfs(vm, path: Path) -> None:
     file_ptr, = _call_linux_function_preserving_control(
         vm,
         "filp_open",
-        (path_ptr, 0x1 | 0x200, 0),
+        (path_ptr, 0x2, 0),
         result_count=1,
     )
     if file_ptr >= (1 << 64) - 4095:
         signed = file_ptr - (1 << 64)
         raise VMError(f"filp_open(existing /init) failed: {signed}")
+
+    # Linux 6.6.143 riscv64 struct file: f_mode is field #2 at byte offset 16.
+    file_mode = vm.memory.read(file_ptr + 16, 32)
+    print(
+        "BOOT_EXEC_ROOTFS_FILE "
+        f"path=/init file=0x{file_ptr:x} f_mode=0x{file_mode:x}",
+        flush=True,
+    )
 
     pos_ptr = vm.alloc_bytes(8, align=8)
     vm.memory.write(pos_ptr, 64, 0)
