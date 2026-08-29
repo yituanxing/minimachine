@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from src.minimachine import muir, p3
 from src.minimachine.image import (
@@ -180,6 +181,51 @@ class ImageTests(unittest.TestCase):
             program.symbol_addresses["init0"],
         )
 
+
+    def test_linux_contract_keeps_empty_module_version_boundaries(self):
+        contract = LinkerContract.load(
+            Path(__file__).resolve().parents[1]
+            / "configs"
+            / "linux-6.6.143-minimachine-linker.json"
+        )
+        active = contract.active_boundary_symbols({"__param"})
+        self.assertIn("__start___modver", active)
+        self.assertIn("__stop___modver", active)
+
+        image = ModuleImage(
+            objects=(
+                ImageObject(
+                    name="param",
+                    ty="i64",
+                    data=bytes(8),
+                    align=8,
+                    section="__param",
+                    constant=False,
+                    relocations=(),
+                ),
+                ImageObject(
+                    name="modver_start_ref",
+                    ty="ptr",
+                    data=bytes(8),
+                    align=8,
+                    section=".data",
+                    constant=False,
+                    relocations=(
+                        Relocation(0, 8, SymbolExpr("__start___modver")),
+                    ),
+                ),
+            ),
+            aliases=(),
+            external_data=("__start___modver", "__stop___modver"),
+            external_functions=(),
+            skipped_linker_metadata=(),
+        )
+        program = Program()
+        install_module_image(program, image, linker_contract=contract)
+        self.assertEqual(
+            program.symbol_addresses["__start___modver"],
+            program.symbol_addresses["__stop___modver"],
+        )
 
     def test_semantic_boundaries_follow_program_layout(self):
         image = ModuleImage(
