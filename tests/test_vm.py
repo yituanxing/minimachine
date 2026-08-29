@@ -4,7 +4,7 @@ from src.minimachine import muir
 from src.minimachine.abi import expand_function
 from src.minimachine.legalize import legalize_module
 from src.minimachine.lower_p3 import lower_function
-from src.minimachine.vm import MASK64, Program
+from src.minimachine.vm import HOST_CONTROL_TRANSFER, MASK64, Program
 
 
 def machine(function: muir.Function):
@@ -133,6 +133,54 @@ class VMTests(unittest.TestCase):
             program.new_vm().run_function("sys_pair_user", (123,)),
             (1,),
         )
+
+    def test_host_control_transfer_starts_fresh_activation(self):
+        source = muir.Function(
+            "source",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Sys("jump", (), None),
+                        muir.Sys("bad", (), None),
+                        muir.Ret(None),
+                    ],
+                )
+            ],
+            set(),
+        )
+        target = muir.Function(
+            "target",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Sys("good", (), None),
+                        muir.Ret(None),
+                    ],
+                )
+            ],
+            set(),
+        )
+        program = Program([machine(source), machine(target)])
+        seen = []
+
+        def jump(vm, args):
+            self.assertEqual(args, ())
+            vm.enter_function(
+                "target",
+                (),
+                stack_top=vm.stack_top - 0x1000,
+                result_count=0,
+            )
+            return HOST_CONTROL_TRANSFER
+
+        program.register_system("jump", jump)
+        program.register_system("good", lambda vm, args: seen.append("good"))
+        program.register_system("bad", lambda vm, args: seen.append("bad"))
+
+        program.new_vm().run_function("source", (), result_count=0)
+        self.assertEqual(seen, ["good"])
 
     def test_llvm_sext_i1_executes_with_exact_source_width(self):
         functions, _ = legalize_module(
