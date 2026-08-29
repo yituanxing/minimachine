@@ -1,0 +1,95 @@
+name: Linux MiniMachine Double Hot Start Proof
+
+on:
+  push:
+    branches: [work/checkpoint-after-kallsyms]
+    paths:
+      - .github/workflows/double-hot-start-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download pty-entry checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33248074874
+          github-token: ${{ github.token }}
+          name: minimachine-linux-replay-33248074874
+          path: checkpoint-source
+
+      - name: Find matching Linux LLVM artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(
+            gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/linux-minimachine-boot.yml/runs?status=completed&per_page=30"               --jq '.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main") | .id' |
+              head -n 1
+          )"
+          test -n "$run_id"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download linked Linux LLVM image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: minimachine-linux-boot-*
+          path: replay-source
+          merge-multiple: true
+
+      - name: Prepare checkpoint
+        run: |
+          checkpoint="$(find checkpoint-source -name 'pty-init.chk.gz' -print -quit)"
+          test -n "$checkpoint"
+          cp "$checkpoint" replay-source/llvm/pty-init.chk.gz
+
+      - name: Build lowered P3 cache
+        run: |
+          start="$(date +%s)"
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-out replay-source/llvm/linux-p3-cache.pkl.gz             --probe-kallsyms start_kernel             --max-steps 20000000             --progress-every 0             2>&1 | tee replay-source/llvm/program-cache-build.log
+          end="$(date +%s)"
+          echo "P3_CACHE_BUILD_SECONDS $((end-start))"
+          test -s replay-source/llvm/linux-p3-cache.pkl.gz
+          grep -F 'BOOT_EXEC_PROGRAM_CACHE_SAVED' replay-source/llvm/program-cache-build.log
+          grep -F 'BOOT_EXEC_KALLSYMS_PROBE symbol=start_kernel' replay-source/llvm/program-cache-build.log
+          echo "P3_CACHE_BYTES $(stat -c%s replay-source/llvm/linux-p3-cache.pkl.gz)"
+
+      - name: Double-hot restore from P3 cache and VM checkpoint
+        run: |
+          start="$(date +%s)"
+          set +e
+          set -o pipefail
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/pty-init.chk.gz             --checkpoint-initcall pty_init             --max-steps 1             --progress-every 0             2>&1 | tee replay-source/llvm/double-hot.log
+          status=${PIPESTATUS[0]}
+          set -e
+          end="$(date +%s)"
+          echo "DOUBLE_HOT_SECONDS $((end-start))"
+          test "$status" -eq 1
+          grep -F 'BOOT_EXEC_PROGRAM_CACHE_LOADED' replay-source/llvm/double-hot.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED path=replay-source/llvm/pty-init.chk.gz steps=111552266' replay-source/llvm/double-hot.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_BUDGET saved_steps=111552266 additional_steps=1 absolute_limit=111552267' replay-source/llvm/double-hot.log
+          grep -F 'BOOT_EXEC_BLOCKED stage=execute steps=111552267' replay-source/llvm/double-hot.log
+
+      - name: Upload double-hot evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-double-hot-${{ github.run_id }}
+          path: |
+            replay-source/llvm/linux-p3-cache.pkl.gz
+            replay-source/llvm/program-cache-build.log
+            replay-source/llvm/double-hot.log
+          if-no-files-found: ignore
+          retention-days: 14
