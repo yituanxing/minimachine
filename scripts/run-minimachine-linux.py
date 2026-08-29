@@ -555,17 +555,10 @@ def main() -> int:
         )
         return 1
 
-    try:
-        install_module_image(
-            program,
-            image,
-            symbol_aliases=dict(linker_contract.aliases),
-            linker_contract=linker_contract,
-        )
-    except (ImageError, VMError, ValueError) as exc:
-        print(f"BOOT_EXEC_BLOCKED stage=image error={exc}")
-        return 1
-
+    # Native Linux adds kallsyms during final ELF linking. P3 has its own
+    # final code-address domain, so synthesize the same generated globals
+    # before installing the module image. This ensures semantic _end includes
+    # the tables and Linux reserves their storage during setup_arch.
     try:
         installed_kallsyms = install_p3_kallsyms(
             program,
@@ -581,6 +574,17 @@ def main() -> int:
             f"symbols={program.initial_memory.read(program.symbol_addresses['kallsyms_num_syms'], 32)}",
             flush=True,
         )
+
+    try:
+        install_module_image(
+            program,
+            image,
+            symbol_aliases=dict(linker_contract.aliases),
+            linker_contract=linker_contract,
+        )
+    except (ImageError, VMError, ValueError) as exc:
+        print(f"BOOT_EXEC_BLOCKED stage=image error={exc}")
+        return 1
 
     if args.entry not in program.functions:
         print(f"BOOT_EXEC_BLOCKED stage=entry missing={args.entry}")
