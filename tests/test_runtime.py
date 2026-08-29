@@ -6,6 +6,7 @@ from src.minimachine.image import install_module_image, parse_module_image
 from src.minimachine.legalize import legalize_module
 from src.minimachine.lower_p3 import lower_function
 from src.minimachine.runtime import (
+    accelerate_direct_runtime,
     collect_runtime_surface,
     direct_runtime_callback,
     install_runtime,
@@ -24,6 +25,25 @@ def executable(functions):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_direct_runtime_acceleration_rebinds_existing_memset(self):
+        memset_fn = muir.Function(
+            "memset",
+            [muir.Block("entry", [muir.Ret(muir.Slot("dst"))])],
+            {"dst", "value", "size"},
+            ("dst", "value", "size"),
+        )
+        expanded, _ = expand_function(memset_fn)
+        program = Program([lower_function(expanded)])
+        descriptor = program.symbol_addresses["memset"]
+        p3_entry = program.initial_memory.read(descriptor, 64)
+
+        accelerated = accelerate_direct_runtime(program)
+        host_entry = program.initial_memory.read(descriptor, 64)
+
+        self.assertEqual(accelerated, ("memset",))
+        self.assertNotEqual(host_entry, p3_entry)
+        self.assertEqual(program.host_code[host_entry], "__mm_fast_memset")
+
     def test_scalar_helpers_execute_end_to_end(self):
         functions, _ = legalize_module(
             """

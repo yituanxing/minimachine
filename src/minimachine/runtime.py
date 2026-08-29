@@ -1274,6 +1274,31 @@ def install_direct_runtime(program: Program) -> None:
         program.register_service(symbol, callback)
 
 
+def accelerate_direct_runtime(
+    program: Program,
+    symbols: tuple[str, ...] = ("memcpy", "memmove", "memset"),
+) -> tuple[str, ...]:
+    """Fast-path selected portable runtime functions in the reference VM.
+
+    Linux provides P3 bodies for these symbols, so the normal runtime installer leaves
+    them alone.  Dynamic boot replay can safely redirect descriptor-mediated calls to
+    the equivalent host callbacks to avoid spending millions of interpreter steps in
+    byte-copy loops.  The original P3 bodies remain linked for structural validation.
+    """
+    accelerated = []
+    for symbol in symbols:
+        if symbol not in _DIRECT_RUNTIME_SYMBOLS:
+            raise VMError(f"unsupported direct runtime acceleration: {symbol}")
+        if symbol not in program.functions:
+            continue
+        callback = direct_runtime_callback(symbol)
+        if callback is None:
+            continue
+        program.replace_function_with_service(symbol, callback)
+        accelerated.append(symbol)
+    return tuple(accelerated)
+
+
 def install_runtime(program: Program, surface: RuntimeSurface) -> None:
     install_direct_runtime(program)
 

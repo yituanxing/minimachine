@@ -146,6 +146,25 @@ class Program:
         self.initial_memory.write(descriptor + 0, 64, code)
         self.initial_memory.write(descriptor + 8, 64, HEADER_SIZE)
 
+    def replace_function_with_service(self, symbol: str, callback: HostService) -> None:
+        """Redirect calls through an existing function descriptor to a host service.
+
+        The P3 body stays linked so structural/executable gates can still inspect it.
+        Only descriptor-mediated calls are accelerated, which preserves the machine ABI
+        while letting the reference VM fast-path proven-equivalent runtime routines.
+        """
+        if symbol not in self.functions:
+            raise VMError(f"cannot replace non-function symbol: {symbol}")
+        descriptor = self.symbol_addresses[symbol]
+        host_symbol = f"__mm_fast_{symbol}"
+        if host_symbol in self.host_services:
+            raise VMError(f"host service already registered: {host_symbol}")
+        code = self._alloc_code()
+        self.host_code[code] = host_symbol
+        self.host_services[host_symbol] = callback
+        self.initial_memory.write(descriptor + 0, 64, code)
+        self.initial_memory.write(descriptor + 8, 64, HEADER_SIZE)
+
     def register_system(self, op: str, callback: HostService) -> None:
         tag = re.sub(r"[^A-Za-z0-9_]+", "_", op).strip("_")
         if not tag:

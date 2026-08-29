@@ -98,6 +98,52 @@ class VMTests(unittest.TestCase):
             (40,),
         )
 
+    def test_existing_function_descriptor_can_use_host_fast_path(self):
+        dec = muir.Function(
+            "dec",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Sub(
+                            muir.Width.I64,
+                            muir.Slot("out"),
+                            muir.Slot("x"),
+                            muir.Imm(1),
+                        ),
+                        muir.Ret(muir.Slot("out")),
+                    ],
+                )
+            ],
+            {"x", "out"},
+            ("x",),
+        )
+        caller = muir.Function(
+            "caller",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Call(
+                            muir.Callee(symbol="dec"),
+                            (muir.Slot("x"),),
+                            muir.Slot("r"),
+                        ),
+                        muir.Ret(muir.Slot("r")),
+                    ],
+                )
+            ],
+            {"x", "r"},
+            ("x",),
+        )
+        program = Program([machine(dec), machine(caller)])
+        program.replace_function_with_service("dec", lambda vm, args: args[0] + 100)
+
+        self.assertEqual(program.new_vm().run_function("caller", (41,)), (141,))
+        # Direct test entry still exercises the linked P3 body; only descriptor
+        # calls are redirected for replay acceleration.
+        self.assertEqual(program.new_vm().run_function("dec", (41,)), (40,))
+
     def test_multi_result_system_service_executes(self):
         fn = muir.Function(
             "sys_pair_user",
