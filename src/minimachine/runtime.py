@@ -1166,6 +1166,7 @@ _DIRECT_RUNTIME_SYMBOLS = (
     "strlen",
     "strcmp",
     "strncmp",
+    "ror32",
 )
 
 
@@ -1261,6 +1262,18 @@ def direct_runtime_callback(symbol: str):
             return 0
         return strncmp
 
+    if base == "ror32":
+        def ror32(_vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("ror32 expects word,shift")
+            word = args[0] & 0xFFFFFFFF
+            shift = args[1] & 31
+            return (
+                (word >> shift) |
+                ((word << ((-shift) & 31)) & 0xFFFFFFFF)
+            ) & 0xFFFFFFFF
+        return ror32
+
     return None
 
 
@@ -1276,7 +1289,7 @@ def install_direct_runtime(program: Program) -> None:
 
 def accelerate_direct_runtime(
     program: Program,
-    symbols: tuple[str, ...] = ("memcpy", "memmove", "memset"),
+    symbols: tuple[str, ...] = ("memcpy", "memmove", "memset", "ror32"),
 ) -> tuple[str, ...]:
     """Fast-path selected portable runtime functions in the reference VM.
 
