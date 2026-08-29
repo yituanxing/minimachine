@@ -50,6 +50,8 @@ if test ! -d "$root/linux-overlay/arch/minimachine"; then
 fi
 mkdir -p "$src/arch/minimachine"
 cp -a "$root/linux-overlay/arch/minimachine/." "$src/arch/minimachine/"
+python3 "$root/scripts/build-minimachine-user-init.py" \
+    "$src/arch/minimachine/kernel/userspace_payload.c"
 
 printf 'TARGET_KCONFIG start ARCH=%s LLVM=%s target=%s\n'     "$ARCH" "$LLVM_MAJOR" "$KCONFIG_TARGET"
 
