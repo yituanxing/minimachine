@@ -761,7 +761,18 @@ def main() -> int:
         else "<none>"
     )
     checkpoint_written = False
-    checkpoint_after_armed = False
+    checkpoint_after_armed = bool(
+        resumed_from_checkpoint
+        and args.checkpoint_after_initcall is not None
+        and args.checkpoint_initcall == args.checkpoint_after_initcall
+    )
+    if checkpoint_after_armed:
+        print(
+            "BOOT_EXEC_CHECKPOINT_ARMED "
+            f"after_initcall={args.checkpoint_after_initcall} "
+            f"steps={vm.steps} source=resume",
+            flush=True,
+        )
 
     def install_sched_watch() -> None:
         nonlocal sched_watch_installed
