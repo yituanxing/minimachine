@@ -175,11 +175,58 @@ void __init time_init(void)
 	/* The first dynamic milestone only needs deterministic early boot. */
 }
 
+static unsigned long minimachine_context_switch(struct task_struct *prev,
+					 struct task_struct *next,
+					 unsigned long fresh_sp,
+					 unsigned long start_fn,
+					 unsigned long start_arg)
+{
+	unsigned long last;
+
+	/*
+	 * Service 2 is a real MiniMachine machine-control transfer.  The host VM
+	 * saves this task's P3 continuation and either restores the next task or,
+	 * on first run, starts minimachine_ret_from_fork() on its kernel stack.
+	 */
+	asm volatile("ecall"
+		     : "=r"(last)
+		     : "r"(2UL),
+		       "r"((unsigned long)prev),
+		       "r"((unsigned long)next),
+		       "r"(fresh_sp),
+		       "r"(start_fn),
+		       "r"(start_arg)
+		     : "memory");
+	return last;
+}
+
+void __noreturn minimachine_ret_from_fork(struct task_struct *prev,
+					  unsigned long fn_addr,
+					  unsigned long arg)
+{
+	int (*fn)(void *) = (int (*)(void *))fn_addr;
+	int ret;
+
+	schedule_tail(prev);
+	if (!fn)
+		panic("MiniMachine: first-run task has no kernel entry");
+
+	ret = fn((void *)arg);
+	do_exit(ret);
+}
+
 struct task_struct *__switch_to(struct task_struct *prev,
 				struct task_struct *next)
 {
+	struct pt_regs *regs = task_pt_regs(next);
+	unsigned long last;
+
 	minimachine_current_task = next;
-	return prev;
+	last = minimachine_context_switch(prev, next,
+					  next->thread.kernel_sp,
+					  next->thread.resume_pc,
+					  regs->args[0]);
+	return (struct task_struct *)last;
 }
 
 int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
