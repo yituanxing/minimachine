@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import json
+import struct
 
 from . import muir, p3
 
 FORMAT = "minimachine-p3-v1"
+
+BFLT_MAGIC = b"bFLT"
+BFLT_VERSION = 4
+BFLT_HEADER_SIZE = 64
+BFLT_FLAG_KTRACE = 0x0010
+USER_PAYLOAD_MAGIC = b"MMP3"
+USER_PAYLOAD_VERSION = 1
+USER_PAYLOAD_HEADER_SIZE = 12
+BFLT_DATA_ALIGN = 0x20
 
 
 class UserImageError(ValueError):
@@ -224,3 +234,113 @@ def loads_function(data: bytes) -> p3.Function:
     if not isinstance(obj, dict):
         raise UserImageError("P3 user image must be a JSON object")
     return function_from_obj(obj)
+
+
+def _align_up(value: int, align: int) -> int:
+    if align <= 0 or (align & (align - 1)):
+        raise UserImageError("alignment must be a power of two")
+    return (value + align - 1) & ~(align - 1)
+
+
+def pack_user_payload(function: p3.Function) -> bytes:
+    body = dumps_function(function)
+    header = struct.pack(
+        ">4sII",
+        USER_PAYLOAD_MAGIC,
+        USER_PAYLOAD_VERSION,
+        len(body),
+    )
+    return header + body
+
+
+def unpack_user_payload(data: bytes) -> p3.Function:
+    if len(data) < USER_PAYLOAD_HEADER_SIZE:
+        raise UserImageError("truncated MiniMachine user payload")
+    magic, version, size = struct.unpack(
+        ">4sII", data[:USER_PAYLOAD_HEADER_SIZE]
+    )
+    if magic != USER_PAYLOAD_MAGIC:
+        raise UserImageError(f"bad MiniMachine user payload magic: {magic!r}")
+    if version != USER_PAYLOAD_VERSION:
+        raise UserImageError(
+            f"unsupported MiniMachine user payload version: {version}"
+        )
+    end = USER_PAYLOAD_HEADER_SIZE + size
+    if end > len(data):
+        raise UserImageError("truncated MiniMachine user payload body")
+    return loads_function(data[USER_PAYLOAD_HEADER_SIZE:end])
+
+
+def build_bflt(
+    function: p3.Function,
+    *,
+    stack_size: int = 64 * 1024,
+    ktrace: bool = False,
+) -> bytes:
+    if stack_size <= 0 or stack_size >= (1 << 28):
+        raise UserImageError(f"invalid bFLT stack size: {stack_size}")
+
+    payload = pack_user_payload(function)
+    entry = BFLT_HEADER_SIZE
+    text_end = _align_up(entry + len(payload), BFLT_DATA_ALIGN)
+    flags = BFLT_FLAG_KTRACE if ktrace else 0
+
+    header = struct.pack(
+        ">4s15I",
+        BFLT_MAGIC,
+        BFLT_VERSION,
+        entry,
+        text_end,
+        text_end,
+        text_end,
+        stack_size,
+        text_end,
+        0,
+        flags,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+    if len(header) != BFLT_HEADER_SIZE:
+        raise AssertionError(f"unexpected bFLT header size: {len(header)}")
+
+    image = header + payload
+    image += b"\0" * (text_end - len(image))
+    return image
+
+
+def extract_bflt_payload(image: bytes) -> p3.Function:
+    if len(image) < BFLT_HEADER_SIZE:
+        raise UserImageError("truncated bFLT image")
+
+    fields = struct.unpack(">4s15I", image[:BFLT_HEADER_SIZE])
+    magic = fields[0]
+    (
+        rev,
+        entry,
+        data_start,
+        data_end,
+        bss_end,
+        _stack_size,
+        reloc_start,
+        reloc_count,
+        _flags,
+        _build_date,
+        *_filler,
+    ) = fields[1:]
+
+    if magic != BFLT_MAGIC:
+        raise UserImageError(f"bad bFLT magic: {magic!r}")
+    if rev != BFLT_VERSION:
+        raise UserImageError(f"unsupported bFLT version: {rev}")
+    if entry != BFLT_HEADER_SIZE:
+        raise UserImageError(f"unexpected MiniMachine bFLT entry: {entry}")
+    if not (entry <= data_start <= data_end <= bss_end <= len(image)):
+        raise UserImageError("invalid bFLT section bounds")
+    if reloc_count != 0 or reloc_start != data_end:
+        raise UserImageError("MiniMachine bootstrap bFLT must be relocation-free")
+
+    return unpack_user_payload(image[entry:data_start])
