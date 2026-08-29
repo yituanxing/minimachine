@@ -141,10 +141,29 @@ def linux_ecall(vm, args: tuple[int, ...]):
         if "minimachine_ret_from_fork" not in vm.program.functions:
             raise VMError("MiniMachine ret-from-fork trampoline is missing")
 
+        shadow_stacks = getattr(vm, "linux_task_shadow_stacks", None)
+        if shadow_stacks is None:
+            shadow_stacks = {}
+            vm.linux_task_shadow_stacks = shadow_stacks
+
+        shadow_top = shadow_stacks.get(next_task)
+        if shadow_top is None:
+            shadow_top = vm.linux_shadow_stack_next
+            vm.linux_shadow_stack_next -= 0x01000000
+            if vm.linux_shadow_stack_next <= vm.heap_next:
+                raise VMError("MiniMachine Linux shadow task stacks exhausted")
+            shadow_stacks[next_task] = shadow_top
+            print(
+                "BOOT_EXEC_TASK_SHADOW_STACK "
+                f"task=0x{next_task:x} guest_sp=0x{fresh_sp:x} "
+                f"p3_stack_top=0x{shadow_top:x}",
+                flush=True,
+            )
+
         vm.enter_function(
             "minimachine_ret_from_fork",
             (prev, start_fn, start_arg),
-            stack_top=fresh_sp,
+            stack_top=shadow_top,
             result_count=0,
         )
         return HOST_CONTROL_TRANSFER
@@ -552,6 +571,10 @@ def main() -> int:
     vm = program.new_vm()
     vm.ecall_handler = linux_ecall
     vm.linux_task_contexts = {}
+    vm.linux_task_shadow_stacks = {}
+    # Reserve the top 16 MiB for the boot task's existing P3 stack. New
+    # Linux tasks receive independent P3 continuation stacks below it.
+    vm.linux_shadow_stack_next = vm.stack_top - 0x01000000
     layout = DataLayout.from_module(llvm_text)
     task_info = layout.info("%struct.task_struct")
     if task_info.field_offsets is not None and len(task_info.field_offsets) > 15:
