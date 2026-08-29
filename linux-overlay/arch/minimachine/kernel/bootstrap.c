@@ -204,11 +204,28 @@ static unsigned long minimachine_context_switch(struct task_struct *prev,
 	return last;
 }
 
+static void __noreturn minimachine_enter_userspace(struct pt_regs *regs)
+{
+	/*
+	 * Service 3 is the architecture-neutral return-to-user transfer.  Linux
+	 * must have completed exec and populated pt_regs via start_thread()
+	 * before this path is reachable.  The host VM then owns execution of the
+	 * loaded MiniMachine user image and future syscall trap/return cycles.
+	 */
+	asm volatile("ecall"
+		     :
+		     : "r"(3UL), "r"((unsigned long)regs)
+		     : "memory");
+
+	panic("MiniMachine: user-mode handoff returned");
+}
+
 void __noreturn minimachine_ret_from_fork(struct task_struct *prev,
 					  unsigned long fn_addr,
 					  unsigned long arg)
 {
 	int (*fn)(void *) = (int (*)(void *))fn_addr;
+	struct pt_regs *regs;
 	int ret;
 
 	schedule_tail(prev);
@@ -216,6 +233,17 @@ void __noreturn minimachine_ret_from_fork(struct task_struct *prev,
 		panic("MiniMachine: first-run task has no kernel entry");
 
 	ret = fn((void *)arg);
+
+	/*
+	 * A successful kernel_execve() returns from kernel_init() with the task
+	 * frame already converted to user mode.  Real architectures return
+	 * through their assembly entry path here; MiniMachine uses an explicit
+	 * semantic host transfer instead.
+	 */
+	regs = current_pt_regs();
+	if (user_mode(regs))
+		minimachine_enter_userspace(regs);
+
 	do_exit(ret);
 }
 
