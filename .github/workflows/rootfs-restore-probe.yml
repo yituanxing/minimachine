@@ -74,7 +74,7 @@ jobs:
           status=${PIPESTATUS[0]}
           set -e
           echo "HOT_INIT_STATUS $status"
-          grep -E 'BOOT_EXEC_(ROOTFS_PROBE|ROOTFS_VFS_CREATED|ROOTFS_UNPACKED|CHECKPOINT_RESTORED|MILESTONE|USER_HANDOFF|BLOCKED|HALTED|CHECKPOINT_SAVED)' replay-source/llvm/hot-init-continue.log || true
+          grep -E 'BOOT_EXEC_(ROOTFS_PROBE|ROOTFS_FILE|ROOTFS_VFS_CREATED|ROOTFS_UNPACKED|CHECKPOINT_RESTORED|MILESTONE|USER_HANDOFF|BLOCKED|HALTED|CHECKPOINT_SAVED)' replay-source/llvm/hot-init-continue.log || true
           exit "$status"
 
       - name: Upload hot-init result
