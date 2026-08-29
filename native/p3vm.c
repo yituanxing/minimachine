@@ -90,11 +90,11 @@ typedef struct {
 } MMRunResult;
 
 typedef struct {
-    MMInst *insts;
+    const MMInst *insts;
     size_t inst_count;
-    MMBlock *blocks;
+    const MMBlock *blocks;
     size_t block_count;
-    uint64_t *host_codes;
+    const uint64_t *host_codes;
     size_t host_count;
     uint64_t *watch_codes;
     size_t watch_count;
@@ -106,6 +106,9 @@ typedef struct {
     uint32_t ip;
     uint64_t steps;
     int oom;
+    uint64_t cached_page_no;
+    MMPage *cached_page;
+    int cached_page_valid;
 } MMVM;
 
 static inline uint64_t mask_bits(unsigned bits) {
@@ -127,10 +130,18 @@ static inline size_t page_hash(uint64_t no) {
 }
 
 static MMPage *get_page(MMVM *vm, uint64_t no, int create) {
+    if (vm->cached_page_valid && vm->cached_page_no == no)
+        return vm->cached_page;
+
     size_t h = page_hash(no);
     MMPage *p = vm->pages[h];
     while (p) {
-        if (p->no == no) return p;
+        if (p->no == no) {
+            vm->cached_page_no = no;
+            vm->cached_page = p;
+            vm->cached_page_valid = 1;
+            return p;
+        }
         p = p->next;
     }
     if (!create) return NULL;
@@ -141,6 +152,9 @@ static MMPage *get_page(MMVM *vm, uint64_t no, int create) {
     p->no = no;
     p->next = vm->pages[h];
     vm->pages[h] = p;
+    vm->cached_page_no = no;
+    vm->cached_page = p;
+    vm->cached_page_valid = 1;
     return p;
 }
 
@@ -155,8 +169,19 @@ static inline void mem_write8(MMVM *vm, uint64_t addr, uint8_t v) {
 }
 
 static uint64_t mem_read(MMVM *vm, uint64_t addr, unsigned bits) {
-    uint64_t v = 0;
     unsigned n = bits >> 3;
+    uint64_t page_off = addr & (MM_PAGE_SIZE - 1);
+
+    if (page_off + n <= MM_PAGE_SIZE) {
+        MMPage *p = get_page(vm, addr >> MM_PAGE_SHIFT, 0);
+        if (!p) return 0;
+        const uint8_t *src = p->data + page_off;
+        uint64_t v = 0;
+        memcpy(&v, src, n);
+        return v & mask_bits(bits);
+    }
+
+    uint64_t v = 0;
     for (unsigned i = 0; i < n; ++i)
         v |= ((uint64_t)mem_read8(vm, addr + i)) << (8 * i);
     return v;
@@ -164,7 +189,15 @@ static uint64_t mem_read(MMVM *vm, uint64_t addr, unsigned bits) {
 
 static void mem_write(MMVM *vm, uint64_t addr, unsigned bits, uint64_t v) {
     unsigned n = bits >> 3;
+    uint64_t page_off = addr & (MM_PAGE_SIZE - 1);
     v &= mask_bits(bits);
+
+    if (page_off + n <= MM_PAGE_SIZE) {
+        MMPage *p = get_page(vm, addr >> MM_PAGE_SHIFT, 1);
+        if (p) memcpy(p->data + page_off, &v, n);
+        return;
+    }
+
     for (unsigned i = 0; i < n; ++i)
         mem_write8(vm, addr + i, (uint8_t)(v >> (8 * i)));
 }
@@ -270,23 +303,11 @@ MMVM *mm_vm_create(const MMInst *insts, size_t inst_count,
                    uint64_t halt_code) {
     MMVM *vm = (MMVM *)calloc(1, sizeof(*vm));
     if (!vm) return NULL;
-    vm->insts = (MMInst *)malloc(inst_count * sizeof(MMInst));
-    vm->blocks = (MMBlock *)malloc(block_count * sizeof(MMBlock));
-    vm->host_codes = (uint64_t *)malloc(host_count * sizeof(uint64_t));
-    if ((inst_count && !vm->insts) ||
-        (block_count && !vm->blocks) ||
-        (host_count && !vm->host_codes)) {
-        free(vm->insts);
-        free(vm->blocks);
-        free(vm->host_codes);
-        free(vm);
-        return NULL;
-    }
-    memcpy(vm->insts, insts, inst_count * sizeof(MMInst));
-    memcpy(vm->blocks, blocks, block_count * sizeof(MMBlock));
-    memcpy(vm->host_codes, host_codes, host_count * sizeof(uint64_t));
+    vm->insts = insts;
     vm->inst_count = inst_count;
+    vm->blocks = blocks;
     vm->block_count = block_count;
+    vm->host_codes = host_codes;
     vm->host_count = host_count;
     vm->halt_code = halt_code;
     return vm;
@@ -297,40 +318,14 @@ int mm_vm_replace_program(MMVM *vm,
                           const MMBlock *blocks, size_t block_count,
                           const uint64_t *host_codes, size_t host_count,
                           uint64_t halt_code) {
-    MMInst *new_insts = NULL;
-    MMBlock *new_blocks = NULL;
-    uint64_t *new_hosts = NULL;
-    if (inst_count) {
-        new_insts = (MMInst *)malloc(inst_count * sizeof(MMInst));
-        if (!new_insts) goto fail;
-        memcpy(new_insts, insts, inst_count * sizeof(MMInst));
-    }
-    if (block_count) {
-        new_blocks = (MMBlock *)malloc(block_count * sizeof(MMBlock));
-        if (!new_blocks) goto fail;
-        memcpy(new_blocks, blocks, block_count * sizeof(MMBlock));
-    }
-    if (host_count) {
-        new_hosts = (uint64_t *)malloc(host_count * sizeof(uint64_t));
-        if (!new_hosts) goto fail;
-        memcpy(new_hosts, host_codes, host_count * sizeof(uint64_t));
-    }
-    free(vm->insts);
-    free(vm->blocks);
-    free(vm->host_codes);
-    vm->insts = new_insts;
+    vm->insts = insts;
     vm->inst_count = inst_count;
-    vm->blocks = new_blocks;
+    vm->blocks = blocks;
     vm->block_count = block_count;
-    vm->host_codes = new_hosts;
+    vm->host_codes = host_codes;
     vm->host_count = host_count;
     vm->halt_code = halt_code;
     return 1;
-fail:
-    free(new_insts);
-    free(new_blocks);
-    free(new_hosts);
-    return 0;
 }
 
 void mm_vm_destroy(MMVM *vm) {
@@ -345,9 +340,6 @@ void mm_vm_destroy(MMVM *vm) {
         }
     }
     free(vm->watch_codes);
-    free(vm->host_codes);
-    free(vm->blocks);
-    free(vm->insts);
     free(vm);
 }
 
@@ -403,14 +395,14 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
             r.error = MM_ERR_BAD_BLOCK;
             break;
         }
-        MMBlock *block = &vm->blocks[bi];
+        const MMBlock *block = &vm->blocks[bi];
         if (vm->ip >= block->count) {
             r.status = MM_STATUS_ERROR;
             r.error = MM_ERR_FALLOFF;
             break;
         }
 
-        MMInst *in = &vm->insts[block->first + vm->ip];
+        const MMInst *in = &vm->insts[block->first + vm->ip];
         vm->steps++;
 
         if (in->opcode == MM_OP_MOV) {
