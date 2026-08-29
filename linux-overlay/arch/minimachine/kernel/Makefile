@@ -5,4 +5,5 @@
 extra-y := vmlinux.lds
 
 obj-y += bootstrap.o
+obj-y += console.o
 obj-y += userspace_payload.o
