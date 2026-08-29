@@ -681,15 +681,9 @@ def main() -> int:
         vm.memory.write = watched_write
         sched_watch_installed = True
 
-    def observe_function_entry(function: str, block: str | None) -> None:
+    def observe_function_entry(function: str) -> None:
         nonlocal last_milestone_function
         nonlocal last_initcall_enter_step, last_initcall_symbol
-
-        linked = vm.program.functions.get(function)
-        if linked is None or not linked.function.blocks:
-            return
-        if block != linked.function.blocks[0].label:
-            return
 
         if function == "do_one_initcall":
             frame_size = vm.memory.read(vm.sp + 24, 64)
@@ -722,14 +716,23 @@ def main() -> int:
             )
             last_milestone_function = function
 
+    traced_entry_codes: dict[int, str] = {}
+    for function in milestone_functions:
+        linked = vm.program.functions.get(function)
+        if linked is None or not linked.function.blocks:
+            continue
+        entry_block = linked.function.blocks[0].label
+        traced_entry_codes[
+            vm.program.block_code[(function, entry_block)]
+        ] = function
+
     original_set_code = vm._set_code
 
     def traced_set_code(code: int) -> None:
-        target = vm.program.code_block.get(code)
+        function = traced_entry_codes.get(code)
         original_set_code(code)
-        if target is not None:
-            function, block = target
-            observe_function_entry(function, block)
+        if function is not None:
+            observe_function_entry(function)
 
     vm._set_code = traced_set_code
 
@@ -742,7 +745,8 @@ def main() -> int:
             stack_top=stack_top,
             result_count=result_count,
         )
-        observe_function_entry(name, vm.current_block)
+        if name in milestone_functions:
+            observe_function_entry(name)
 
     vm.enter_function = traced_enter_function
 
