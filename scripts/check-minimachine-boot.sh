@@ -49,6 +49,8 @@ tar -xJf "$archive" -C "$source_root"
 
 mkdir -p "$src/arch/minimachine"
 cp -a "$root/linux-overlay/arch/minimachine/." "$src/arch/minimachine/"
+python3 "$root/scripts/build-minimachine-user-init.py" \
+    "$src/arch/minimachine/kernel/userspace_payload.c"
 
 common_make=(
     make -C "$src"
