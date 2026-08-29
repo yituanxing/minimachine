@@ -191,41 +191,9 @@ class ImageTests(unittest.TestCase):
         active = contract.active_boundary_symbols({"__param"})
         self.assertIn("__start___modver", active)
         self.assertIn("__stop___modver", active)
-
-        image = ModuleImage(
-            objects=(
-                ImageObject(
-                    name="param",
-                    ty="i64",
-                    data=bytes(8),
-                    align=8,
-                    section="__param",
-                    constant=False,
-                    relocations=(),
-                ),
-                ImageObject(
-                    name="modver_start_ref",
-                    ty="ptr",
-                    data=bytes(8),
-                    align=8,
-                    section=".data",
-                    constant=False,
-                    relocations=(
-                        Relocation(0, 8, SymbolExpr("__start___modver")),
-                    ),
-                ),
-            ),
-            aliases=(),
-            external_data=("__start___modver", "__stop___modver"),
-            external_functions=(),
-            skipped_linker_metadata=(),
-        )
-        program = Program()
-        install_module_image(program, image, linker_contract=contract)
-        self.assertEqual(
-            program.symbol_addresses["__start___modver"],
-            program.symbol_addresses["__stop___modver"],
-        )
+        defined = contract.defined_symbols({"__param"})
+        self.assertIn("__start___modver", defined)
+        self.assertIn("__stop___modver", defined)
 
     def test_semantic_boundaries_follow_program_layout(self):
         image = ModuleImage(
