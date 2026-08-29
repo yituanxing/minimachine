@@ -639,7 +639,12 @@ def main() -> int:
     symbols_by_address: dict[int, list[str]] = {}
     for symbol, address in program.symbol_addresses.items():
         symbols_by_address.setdefault(address, []).append(symbol)
-    active_initcall_frames: dict[int, int] = {}
+    do_one_initcall_linked = vm.program.functions.get("do_one_initcall")
+    do_one_initcall_entry_block = (
+        do_one_initcall_linked.function.blocks[0].label
+        if do_one_initcall_linked is not None
+        else None
+    )
     last_initcall_enter_step: int | None = None
     last_initcall_symbol = "<none>"
 
@@ -647,18 +652,13 @@ def main() -> int:
         nonlocal next_progress, last_milestone_function, sched_watch_installed
         nonlocal last_initcall_enter_step, last_initcall_symbol
 
-        # A do_one_initcall frame may call deeply nested code.  Keep it active
-        # until execution returns to its recorded caller stack pointer, so
-        # nested returns are not misreported as new initcalls.
-        for frame_sp, caller_sp in tuple(active_initcall_frames.items()):
-            if vm.sp == caller_sp and vm.current_function != "do_one_initcall":
-                active_initcall_frames.pop(frame_sp, None)
-
-        if vm.current_function == "do_one_initcall" and vm.sp not in active_initcall_frames:
+        if (
+            vm.current_function == "do_one_initcall"
+            and vm.current_block == do_one_initcall_entry_block
+            and vm.ip == 0
+        ):
             frame_size = vm.memory.read(vm.sp + 24, 64)
             argc = vm.memory.read(vm.sp + 56, 64)
-            caller_sp = vm.memory.read(vm.sp + CALLER_SP, 64)
-            active_initcall_frames[vm.sp] = caller_sp
             initcall_ptr = vm.memory.read(vm.sp + frame_size, 64) if argc else 0
             names = symbols_by_address.get(initcall_ptr, ())
             initcall_symbol = "|".join(sorted(names)[:4]) if names else "<unknown>"
