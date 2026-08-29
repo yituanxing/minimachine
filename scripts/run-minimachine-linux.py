@@ -36,6 +36,7 @@ from src.minimachine.runtime import (
     collect_runtime_surface,
     install_runtime,
 )
+from src.minimachine.user_image import UserImageError, unpack_user_payload
 from src.minimachine.verify import verify_muir, verify_p3
 from src.minimachine.vm import HOST_CONTROL_TRANSFER, Program, VMError
 
@@ -154,6 +155,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
     # Boot-first host ABI:
     #   service 1: write(ptr, len) to the host boot console.
     #   service 2: context_switch(prev,next,fresh_sp,start_fn,start_arg)
+    #   service 3: enter_userspace(pt_regs) after a successful Linux exec.
     if not args:
         raise VMError("Linux ecall requires a service number")
 
@@ -239,6 +241,62 @@ def linux_ecall(vm, args: tuple[int, ...]):
             "minimachine_ret_from_fork",
             (prev, start_fn, start_arg),
             stack_top=shadow_top,
+            result_count=0,
+        )
+        return HOST_CONTROL_TRANSFER
+
+    if service == 3:
+        if len(args) != 2:
+            raise VMError(
+                "Linux user-mode handoff ecall expects service,pt_regs; "
+                f"got {len(args)} args"
+            )
+        _, regs = args
+        pc = vm.memory.read(regs + 0, 64)
+        user_sp = vm.memory.read(regs + 8, 64)
+        status = vm.memory.read(regs + 80, 64)
+        if not (status & 1):
+            raise VMError(
+                "Linux user-mode handoff received non-user pt_regs: "
+                f"regs=0x{regs:x} status=0x{status:x}"
+            )
+
+        header = bytes(vm.memory.read(pc + i, 8) for i in range(12))
+        if header[:4] != b"MMP3":
+            raise VMError(
+                "MiniMachine user entry is not an MMP3 payload: "
+                f"pc=0x{pc:x} magic={header[:4]!r}"
+            )
+        size = int.from_bytes(header[8:12], "big")
+        if size > 16 * 1024 * 1024:
+            raise VMError(f"MiniMachine user payload too large: {size}")
+        payload = bytes(vm.memory.read(pc + i, 8) for i in range(12 + size))
+        try:
+            function = unpack_user_payload(payload)
+        except UserImageError as exc:
+            raise VMError(f"invalid MiniMachine user payload: {exc}") from exc
+
+        # User images are loaded dynamically after Linux binfmt_flat has
+        # validated and installed them.  Keep their P3 symbol namespace
+        # separate from the kernel program.
+        base_name = function.name
+        suffix = 0
+        while function.name in vm.program.functions or function.name in vm.program.symbol_addresses:
+            suffix += 1
+            function.name = f"__mm_user_{base_name}_{suffix}"
+        verify_p3(function)
+        vm.program.add_function(function)
+
+        print(
+            "BOOT_EXEC_USER_HANDOFF "
+            f"regs=0x{regs:x} pc=0x{pc:x} user_sp=0x{user_sp:x} "
+            f"function={function.name} payload_bytes={12 + size}",
+            flush=True,
+        )
+        vm.enter_function(
+            function.name,
+            (),
+            stack_top=user_sp,
             result_count=0,
         )
         return HOST_CONTROL_TRANSFER
