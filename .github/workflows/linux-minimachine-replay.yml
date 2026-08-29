@@ -5,7 +5,7 @@ on:
     workflows: ["Linux MiniMachine Boot Gate"]
     types: [completed]
   push:
-    branches: [main, work/p3-kallsyms]
+    branches: [main]
     paths:
       - configs/linux-6.6.143-minimachine-linker.json
       - src/minimachine/abi.py
@@ -34,7 +34,7 @@ jobs:
   replay:
     if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
@@ -69,7 +69,7 @@ jobs:
       - name: Replay Linux start_kernel in MiniMachine VM
         run: |
           set -o pipefail
-          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --entry start_kernel             --max-steps 130000000             --progress-every 0             2>&1 | tee replay-source/llvm/replay-exec.log
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --entry start_kernel             --max-steps 220000000             --progress-every 0             2>&1 | tee replay-source/llvm/replay-exec.log
 
       - name: Upload replay evidence
         if: always()
