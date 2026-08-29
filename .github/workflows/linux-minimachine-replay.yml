@@ -1,6 +1,9 @@
 name: Linux MiniMachine Dynamic Replay
 
 on:
+  workflow_run:
+    workflows: ["Linux MiniMachine Boot Gate"]
+    types: [completed]
   push:
     branches: [main]
     paths:
