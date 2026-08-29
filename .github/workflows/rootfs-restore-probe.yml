@@ -63,7 +63,7 @@ jobs:
             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz \
             --checkpoint-in replay-source/llvm/hot-prepare.chk.gz \
             --probe-rootfs-after-checkpoint \
-            --inject-init /tmp/minimachine-init.bflt \
+            --inject-initramfs-cpio /tmp/minimachine-initramfs.cpio \
             --skip-prepare-namespace-after-inject \
             --checkpoint-out replay-source/llvm/hot-init-next.chk.gz \
             --checkpoint-at-limit \
