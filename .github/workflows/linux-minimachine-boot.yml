@@ -2,7 +2,7 @@ name: Linux MiniMachine Boot Gate
 
 on:
   push:
-    branches: [main]
+    branches: [main, "work/user-transition"]
     paths:
       - configs/linux-6.6.143-minimachine.env
       - linux-overlay/arch/minimachine/**
@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: minimachine-linux-boot-gate
+  group: minimachine-linux-boot-gate-${{ github.ref_name }}
   cancel-in-progress: true
 
 jobs:
