@@ -1289,7 +1289,16 @@ def install_direct_runtime(program: Program) -> None:
 
 def accelerate_direct_runtime(
     program: Program,
-    symbols: tuple[str, ...] = ("memcpy", "memmove", "memset", "ror32"),
+    symbols: tuple[str, ...] = (
+        "memcpy",
+        "memmove",
+        "memset",
+        "memcmp",
+        "strlen",
+        "strcmp",
+        "strncmp",
+        "ror32",
+    ),
 ) -> tuple[str, ...]:
     """Fast-path selected portable runtime functions in the reference VM.
 
