@@ -71,6 +71,21 @@ def parse_args():
         "--checkpoint-after-initcall",
         help="write --checkpoint-out when the initcall after this one begins",
     )
+    p.add_argument(
+        "--checkpoint-function",
+        help="write --checkpoint-out on an occurrence of this function entry",
+    )
+    p.add_argument(
+        "--checkpoint-function-hit",
+        type=int,
+        default=1,
+        help="1-based occurrence of --checkpoint-function to capture",
+    )
+    p.add_argument(
+        "--stop-after-checkpoint",
+        action="store_true",
+        help="stop replay immediately after writing a checkpoint",
+    )
     return p.parse_args()
 
 
@@ -773,6 +788,7 @@ def main() -> int:
             f"steps={vm.steps} source=resume",
             flush=True,
         )
+    checkpoint_function_hits = 0
 
     def install_sched_watch() -> None:
         nonlocal sched_watch_installed
@@ -821,6 +837,7 @@ def main() -> int:
         nonlocal last_milestone_function
         nonlocal last_initcall_enter_step, last_initcall_symbol
         nonlocal checkpoint_written, checkpoint_after_armed
+        nonlocal checkpoint_function_hits
 
         if function == "do_one_initcall":
             frame_size = vm.memory.read(vm.sp + 24, 64)
@@ -893,6 +910,31 @@ def main() -> int:
                     flush=True,
                 )
 
+        if (
+            args.checkpoint_function is not None
+            and function == args.checkpoint_function
+        ):
+            checkpoint_function_hits += 1
+            if checkpoint_function_hits == args.checkpoint_function_hit:
+                if args.checkpoint_out is None:
+                    raise VMError(
+                        "--checkpoint-function requires --checkpoint-out"
+                    )
+                save_checkpoint(
+                    vm,
+                    args.checkpoint_out,
+                    image_sha256=linked_image_sha256,
+                )
+                checkpoint_written = True
+                print(
+                    "BOOT_EXEC_CHECKPOINT_SAVED "
+                    f"path={args.checkpoint_out} steps={vm.steps} "
+                    f"function={function} hit={checkpoint_function_hits}",
+                    flush=True,
+                )
+                if args.stop_after_checkpoint:
+                    vm.halted = True
+
         if function == "sched_fork":
             install_sched_watch()
 
@@ -913,6 +955,19 @@ def main() -> int:
         traced_entry_codes[
             vm.program.block_code[(function, entry_block)]
         ] = function
+
+    if args.checkpoint_function is not None:
+        linked = vm.program.functions.get(args.checkpoint_function)
+        if linked is None or not linked.function.blocks:
+            print(
+                "BOOT_EXEC_BLOCKED stage=checkpoint "
+                f"missing_function={args.checkpoint_function}"
+            )
+            return 1
+        entry_block = linked.function.blocks[0].label
+        traced_entry_codes[
+            vm.program.block_code[(args.checkpoint_function, entry_block)]
+        ] = args.checkpoint_function
 
     original_set_code = vm._set_code
 
