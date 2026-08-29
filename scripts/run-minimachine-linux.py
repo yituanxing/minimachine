@@ -13,6 +13,12 @@ if str(ROOT) not in sys.path:
 
 from src.minimachine import muir
 from src.minimachine.abi import CALLER_SP, RESULT_COUNT, RESULT_PTR, RET_PC, expand_function
+from src.minimachine.checkpoint import (
+    CheckpointError,
+    image_fingerprint,
+    load_checkpoint,
+    save_checkpoint,
+)
 from src.minimachine.image import ImageError, install_module_image, parse_module_image
 from src.minimachine.legalize import legalize_module
 from src.minimachine.layout import DataLayout
@@ -46,6 +52,20 @@ def parse_args():
         "--probe-kallsyms",
         metavar="SYMBOL",
         help="probe Linux kallsyms against one P3 function and exit",
+    )
+    p.add_argument(
+        "--checkpoint-in",
+        type=Path,
+        help="resume VM state from a checkpoint for the exact linked image",
+    )
+    p.add_argument(
+        "--checkpoint-out",
+        type=Path,
+        help="write a resumable VM checkpoint during replay",
+    )
+    p.add_argument(
+        "--checkpoint-initcall",
+        help="write --checkpoint-out on entry to this Linux initcall",
     )
     return p.parse_args()
 
@@ -514,6 +534,7 @@ def current_instruction(vm):
 def main() -> int:
     args = parse_args()
     llvm_text = args.input.read_text()
+    linked_image_sha256 = image_fingerprint(llvm_text)
     linker_contract = LinkerContract.load(args.linker_contract)
 
     functions, _stats = legalize_module(llvm_text)
@@ -616,6 +637,26 @@ def main() -> int:
     if task_info.field_offsets is not None and len(task_info.field_offsets) > 15:
         vm.linux_task_sched_class_offset = task_info.field_offsets[15]
 
+    resumed_from_checkpoint = False
+    if args.checkpoint_in is not None:
+        try:
+            load_checkpoint(
+                vm,
+                args.checkpoint_in,
+                image_sha256=linked_image_sha256,
+            )
+        except CheckpointError as exc:
+            print(f"BOOT_EXEC_BLOCKED stage=checkpoint error={exc}")
+            return 1
+        vm.ecall_handler = linux_ecall
+        resumed_from_checkpoint = True
+        print(
+            "BOOT_EXEC_CHECKPOINT_RESTORED "
+            f"path={args.checkpoint_in} steps={vm.steps} "
+            f"function={vm.current_function} block={vm.current_block} ip={vm.ip}",
+            flush=True,
+        )
+
     if args.probe_kallsyms is not None:
         symbol = args.probe_kallsyms
         linked = program.functions.get(symbol)
@@ -707,8 +748,15 @@ def main() -> int:
     symbols_by_address: dict[int, list[str]] = {}
     for symbol, address in program.symbol_addresses.items():
         symbols_by_address.setdefault(address, []).append(symbol)
-    last_initcall_enter_step: int | None = None
-    last_initcall_symbol = "<none>"
+    last_initcall_enter_step: int | None = (
+        vm.steps if resumed_from_checkpoint and args.checkpoint_initcall else None
+    )
+    last_initcall_symbol = (
+        args.checkpoint_initcall
+        if resumed_from_checkpoint and args.checkpoint_initcall
+        else "<none>"
+    )
+    checkpoint_written = False
 
     def install_sched_watch() -> None:
         nonlocal sched_watch_installed
@@ -756,6 +804,7 @@ def main() -> int:
     def observe_function_entry(function: str) -> None:
         nonlocal last_milestone_function
         nonlocal last_initcall_enter_step, last_initcall_symbol
+        nonlocal checkpoint_written
 
         if function == "do_one_initcall":
             frame_size = vm.memory.read(vm.sp + 24, 64)
@@ -776,6 +825,24 @@ def main() -> int:
             )
             last_initcall_enter_step = vm.steps
             last_initcall_symbol = initcall_symbol
+
+            if (
+                not checkpoint_written
+                and args.checkpoint_out is not None
+                and args.checkpoint_initcall == initcall_symbol
+            ):
+                save_checkpoint(
+                    vm,
+                    args.checkpoint_out,
+                    image_sha256=linked_image_sha256,
+                )
+                checkpoint_written = True
+                print(
+                    "BOOT_EXEC_CHECKPOINT_SAVED "
+                    f"path={args.checkpoint_out} steps={vm.steps} "
+                    f"initcall={initcall_symbol}",
+                    flush=True,
+                )
 
         if function == "sched_fork":
             install_sched_watch()
@@ -844,12 +911,15 @@ def main() -> int:
         vm.step = progress_step
 
     try:
-        vm.run_function(
-            args.entry,
-            (),
-            result_count=0,
-            max_steps=args.max_steps,
-        )
+        if resumed_from_checkpoint:
+            vm.run(max_steps=args.max_steps)
+        else:
+            vm.run_function(
+                args.entry,
+                (),
+                result_count=0,
+                max_steps=args.max_steps,
+            )
     except VMError as exc:
         inst = current_instruction(vm)
         print(
