@@ -2,9 +2,10 @@ name: Core IR Contract
 
 on:
   push:
-    branches: [main]
+    branches: [main, "work/fast-entry-trace"]
     paths:
       - src/minimachine/**
+      - scripts/run-minimachine-linux.py
       - tests/**
       - .github/workflows/core-ir-contract.yml
   workflow_dispatch:
@@ -17,5 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Compile replay driver
+        run: python3 -m py_compile scripts/run-minimachine-linux.py
       - name: Run IR contract tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
