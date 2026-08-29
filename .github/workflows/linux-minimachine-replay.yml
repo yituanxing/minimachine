@@ -5,7 +5,7 @@ on:
     workflows: ["Linux MiniMachine Boot Gate"]
     types: [completed]
   push:
-    branches: [main]
+    branches: [main, "work/fast-trace-hooks"]
     paths:
       - configs/linux-6.6.143-minimachine-linker.json
       - src/minimachine/abi.py
@@ -27,7 +27,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: minimachine-linux-dynamic-replay
+  group: minimachine-linux-dynamic-replay-${{ github.ref_name }}
   cancel-in-progress: true
 
 jobs:
