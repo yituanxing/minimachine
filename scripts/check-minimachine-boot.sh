@@ -88,7 +88,9 @@ printf 'BOOT_GATE configure ARCH=%s LLVM=%s\n' "$ARCH" "$LLVM_MAJOR"
     --disable NAMESPACES \
     --disable PROFILING \
     --disable KPROBES \
-    --disable FTRACE
+    --disable FTRACE \
+    --disable KALLSYMS_ALL \
+    --disable KALLSYMS
 
 "${common_make[@]}" olddefconfig
 
