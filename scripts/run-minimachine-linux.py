@@ -667,6 +667,7 @@ def main() -> int:
     last_initcall_enter_step: int | None = None
     last_initcall_symbol = "<none>"
     next_initcall_sample_step: int | None = None
+    next_rwsem_sample_step: int | None = None
 
     def install_sched_watch() -> None:
         nonlocal sched_watch_installed
@@ -748,6 +749,13 @@ def main() -> int:
             )
             last_milestone_function = function
 
+    rwsem_trylock_entry_code: int | None = None
+    rwsem_linked = vm.program.functions.get("rwsem_write_trylock")
+    if rwsem_linked is not None and rwsem_linked.function.blocks:
+        rwsem_trylock_entry_code = vm.program.block_code[
+            ("rwsem_write_trylock", rwsem_linked.function.blocks[0].label)
+        ]
+
     traced_entry_codes: dict[int, str] = {}
     for function in milestone_functions:
         linked = vm.program.functions.get(function)
@@ -761,11 +769,39 @@ def main() -> int:
     original_set_code = vm._set_code
 
     def traced_set_code(code: int) -> None:
-        nonlocal next_initcall_sample_step
+        nonlocal next_initcall_sample_step, next_rwsem_sample_step
         function = traced_entry_codes.get(code)
         original_set_code(code)
         if function is not None:
             observe_function_entry(function)
+        if (
+            code == rwsem_trylock_entry_code
+            and last_initcall_symbol == "chr_dev_init"
+            and last_initcall_enter_step is not None
+            and vm.steps - last_initcall_enter_step >= 1_000_000
+            and (
+                next_rwsem_sample_step is None
+                or vm.steps >= next_rwsem_sample_step
+            )
+        ):
+            frame_size = vm.memory.read(vm.sp + 24, 64)
+            argc = vm.memory.read(vm.sp + 56, 64)
+            sem = vm.memory.read(vm.sp + frame_size, 64) if argc else 0
+            current_task = (
+                vm.memory.read(current_task_slot, 64)
+                if current_task_slot is not None
+                else 0
+            )
+            count = vm.memory.read(sem, 64) if sem else 0
+            owner = vm.memory.read(sem + 8, 64) if sem else 0
+            print(
+                "BOOT_EXEC_RWSEM_STATE "
+                f"steps={vm.steps} elapsed={vm.steps - last_initcall_enter_step} "
+                f"task=0x{current_task:x} sem=0x{sem:x} "
+                f"count=0x{count:x} owner=0x{owner:x}",
+                flush=True,
+            )
+            next_rwsem_sample_step = vm.steps + 1_000_000
         if (
             next_initcall_sample_step is not None
             and last_initcall_enter_step is not None
