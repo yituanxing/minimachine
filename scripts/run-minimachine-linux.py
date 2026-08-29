@@ -55,6 +55,14 @@ def parse_args():
     )
     p.add_argument("--entry", default="start_kernel")
     p.add_argument(
+        "--stop-after-user-handoff",
+        action="store_true",
+        help=(
+            "stop after Linux has successfully exec'd and transferred to "
+            "the first MiniMachine userspace P3 function"
+        ),
+    )
+    p.add_argument(
         "--native-vm",
         action="store_true",
         help="execute strict P3 with the C native VM backend",
@@ -343,6 +351,13 @@ def linux_ecall(vm, args: tuple[int, ...]):
             stack_top=user_sp,
             result_count=0,
         )
+        if getattr(vm, "stop_after_user_handoff", False):
+            vm.halted = True
+            print(
+                "BOOT_EXEC_USER_HANDOFF_STOP "
+                f"steps={vm.steps} function={function.name}",
+                flush=True,
+            )
         return HOST_CONTROL_TRANSFER
 
     raise VMError(f"unsupported MiniMachine Linux ecall service: {service}")
@@ -1138,6 +1153,7 @@ def main() -> int:
         vm = program.new_vm()
         print("BOOT_EXEC_BACKEND backend=python", flush=True)
     vm.ecall_handler = linux_ecall
+    vm.stop_after_user_handoff = args.stop_after_user_handoff
     vm.linux_task_contexts = {}
     vm.linux_task_shadow_stacks = {}
     # Reserve the top 16 MiB for the boot task's existing P3 stack. New
