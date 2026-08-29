@@ -107,6 +107,11 @@ def parse_args():
         action="store_true",
         help="write --checkpoint-out when execution stops at the step limit",
     )
+    p.add_argument(
+        "--checkpoint-on-error",
+        action="store_true",
+        help="write --checkpoint-out before reporting any VM execution error",
+    )
     return p.parse_args()
 
 
@@ -1108,11 +1113,16 @@ def main() -> int:
                 max_steps=args.max_steps,
             )
     except VMError as exc:
-        if (
+        checkpoint_reason = None
+        if args.checkpoint_on_error and args.checkpoint_out is not None:
+            checkpoint_reason = "error"
+        elif (
             args.checkpoint_at_limit
             and args.checkpoint_out is not None
             and "step limit exceeded" in str(exc)
         ):
+            checkpoint_reason = "step_limit"
+        if checkpoint_reason is not None:
             save_checkpoint(
                 vm,
                 args.checkpoint_out,
@@ -1122,7 +1132,7 @@ def main() -> int:
             print(
                 "BOOT_EXEC_CHECKPOINT_SAVED "
                 f"path={args.checkpoint_out} steps={vm.steps} "
-                f"reason=step_limit function={vm.current_function} "
+                f"reason={checkpoint_reason} function={vm.current_function} "
                 f"block={vm.current_block} ip={vm.ip}",
                 flush=True,
             )
