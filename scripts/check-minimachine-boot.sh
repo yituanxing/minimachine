@@ -65,44 +65,15 @@ common_make=(
 printf 'BOOT_GATE configure ARCH=%s LLVM=%s\n' "$ARCH" "$LLVM_MAJOR"
 "${common_make[@]}" "$KCONFIG_TARGET"
 
-# Boot-first configuration: keep only the generic kernel surface needed to
-# reach start_kernel and early init.  Full corpus/target gates remain the
-# completeness proof and are intentionally not weakened by this focused gate.
-"$src/scripts/config" --file "$out/.config" \
-    --disable MODULES \
-    --disable NET \
-    --disable BLOCK \
-    --disable PCI \
-    --disable USB_SUPPORT \
-    --disable USB \
-    --disable SOUND \
-    --disable MEDIA_SUPPORT \
-    --disable DRM \
-    --disable INPUT \
-    --disable VT \
-    --disable LEGACY_PTYS \
-    --enable UNIX98_PTYS \
-    --disable WIRELESS \
-    --disable WLAN \
-    --disable VIRTUALIZATION \
-    --disable BPF_SYSCALL \
-    --disable CGROUPS \
-    --disable NAMESPACES \
-    --disable PROFILING \
-    --disable KPROBES \
-    --disable FTRACE \
-    --disable KALLSYMS_ALL \
-    --disable KALLSYMS
-
+# Default MiniMachine Linux baseline: use the architecture defconfig as-is.
+# Do not prune subsystems here. Dynamic replay must expose the real next
+# blocker under the normal default configuration.
 "${common_make[@]}" olddefconfig
 
 config="$out/.config"
 test -s "$config"
-grep -Fqx '# CONFIG_LEGACY_PTYS is not set' "$config"
-grep -Fqx 'CONFIG_UNIX98_PTYS=y' "$config"
-printf 'BOOT_GATE_PTY_CONFIG legacy=off unix98=on\n'
+printf 'BOOT_GATE_DEFAULT_CONFIG target=%s enabled=%s\n' "$KCONFIG_TARGET" "$(grep -c '^CONFIG_[A-Za-z0-9_]*=y$' "$config")"
 printf 'BOOT_GATE config_sha256=%s\n' "$(sha256sum "$config" | awk '{print $1}')"
-
 printf 'BOOT_GATE build target=vmlinux\n'
 set +e
 "${common_make[@]}" KCFLAGS="-save-temps=obj" -j"$(nproc)" vmlinux >"$log" 2>&1
