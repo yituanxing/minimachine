@@ -53,6 +53,11 @@ def parse_args():
         help="MiniMachine linker contract used to install the Linux data image",
     )
     p.add_argument("--entry", default="start_kernel")
+    p.add_argument(
+        "--native-vm",
+        action="store_true",
+        help="execute strict P3 with the C native VM backend",
+    )
     p.add_argument("--max-steps", type=int, default=10_000_000)
     p.add_argument("--progress-every", type=int, default=250_000)
     p.add_argument(
@@ -1111,7 +1116,13 @@ def main() -> int:
         f"linker_boundaries={len(linker_contract.active_boundary_symbols(image_sections))}"
     )
 
-    vm = program.new_vm()
+    if args.native_vm:
+        from src.minimachine.native_vm import NativeVM
+        vm = NativeVM(program)
+        print("BOOT_EXEC_BACKEND backend=native-c", flush=True)
+    else:
+        vm = program.new_vm()
+        print("BOOT_EXEC_BACKEND backend=python", flush=True)
     vm.ecall_handler = linux_ecall
     vm.linux_task_contexts = {}
     vm.linux_task_shadow_stacks = {}
@@ -1518,6 +1529,8 @@ def main() -> int:
             observe_function_entry(function)
 
     vm._set_code = traced_set_code
+    if hasattr(vm, "set_watch_codes"):
+        vm.set_watch_codes(traced_entry_codes.keys())
 
     original_enter_function = vm.enter_function
 
