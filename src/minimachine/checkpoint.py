@@ -8,7 +8,7 @@ from pathlib import Path
 from .vm import VM
 
 
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION = 2
 _LINUX_ATTRS = (
     "linux_task_contexts",
     "linux_task_shadow_stacks",
@@ -31,11 +31,17 @@ def _snapshot(vm: VM, *, image_sha256: str) -> dict:
         for name in _LINUX_ATTRS
         if hasattr(vm, name)
     }
+    baseline = vm.program.initial_memory.bytes
+    memory_delta = {
+        address: value
+        for address, value in vm.memory.bytes.items()
+        if baseline.get(address, 0) != value
+    }
     return {
         "version": CHECKPOINT_VERSION,
         "image_sha256": image_sha256,
         "stack_top": vm.stack_top,
-        "memory": vm.memory.bytes,
+        "memory_delta": memory_delta,
         "sp": vm.sp,
         "current_function": vm.current_function,
         "current_block": vm.current_block,
@@ -76,17 +82,23 @@ def load_checkpoint(
     except (OSError, EOFError, pickle.PickleError) as exc:
         raise CheckpointError(f"cannot read VM checkpoint: {exc}") from exc
 
-    if payload.get("version") != CHECKPOINT_VERSION:
+    version = payload.get("version")
+    if version not in {1, CHECKPOINT_VERSION}:
         raise CheckpointError(
             "checkpoint version mismatch: "
-            f"{payload.get('version')} != {CHECKPOINT_VERSION}"
+            f"{version} not in {{1,{CHECKPOINT_VERSION}}}"
         )
     if payload.get("image_sha256") != image_sha256:
         raise CheckpointError("checkpoint linked-image fingerprint mismatch")
     if payload.get("stack_top") != vm.stack_top:
         raise CheckpointError("checkpoint stack layout mismatch")
 
-    vm.memory.bytes = dict(payload["memory"])
+    if version == 1:
+        # Backward compatibility with the first full-memory checkpoint format.
+        vm.memory.bytes = dict(payload["memory"])
+    else:
+        vm.memory.bytes = dict(vm.program.initial_memory.bytes)
+        vm.memory.bytes.update(payload["memory_delta"])
     vm.sp = payload["sp"]
     vm.current_function = payload["current_function"]
     vm.current_block = payload["current_block"]
