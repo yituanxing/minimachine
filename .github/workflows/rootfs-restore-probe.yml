@@ -1,0 +1,70 @@
+name: Linux MiniMachine Rootfs Restore Probe
+
+on:
+  push:
+    branches: [work/checkpoint-after-kallsyms]
+    paths:
+      - .github/workflows/rootfs-restore-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download prepare_namespace checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33261446210
+          github-token: ${{ github.token }}
+          name: minimachine-blake2s-fast-33261446210
+          path: checkpoint-source
+
+      - name: Download old P3 cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33249488447
+          github-token: ${{ github.token }}
+          name: minimachine-double-hot-33249488447
+          path: p3-cache-source
+
+      - name: Download old linked image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33245921667
+          github-token: ${{ github.token }}
+          name: minimachine-linux-boot-33245921667
+          path: replay-source
+
+      - name: Prepare inputs
+        run: |
+          cp "$(find checkpoint-source -name 'blake2s-fast-next.chk.gz' -print -quit)" replay-source/llvm/hot-prepare.chk.gz
+          cp "$(find p3-cache-source -name 'linux-p3-cache.pkl.gz' -print -quit)" replay-source/llvm/linux-p3-cache.pkl.gz
+
+      - name: Probe restored rootfs
+        run: |
+          set +e
+          set -o pipefail
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/hot-prepare.chk.gz             --probe-rootfs-after-checkpoint             --checkpoint-out replay-source/llvm/rootfs-probe.chk.gz             --checkpoint-at-limit             --checkpoint-on-error             --max-steps 1             --progress-every 0             2>&1 | tee replay-source/llvm/rootfs-probe.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "ROOTFS_PROBE_STATUS $status"
+          grep -E 'BOOT_EXEC_(ROOTFS_PROBE|CHECKPOINT_RESTORED|BLOCKED)' replay-source/llvm/rootfs-probe.log || true
+
+      - name: Upload probe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-rootfs-probe-${{ github.run_id }}
+          path: replay-source/llvm/rootfs-probe.log
+          if-no-files-found: ignore
+          retention-days: 7
