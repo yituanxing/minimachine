@@ -15,6 +15,7 @@ MM_V_IMM = 1
 MM_V_SLOT = 2
 MM_V_SP = 3
 MM_V_MEM = 4
+MM_V_INVALID = 5
 
 MM_EXT_NONE = 0
 MM_EXT_ZEXT = 1
@@ -251,19 +252,14 @@ class NativeVM(VM):
                 return MM_V_SP, 0
             raise VMError(f"unsupported native special value: {value}")
         if isinstance(value, muir.Symbol):
-            try:
-                return MM_V_IMM, program.symbol_addresses[value.name]
-            except KeyError as exc:
-                raise VMError(
-                    f"unresolved native symbol: {value.name}"
-                ) from exc
+            address = program.symbol_addresses.get(value.name)
+            if address is None:
+                return MM_V_INVALID, 0
+            return MM_V_IMM, address
         if isinstance(value, muir.Reloc):
-            try:
-                base = program.symbol_addresses[value.symbol]
-            except KeyError as exc:
-                raise VMError(
-                    f"unresolved native reloc: {value.symbol}"
-                ) from exc
+            base = program.symbol_addresses.get(value.symbol)
+            if base is None:
+                return MM_V_INVALID, 0
             return MM_V_IMM, (base + value.addend) & MASK64
         if isinstance(value, muir.BlockAddr):
             try:
@@ -311,14 +307,13 @@ class NativeVM(VM):
             ]
             return out
         if target.is_external():
-            try:
-                out.kind = MM_T_CODE
-                out.value = host_by_symbol[target.symbol]
+            code = host_by_symbol.get(target.symbol)
+            if code is None:
+                out.kind = 255
                 return out
-            except KeyError as exc:
-                raise VMError(
-                    f"unresolved native external branch: {target.symbol}"
-                ) from exc
+            out.kind = MM_T_CODE
+            out.value = code
+            return out
         if target.slot is not None:
             out.kind = MM_T_SLOT
             out.value = linked.slot_offsets[target.slot.name]
