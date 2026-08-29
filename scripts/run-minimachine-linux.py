@@ -82,6 +82,15 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--skip-prepare-namespace-after-inject",
+        action="store_true",
+        help=(
+            "with --inject-init at a prepare_namespace entry checkpoint, "
+            "restore ramdisk_execute_command and resume its caller as if "
+            "/init had existed at the preceding init_eaccess check"
+        ),
+    )
+    p.add_argument(
         "--checkpoint-out",
         type=Path,
         help="write a resumable VM checkpoint during replay",
@@ -687,6 +696,38 @@ def _call_linux_function_preserving_control(
         ) = saved
 
 
+def skip_prepare_namespace_after_hot_init(vm) -> None:
+    if vm.current_function != "prepare_namespace" or vm.ip != 0:
+        raise VMError(
+            "prepare_namespace hot skip requires an entry checkpoint; "
+            f"got function={vm.current_function} block={vm.current_block} ip={vm.ip}"
+        )
+
+    command = vm.program.symbol_addresses.get("ramdisk_execute_command")
+    if command is None:
+        raise VMError("ramdisk_execute_command symbol is missing")
+    initial_command = vm.program.initial_memory.read(command, 64)
+    if not initial_command:
+        raise VMError("ramdisk_execute_command has no initial /init pointer")
+    vm.memory.write(command, 64, initial_command)
+
+    result_count = vm.memory.read(vm.sp + RESULT_COUNT, 64)
+    if result_count != 0:
+        raise VMError(
+            f"prepare_namespace caller expects {result_count} results"
+        )
+    caller_sp = vm.memory.read(vm.sp + CALLER_SP, 64)
+    ret_pc = vm.memory.read(vm.sp + RET_PC, 64)
+    vm.sp = caller_sp
+    vm.halted = False
+    vm._set_code(ret_pc)
+    print(
+        "BOOT_EXEC_PREPARE_NAMESPACE_SKIPPED "
+        f"ramdisk_execute_command=0x{initial_command:x} ret_pc=0x{ret_pc:x}",
+        flush=True,
+    )
+
+
 def inject_live_root_init(vm, path: Path) -> None:
     try:
         data = path.read_bytes()
@@ -971,9 +1012,17 @@ def main() -> int:
         if args.inject_init is not None:
             try:
                 inject_live_root_init(vm, args.inject_init)
+                if args.skip_prepare_namespace_after_inject:
+                    skip_prepare_namespace_after_hot_init(vm)
             except VMError as exc:
                 print(f"BOOT_EXEC_BLOCKED stage=rootfs-inject error={exc}")
                 return 1
+        elif args.skip_prepare_namespace_after_inject:
+            print(
+                "BOOT_EXEC_BLOCKED stage=rootfs-inject "
+                "error=--skip-prepare-namespace-after-inject requires --inject-init"
+            )
+            return 1
         print(
             "BOOT_EXEC_CHECKPOINT_RESTORED "
             f"path={args.checkpoint_in} steps={vm.steps} "
