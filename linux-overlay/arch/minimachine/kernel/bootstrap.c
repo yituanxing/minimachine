@@ -200,6 +200,27 @@ static unsigned long minimachine_context_switch(struct task_struct *prev,
 	return last;
 }
 
+static void __noreturn minimachine_enter_user(struct task_struct *task,
+					      struct pt_regs *regs)
+{
+	/*
+	 * Service 3 transfers from the kernel continuation into the bFLT-loaded
+	 * MiniMachine/P3 userspace image.  pc/sp are the values installed by
+	 * start_thread(); the host keeps task/regs so later user syscalls can
+	 * re-enter Linux with the right process context.
+	 */
+	asm volatile("ecall"
+		     :
+		     : "r"(3UL),
+		       "r"((unsigned long)task),
+		       "r"((unsigned long)regs),
+		       "r"(regs->pc),
+		       "r"(regs->sp)
+		     : "memory");
+
+	panic("MiniMachine: user transfer unexpectedly returned");
+}
+
 void __noreturn minimachine_ret_from_fork(struct task_struct *prev,
 					  unsigned long fn_addr,
 					  unsigned long arg)
@@ -212,6 +233,22 @@ void __noreturn minimachine_ret_from_fork(struct task_struct *prev,
 		panic("MiniMachine: first-run task has no kernel entry");
 
 	ret = fn((void *)arg);
+
+	/*
+	 * kernel_init() is a kernel thread until kernel_execve() succeeds.  A
+	 * successful bFLT exec rewrites pt_regs through start_thread(); at that
+	 * point the normal return-from-fork path must leave kernel mode rather
+	 * than treating PID 1 as a finished kernel thread.
+	 */
+	{
+		struct pt_regs *regs = task_pt_regs(current);
+
+		if (user_mode(regs)) {
+			regs->result = 0;
+			minimachine_enter_user(current, regs);
+		}
+	}
+
 	do_exit(ret);
 }
 
