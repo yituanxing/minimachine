@@ -15,6 +15,7 @@ from src.minimachine import muir
 from src.minimachine.abi import CALLER_SP, RESULT_COUNT, RESULT_PTR, RET_PC, expand_function
 from src.minimachine.image import ImageError, install_module_image, parse_module_image
 from src.minimachine.legalize import legalize_module
+from src.minimachine.layout import DataLayout
 from src.minimachine.linker import LinkerContract
 from src.minimachine.lower_p3 import lower_function
 from src.minimachine.runtime import collect_runtime_surface, install_runtime
@@ -262,6 +263,59 @@ def dump_current_call_frame(vm) -> None:
         )
 
 
+def dump_scheduler_indirect_call(vm) -> None:
+    if vm.current_function != "dequeue_task":
+        return
+
+    frame_size = vm.memory.read(vm.sp + 24, 64)
+    argc = vm.memory.read(vm.sp + 56, 64)
+    if argc < 2:
+        return
+
+    arg_base = vm.sp + frame_size
+    rq = vm.memory.read(arg_base, 64)
+    task = vm.memory.read(arg_base + 8, 64)
+    flags = vm.memory.read(arg_base + 16, 64) if argc >= 3 else 0
+
+    sched_off = getattr(vm, "linux_task_sched_class_offset", None)
+    print(
+        "BOOT_EXEC_SCHED_CALL "
+        f"rq=0x{rq:x} task=0x{task:x} flags=0x{flags:x} "
+        f"sched_class_offset={sched_off}",
+        flush=True,
+    )
+    if sched_off is None or not task:
+        return
+
+    sched_class = vm.memory.read(task + sched_off, 64)
+    dequeue_desc = vm.memory.read(sched_class + 8, 64) if sched_class else 0
+    entry = vm.memory.read(dequeue_desc, 64) if dequeue_desc else 0
+    desc_frame = vm.memory.read(dequeue_desc + 8, 64) if dequeue_desc else 0
+    print(
+        "BOOT_EXEC_SCHED_DESCRIPTOR "
+        f"sched_class=0x{sched_class:x} dequeue_desc=0x{dequeue_desc:x} "
+        f"entry=0x{entry:x} frame_size=0x{desc_frame:x}",
+        flush=True,
+    )
+
+    for symbol in (
+        "dequeue_task_idle",
+        "dequeue_task_fair",
+        "dequeue_task_rt",
+        "dequeue_task_dl",
+    ):
+        desc = vm.program.symbol_addresses.get(symbol)
+        if desc is None:
+            continue
+        print(
+            "BOOT_EXEC_EXPECTED_DESCRIPTOR "
+            f"symbol={symbol} address=0x{desc:x} "
+            f"entry=0x{vm.memory.read(desc, 64):x} "
+            f"frame_size=0x{vm.memory.read(desc + 8, 64):x}",
+            flush=True,
+        )
+
+
 def dump_linux_memory_state(vm) -> None:
     def word(name: str, index: int = 0):
         address = vm.program.symbol_addresses.get(name)
@@ -498,6 +552,10 @@ def main() -> int:
     vm = program.new_vm()
     vm.ecall_handler = linux_ecall
     vm.linux_task_contexts = {}
+    layout = DataLayout.from_module(llvm_text)
+    task_info = layout.info("%struct.task_struct")
+    if task_info.field_offsets is not None and len(task_info.field_offsets) > 15:
+        vm.linux_task_sched_class_offset = task_info.field_offsets[15]
 
     original_step = vm.step
     next_progress = args.progress_every
@@ -565,6 +623,7 @@ def main() -> int:
             print(f"BOOT_EXEC_NEXT {inst!r}", flush=True)
             dump_instruction_slots(vm, inst)
         dump_current_call_frame(vm)
+        dump_scheduler_indirect_call(vm)
         dump_linux_memory_state(vm)
         probe_linux_memory_helpers(vm)
         return 1
