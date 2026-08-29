@@ -912,7 +912,14 @@ def main() -> int:
 
     try:
         if resumed_from_checkpoint:
-            vm.run(max_steps=args.max_steps)
+            resume_limit = vm.steps + args.max_steps
+            print(
+                "BOOT_EXEC_CHECKPOINT_BUDGET "
+                f"saved_steps={vm.steps} additional_steps={args.max_steps} "
+                f"absolute_limit={resume_limit}",
+                flush=True,
+            )
+            vm.run(max_steps=resume_limit)
         else:
             vm.run_function(
                 args.entry,
