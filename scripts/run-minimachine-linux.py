@@ -286,6 +286,34 @@ def dump_current_call_frame(vm) -> None:
         )
 
 
+def dump_call_chain(vm, max_depth: int = 32) -> None:
+    sp = vm.sp
+    function = vm.current_function or "<none>"
+    block = vm.current_block or "<none>"
+    for depth in range(max_depth):
+        caller_sp = vm.memory.read(sp + CALLER_SP, 64)
+        ret_pc = vm.memory.read(sp + RET_PC, 64)
+        print(
+            "BOOT_EXEC_CALL_CHAIN "
+            f"depth={depth} sp=0x{sp:x} function={function} block={block} "
+            f"caller_sp=0x{caller_sp:x} ret_pc=0x{ret_pc:x}",
+            flush=True,
+        )
+        if (
+            not caller_sp
+            or caller_sp == sp
+            or ret_pc == vm.program.halt_code
+        ):
+            break
+        target = vm.program.code_block.get(ret_pc)
+        if target is None:
+            function = "<host-or-unknown>"
+            block = "<unknown>"
+        else:
+            function, block = target
+        sp = caller_sp
+
+
 def dump_scheduler_indirect_call(vm) -> None:
     if vm.current_function != "dequeue_task":
         return
@@ -814,6 +842,7 @@ def main() -> int:
             print(f"BOOT_EXEC_NEXT {inst!r}", flush=True)
             dump_instruction_slots(vm, inst)
         dump_current_call_frame(vm)
+        dump_call_chain(vm)
         dump_scheduler_indirect_call(vm)
         dump_linux_memory_state(vm)
         probe_linux_memory_helpers(vm)
