@@ -23,6 +23,12 @@ from src.minimachine.runtime import (
     collect_runtime_surface,
     install_runtime,
 )
+from src.minimachine.user_image import (
+    USER_PAYLOAD_HEADER_SIZE,
+    USER_PAYLOAD_MAGIC,
+    USER_PAYLOAD_VERSION,
+    unpack_user_payload,
+)
 from src.minimachine.verify import verify_muir, verify_p3
 from src.minimachine.vm import HOST_CONTROL_TRANSFER, Program, VMError
 
@@ -79,10 +85,38 @@ def register_traps(program: Program, reasons: set[str]) -> None:
             program.register_service(symbol, callback(reason))
 
 
+def load_linux_user_function(vm, pc: int):
+    header = bytes(
+        vm.memory.read(pc + i, 8)
+        for i in range(USER_PAYLOAD_HEADER_SIZE)
+    )
+    if header[:4] != USER_PAYLOAD_MAGIC:
+        raise VMError(
+            f"MiniMachine user entry 0x{pc:x} lacks MMP3 payload magic"
+        )
+    version = int.from_bytes(header[4:8], "big")
+    size = int.from_bytes(header[8:12], "big")
+    if version != USER_PAYLOAD_VERSION:
+        raise VMError(f"unsupported MiniMachine user payload version: {version}")
+    if size > 4 * 1024 * 1024:
+        raise VMError(f"MiniMachine user payload too large: {size}")
+    body = bytes(
+        vm.memory.read(pc + USER_PAYLOAD_HEADER_SIZE + i, 8)
+        for i in range(size)
+    )
+    try:
+        function = unpack_user_payload(header + body)
+    except ValueError as exc:
+        raise VMError(f"invalid MiniMachine user payload: {exc}") from exc
+    verify_p3(function)
+    return function
+
+
 def linux_ecall(vm, args: tuple[int, ...]):
     # Boot-first host ABI:
     #   service 1: write(ptr, len) to the host boot console.
     #   service 2: context_switch(prev,next,fresh_sp,start_fn,start_arg)
+    #   service 3: enter_user(task,regs,pc,sp) after successful kernel_execve
     if not args:
         raise VMError("Linux ecall requires a service number")
 
@@ -168,6 +202,34 @@ def linux_ecall(vm, args: tuple[int, ...]):
             "minimachine_ret_from_fork",
             (prev, start_fn, start_arg),
             stack_top=shadow_top,
+            result_count=0,
+        )
+        return HOST_CONTROL_TRANSFER
+
+    if service == 3:
+        if len(args) != 5:
+            raise VMError(
+                "Linux user-transfer ecall expects service,task,regs,pc,sp"
+            )
+        _, task, regs, pc, user_sp = args
+        function = load_linux_user_function(vm, pc)
+        if function.name in vm.program.functions:
+            raise VMError(f"duplicate runtime user function: {function.name}")
+        vm.install_function(function)
+        vm.linux_user_task = task
+        vm.linux_user_regs = regs
+        vm.linux_user_pc = pc
+        vm.linux_user_sp = user_sp
+        print(
+            "BOOT_EXEC_USER_ENTER "
+            f"steps={vm.steps} task=0x{task:x} regs=0x{regs:x} "
+            f"pc=0x{pc:x} sp=0x{user_sp:x} function={function.name}",
+            flush=True,
+        )
+        vm.enter_function(
+            function.name,
+            (user_sp,),
+            stack_top=user_sp,
             result_count=0,
         )
         return HOST_CONTROL_TRANSFER
