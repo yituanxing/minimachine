@@ -16,6 +16,7 @@ from src.minimachine.abi import CALLER_SP, RESULT_COUNT, RESULT_PTR, RET_PC, exp
 from src.minimachine.image import ImageError, install_module_image, parse_module_image
 from src.minimachine.legalize import legalize_module
 from src.minimachine.layout import DataLayout
+from src.minimachine.kallsyms import install_p3_kallsyms
 from src.minimachine.linker import LinkerContract
 from src.minimachine.lower_p3 import lower_function
 from src.minimachine.runtime import (
@@ -41,6 +42,11 @@ def parse_args():
     p.add_argument("--entry", default="start_kernel")
     p.add_argument("--max-steps", type=int, default=10_000_000)
     p.add_argument("--progress-every", type=int, default=250_000)
+    p.add_argument(
+        "--probe-kallsyms",
+        metavar="SYMBOL",
+        help="probe Linux kallsyms against one P3 function and exit",
+    )
     return p.parse_args()
 
 
@@ -554,6 +560,26 @@ def main() -> int:
         )
         return 1
 
+    # Native Linux adds kallsyms during final ELF linking. P3 has its own
+    # final code-address domain, so synthesize the same generated globals
+    # before installing the module image. This ensures semantic _end includes
+    # the tables and Linux reserves their storage during setup_arch.
+    try:
+        installed_kallsyms = install_p3_kallsyms(
+            program,
+            external_data=image.external_data,
+        )
+    except VMError as exc:
+        print(f"BOOT_EXEC_BLOCKED stage=kallsyms error={exc}")
+        return 1
+    if installed_kallsyms:
+        print(
+            "BOOT_EXEC_KALLSYMS "
+            f"generated={len(installed_kallsyms)} "
+            f"symbols={program.initial_memory.read(program.symbol_addresses['kallsyms_num_syms'], 32)}",
+            flush=True,
+        )
+
     try:
         install_module_image(
             program,
@@ -589,6 +615,52 @@ def main() -> int:
     task_info = layout.info("%struct.task_struct")
     if task_info.field_offsets is not None and len(task_info.field_offsets) > 15:
         vm.linux_task_sched_class_offset = task_info.field_offsets[15]
+
+    if args.probe_kallsyms is not None:
+        symbol = args.probe_kallsyms
+        linked = program.functions.get(symbol)
+        if linked is None or not linked.function.blocks:
+            print(f"BOOT_EXEC_BLOCKED stage=kallsyms-probe missing={symbol}")
+            return 1
+        pc = program.block_code[(symbol, linked.function.blocks[0].label)]
+        size_ptr = vm.alloc_bytes(8, align=8)
+        offset_ptr = vm.alloc_bytes(8, align=8)
+        name_ptr = vm.alloc_bytes(512, align=8)
+        try:
+            found = vm.run_function(
+                "kallsyms_lookup_size_offset",
+                (pc, size_ptr, offset_ptr),
+                result_count=1,
+                max_steps=args.max_steps,
+            )
+            named = vm.run_function(
+                "lookup_symbol_name",
+                (pc, name_ptr),
+                result_count=1,
+                max_steps=args.max_steps,
+            )
+        except VMError as exc:
+            print(f"BOOT_EXEC_BLOCKED stage=kallsyms-probe error={exc}")
+            return 1
+        raw_name = bytearray()
+        for i in range(512):
+            byte = vm.memory.read(name_ptr + i, 8)
+            if byte == 0:
+                break
+            raw_name.append(byte)
+        decoded = raw_name.decode("utf-8", errors="replace")
+        size = vm.memory.read(size_ptr, 64)
+        offset = vm.memory.read(offset_ptr, 64)
+        print(
+            "BOOT_EXEC_KALLSYMS_PROBE "
+            f"symbol={symbol} pc=0x{pc:x} found={found[0]} "
+            f"name_rc={named[0]} name={decoded} size={size} offset={offset}",
+            flush=True,
+        )
+        if found[0] != 1 or named[0] != 0 or decoded != symbol:
+            print("BOOT_EXEC_BLOCKED stage=kallsyms-probe mismatch=1")
+            return 1
+        return 0
 
     last_milestone_function = None
     milestone_functions = {
