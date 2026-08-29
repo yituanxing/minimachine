@@ -71,7 +71,7 @@ jobs:
           cp "$checkpoint" replay-source/llvm/hot-472m.chk.gz
           cp "$cache" replay-source/llvm/linux-p3-cache.pkl.gz
 
-      - name: Continue with ror32 fast path
+      - name: Continue with ror32 fast path and module-version boundary
         run: |
           set +e
           set -o pipefail
