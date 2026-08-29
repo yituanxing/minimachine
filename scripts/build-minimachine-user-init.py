@@ -9,31 +9,62 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.minimachine import muir, p3
+from src.minimachine import muir
+from src.minimachine.abi import expand_function
+from src.minimachine.lower_p3 import lower_function
 from src.minimachine.user_image import build_bflt
 
 
-def build_init_function() -> p3.Function:
-    target = muir.Target(symbol="__mm_sys_user_milestone")
-    return p3.Function(
-        "__mm_user_init",
-        [
-            p3.Block(
-                "entry",
-                [
-                    p3.Br(
-                        muir.Width.I8,
-                        muir.Cond.EQ,
-                        muir.Imm(0),
-                        muir.Imm(0),
-                        target,
-                        target,
-                    )
-                ],
-            )
-        ],
-        set(),
+def build_init_function():
+    message = b"MiniMachine userspace write() reached Linux ttyMM0\\n"
+    slots = {"user_sp", "buf", "written"}
+    instructions = [
+        muir.Sub(
+            muir.Width.I64,
+            muir.Slot("buf"),
+            muir.Slot("user_sp"),
+            muir.Imm(256),
+        )
+    ]
+    instructions.extend(
+        muir.Mov(
+            muir.Width.I8,
+            muir.Mem(muir.Address(muir.Slot("buf"), index), muir.Width.I8),
+            muir.Imm(byte),
+        )
+        for index, byte in enumerate(message)
     )
+    instructions.extend(
+        [
+            muir.Sys(
+                "linux_syscall",
+                (
+                    muir.Imm(64),  # asm-generic __NR_write
+                    muir.Imm(1),   # stdout
+                    muir.Slot("buf"),
+                    muir.Imm(len(message)),
+                    muir.Imm(0),
+                    muir.Imm(0),
+                    muir.Imm(0),
+                ),
+                muir.Slot("written"),
+            ),
+            muir.Sys(
+                "user_milestone",
+                (muir.Slot("written"),),
+                None,
+            ),
+            muir.Ret(muir.Imm(0)),
+        ]
+    )
+    source = muir.Function(
+        "__mm_user_init",
+        [muir.Block("entry", instructions)],
+        slots,
+        ("user_sp",),
+    )
+    expanded, _stats = expand_function(source)
+    return lower_function(expanded)
 
 
 def c_bytes(data: bytes) -> str:
