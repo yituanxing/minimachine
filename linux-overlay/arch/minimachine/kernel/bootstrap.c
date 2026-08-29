@@ -20,6 +20,7 @@
 #include <linux/sched/task.h>
 #include <linux/sched/task_stack.h>
 #include <linux/seq_file.h>
+#include <linux/screen_info.h>
 #include <linux/string.h>
 
 #include <asm/page.h>
@@ -34,6 +35,9 @@ extern char _end[];
 unsigned long memory_start;
 unsigned long memory_end = MINIMACHINE_BOOT_RAM_SIZE;
 void *empty_zero_page;
+
+/* Generic console/video code expects every architecture to publish this. */
+struct screen_info screen_info;
 
 /*
  * asm-generic/vmlinux.lds.h defines init_stack at the beginning of the
