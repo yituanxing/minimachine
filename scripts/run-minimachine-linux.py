@@ -16,6 +16,7 @@ from src.minimachine.abi import CALLER_SP, RESULT_COUNT, RESULT_PTR, RET_PC, exp
 from src.minimachine.image import ImageError, install_module_image, parse_module_image
 from src.minimachine.legalize import legalize_module
 from src.minimachine.layout import DataLayout
+from src.minimachine.kallsyms import install_p3_kallsyms
 from src.minimachine.linker import LinkerContract
 from src.minimachine.lower_p3 import lower_function
 from src.minimachine.runtime import (
@@ -564,6 +565,22 @@ def main() -> int:
     except (ImageError, VMError, ValueError) as exc:
         print(f"BOOT_EXEC_BLOCKED stage=image error={exc}")
         return 1
+
+    try:
+        installed_kallsyms = install_p3_kallsyms(
+            program,
+            external_data=image.external_data,
+        )
+    except VMError as exc:
+        print(f"BOOT_EXEC_BLOCKED stage=kallsyms error={exc}")
+        return 1
+    if installed_kallsyms:
+        print(
+            "BOOT_EXEC_KALLSYMS "
+            f"generated={len(installed_kallsyms)} "
+            f"symbols={program.initial_memory.read(program.symbol_addresses['kallsyms_num_syms'], 32)}",
+            flush=True,
+        )
 
     if args.entry not in program.functions:
         print(f"BOOT_EXEC_BLOCKED stage=entry missing={args.entry}")
