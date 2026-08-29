@@ -82,6 +82,14 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--inject-init-vfs",
+        type=Path,
+        help=(
+            "after restoring a checkpoint, create a regular /init through "
+            "kern_path_create/vfs_create and write the supplied image"
+        ),
+    )
+    p.add_argument(
         "--inject-initramfs-cpio",
         type=Path,
         help=(
@@ -869,6 +877,167 @@ def inject_live_root_init(vm, path: Path) -> None:
 
 
 
+def inject_live_root_init_vfs(vm, path: Path) -> None:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise VMError(f"cannot read VFS-injected /init image: {exc}") from exc
+    if not data:
+        raise VMError("VFS-injected /init image is empty")
+
+    required = (
+        "kern_path_create",
+        "d_inode",
+        "mnt_idmap",
+        "vfs_create",
+        "done_path_create",
+        "filp_open",
+        "kernel_write",
+        "fput",
+        "init_chmod",
+        "init_eaccess",
+    )
+    missing = [name for name in required if name not in vm.program.functions]
+    if missing:
+        raise VMError(
+            "VFS /init injection helpers missing: " + ",".join(missing)
+        )
+
+    guest_path = b"/init\0"
+    path_ptr = vm.alloc_bytes(len(guest_path), align=8)
+    for i, byte in enumerate(guest_path):
+        vm.memory.write(path_ptr + i, 8, byte)
+
+    data_ptr = vm.alloc_bytes(len(data), align=8)
+    for i, byte in enumerate(data):
+        vm.memory.write(data_ptr + i, 8, byte)
+
+    # struct path is { struct vfsmount *mnt; struct dentry *dentry; }.
+    create_path = vm.alloc_bytes(16, align=8)
+    vm.memory.write(create_path + 0, 64, 0)
+    vm.memory.write(create_path + 8, 64, 0)
+
+    dentry, = _call_linux_function_preserving_control(
+        vm,
+        "kern_path_create",
+        ((1 << 64) - 100, path_ptr, create_path, 0),
+        result_count=1,
+    )
+    if dentry >= (1 << 64) - 4095:
+        signed = dentry - (1 << 64)
+        raise VMError(f"kern_path_create(/init) failed: {signed}")
+
+    create_rc = None
+    try:
+        mnt = vm.memory.read(create_path + 0, 64)
+        parent_dentry = vm.memory.read(create_path + 8, 64)
+        if not mnt or not parent_dentry:
+            raise VMError(
+                "kern_path_create(/init) returned incomplete parent path: "
+                f"mnt=0x{mnt:x} dentry=0x{parent_dentry:x}"
+            )
+
+        parent_inode, = _call_linux_function_preserving_control(
+            vm,
+            "d_inode",
+            (parent_dentry,),
+            result_count=1,
+        )
+        idmap, = _call_linux_function_preserving_control(
+            vm,
+            "mnt_idmap",
+            (mnt,),
+            result_count=1,
+        )
+        if not parent_inode or not idmap:
+            raise VMError(
+                "cannot resolve VFS create parent: "
+                f"inode=0x{parent_inode:x} idmap=0x{idmap:x}"
+            )
+
+        create_rc, = _call_linux_function_preserving_control(
+            vm,
+            "vfs_create",
+            (idmap, parent_inode, dentry, 0o100755, 1),
+            result_count=1,
+            max_extra_steps=8_000_000,
+        )
+        if create_rc != 0:
+            signed = (
+                create_rc - (1 << 64)
+                if create_rc & (1 << 63)
+                else create_rc
+            )
+            raise VMError(f"vfs_create(/init) failed: {signed}")
+    finally:
+        _call_linux_function_preserving_control(
+            vm,
+            "done_path_create",
+            (create_path, dentry),
+            result_count=0,
+        )
+
+    # The dentry now exists. Open without O_CREAT and write the executable.
+    file_ptr, = _call_linux_function_preserving_control(
+        vm,
+        "filp_open",
+        (path_ptr, 0x1 | 0x200, 0),
+        result_count=1,
+    )
+    if file_ptr >= (1 << 64) - 4095:
+        signed = file_ptr - (1 << 64)
+        raise VMError(f"filp_open(existing /init) failed: {signed}")
+
+    pos_ptr = vm.alloc_bytes(8, align=8)
+    vm.memory.write(pos_ptr, 64, 0)
+    try:
+        written, = _call_linux_function_preserving_control(
+            vm,
+            "kernel_write",
+            (file_ptr, data_ptr, len(data), pos_ptr),
+            result_count=1,
+            max_extra_steps=8_000_000,
+        )
+        if written != len(data):
+            signed = written - (1 << 64) if written & (1 << 63) else written
+            raise VMError(
+                f"kernel_write(/init) wrote {signed}, expected {len(data)}"
+            )
+    finally:
+        _call_linux_function_preserving_control(
+            vm,
+            "fput",
+            (file_ptr,),
+            result_count=0,
+        )
+
+    chmod_rc, = _call_linux_function_preserving_control(
+        vm,
+        "init_chmod",
+        (path_ptr, 0o755),
+        result_count=1,
+    )
+    if chmod_rc != 0:
+        signed = chmod_rc - (1 << 64) if chmod_rc & (1 << 63) else chmod_rc
+        raise VMError(f"init_chmod(/init) failed: {signed}")
+
+    access, = _call_linux_function_preserving_control(
+        vm,
+        "init_eaccess",
+        (path_ptr,),
+        result_count=1,
+    )
+    if access != 0:
+        signed = access - (1 << 64) if access & (1 << 63) else access
+        raise VMError(f"init_eaccess(/init) after VFS create failed: {signed}")
+
+    print(
+        "BOOT_EXEC_ROOTFS_VFS_CREATED "
+        f"path=/init bytes={len(data)} mode=0755",
+        flush=True,
+    )
+
+
 def inject_live_root_initramfs(vm, path: Path) -> None:
     try:
         data = path.read_bytes()
@@ -1140,13 +1309,29 @@ def main() -> int:
             except VMError as exc:
                 print(f"BOOT_EXEC_BLOCKED stage=rootfs-probe error={exc}")
                 return 1
-        if args.inject_init is not None and args.inject_initramfs_cpio is not None:
+        injection_count = sum(
+            value is not None
+            for value in (
+                args.inject_init,
+                args.inject_init_vfs,
+                args.inject_initramfs_cpio,
+            )
+        )
+        if injection_count > 1:
             print(
                 "BOOT_EXEC_BLOCKED stage=rootfs-inject "
-                "error=choose only one of --inject-init or --inject-initramfs-cpio"
+                "error=choose exactly one hot /init injection source"
             )
             return 1
-        if args.inject_initramfs_cpio is not None:
+        if args.inject_init_vfs is not None:
+            try:
+                inject_live_root_init_vfs(vm, args.inject_init_vfs)
+                if args.skip_prepare_namespace_after_inject:
+                    skip_prepare_namespace_after_hot_init(vm)
+            except VMError as exc:
+                print(f"BOOT_EXEC_BLOCKED stage=rootfs-inject error={exc}")
+                return 1
+        elif args.inject_initramfs_cpio is not None:
             try:
                 inject_live_root_initramfs(vm, args.inject_initramfs_cpio)
                 if args.skip_prepare_namespace_after_inject:
