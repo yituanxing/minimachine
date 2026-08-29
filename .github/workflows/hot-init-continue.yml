@@ -1,0 +1,90 @@
+name: Linux MiniMachine Hot Init Continue
+
+on:
+  push:
+    branches: [work/checkpoint-after-kallsyms]
+    paths:
+      - .github/workflows/hot-init-continue.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  hot-init:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download latest prepare_namespace checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33261446210
+          github-token: ${{ github.token }}
+          name: minimachine-blake2s-fast-33261446210
+          path: checkpoint-source
+
+      - name: Download matching P3 cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33249488447
+          github-token: ${{ github.token }}
+          name: minimachine-double-hot-33249488447
+          path: p3-cache-source
+
+      - name: Download matching linked Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33245921667
+          github-token: ${{ github.token }}
+          name: minimachine-linux-boot-33245921667
+          path: replay-source
+
+      - name: Build latest MiniMachine init payload
+        run: |
+          python3 scripts/build-minimachine-initramfs.py /tmp/minimachine-initramfs.cpio --init-output /tmp/minimachine-init.bflt
+          ls -l /tmp/minimachine-init.bflt
+
+      - name: Prepare hot replay inputs
+        run: |
+          cp "$(find checkpoint-source -name 'blake2s-fast-next.chk.gz' -print -quit)" replay-source/llvm/hot-prepare.chk.gz
+          cp "$(find p3-cache-source -name 'linux-p3-cache.pkl.gz' -print -quit)" replay-source/llvm/linux-p3-cache.pkl.gz
+
+      - name: Continue hot checkpoint through init
+        run: |
+          set +e
+          set -o pipefail
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz \
+            --checkpoint-in replay-source/llvm/hot-prepare.chk.gz \
+            --probe-rootfs-after-checkpoint \
+            --inject-init /tmp/minimachine-init.bflt \
+            --skip-prepare-namespace-after-inject \
+            --checkpoint-out replay-source/llvm/hot-init-next.chk.gz \
+            --checkpoint-at-limit \
+            --checkpoint-on-error \
+            --max-steps 25000000 \
+            --progress-every 500000 \
+            2>&1 | tee replay-source/llvm/hot-init-continue.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "HOT_INIT_STATUS $status"
+          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|ROOTFS_PROBE|INJECT|MILESTONE|USER_HANDOFF|BLOCKED|HALTED|CHECKPOINT_SAVED)' replay-source/llvm/hot-init-continue.log || true
+          exit "$status"
+
+      - name: Upload hot-init result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-hot-init-${{ github.run_id }}
+          path: |
+            replay-source/llvm/hot-init-continue.log
+            replay-source/llvm/hot-init-next.chk.gz
+          if-no-files-found: ignore
+          retention-days: 7

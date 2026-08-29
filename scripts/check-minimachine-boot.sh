@@ -24,6 +24,7 @@ need curl
 need sha256sum
 need tar
 need make
+need python3
 need "clang-$LLVM_MAJOR"
 need "ld.lld-$LLVM_MAJOR"
 need "llvm-link-$LLVM_MAJOR"
@@ -49,6 +50,11 @@ tar -xJf "$archive" -C "$source_root"
 
 mkdir -p "$src/arch/minimachine"
 cp -a "$root/linux-overlay/arch/minimachine/." "$src/arch/minimachine/"
+
+initramfs="$out/minimachine-initramfs.cpio"
+python3 "$root/scripts/build-minimachine-initramfs.py" "$initramfs"
+test -s "$initramfs"
+printf "BOOT_GATE_INITRAMFS bytes=%s sha256=%s\n" "$(stat -c%s "$initramfs")" "$(sha256sum "$initramfs" | awk '{print $1}')"
 
 common_make=(
     make -C "$src"
@@ -76,7 +82,7 @@ printf 'BOOT_GATE_DEFAULT_CONFIG target=%s enabled=%s\n' "$KCONFIG_TARGET" "$(gr
 printf 'BOOT_GATE config_sha256=%s\n' "$(sha256sum "$config" | awk '{print $1}')"
 printf 'BOOT_GATE build target=vmlinux\n'
 set +e
-"${common_make[@]}" KCFLAGS="-save-temps=obj" -j"$(nproc)" vmlinux >"$log" 2>&1
+"${common_make[@]}" CONFIG_INITRAMFS_SOURCE="$initramfs" KCFLAGS="-save-temps=obj" -j"$(nproc)" vmlinux >"$log" 2>&1
 status=$?
 set -e
 

@@ -13,17 +13,30 @@ if str(ROOT) not in sys.path:
 
 from src.minimachine import muir
 from src.minimachine.abi import CALLER_SP, RESULT_COUNT, RESULT_PTR, RET_PC, expand_function
+from src.minimachine.checkpoint import (
+    CheckpointError,
+    image_fingerprint,
+    load_checkpoint,
+    save_checkpoint,
+)
 from src.minimachine.image import ImageError, install_module_image, parse_module_image
 from src.minimachine.legalize import legalize_module
 from src.minimachine.layout import DataLayout
 from src.minimachine.kallsyms import install_p3_kallsyms
 from src.minimachine.linker import LinkerContract
 from src.minimachine.lower_p3 import lower_function
+from src.minimachine.program_cache import (
+    ProgramCache,
+    ProgramCacheError,
+    load_program_cache,
+    save_program_cache,
+)
 from src.minimachine.runtime import (
     accelerate_direct_runtime,
     collect_runtime_surface,
     install_runtime,
 )
+from src.minimachine.user_image import UserImageError, unpack_user_payload
 from src.minimachine.verify import verify_muir, verify_p3
 from src.minimachine.vm import HOST_CONTROL_TRANSFER, Program, VMError
 
@@ -46,6 +59,105 @@ def parse_args():
         "--probe-kallsyms",
         metavar="SYMBOL",
         help="probe Linux kallsyms against one P3 function and exit",
+    )
+    p.add_argument(
+        "--initramfs",
+        type=Path,
+        help=(
+            "raw newc/cpio image backing Linux __initramfs_start in the "
+            "LLVM/P3 execution image"
+        ),
+    )
+    p.add_argument(
+        "--checkpoint-in",
+        type=Path,
+        help="resume VM state from a checkpoint for the exact linked image",
+    )
+    p.add_argument(
+        "--inject-init",
+        type=Path,
+        help=(
+            "after restoring a checkpoint, create /init in the live Linux "
+            "rootfs through filp_open/kernel_write/fput before replay"
+        ),
+    )
+    p.add_argument(
+        "--inject-init-vfs",
+        type=Path,
+        help=(
+            "after restoring a checkpoint, create a regular /init through "
+            "kern_path_create/vfs_create and write the supplied image"
+        ),
+    )
+    p.add_argument(
+        "--inject-initramfs-cpio",
+        type=Path,
+        help=(
+            "after restoring a checkpoint, unpack a newc/cpio archive into "
+            "the live Linux rootfs through Linux unpack_to_rootfs()"
+        ),
+    )
+    p.add_argument(
+        "--probe-rootfs-after-checkpoint",
+        action="store_true",
+        help="probe live Linux rootfs paths and current task after checkpoint restore",
+    )
+    p.add_argument(
+        "--skip-prepare-namespace-after-inject",
+        action="store_true",
+        help=(
+            "with --inject-init at a prepare_namespace entry checkpoint, "
+            "restore ramdisk_execute_command and resume its caller as if "
+            "/init had existed at the preceding init_eaccess check"
+        ),
+    )
+    p.add_argument(
+        "--checkpoint-out",
+        type=Path,
+        help="write a resumable VM checkpoint during replay",
+    )
+    p.add_argument(
+        "--checkpoint-initcall",
+        help="write --checkpoint-out on entry to this Linux initcall",
+    )
+    p.add_argument(
+        "--checkpoint-after-initcall",
+        help="write --checkpoint-out when the initcall after this one begins",
+    )
+    p.add_argument(
+        "--checkpoint-function",
+        help="write --checkpoint-out on an occurrence of this function entry",
+    )
+    p.add_argument(
+        "--checkpoint-function-hit",
+        type=int,
+        default=1,
+        help="1-based occurrence of --checkpoint-function to capture",
+    )
+    p.add_argument(
+        "--stop-after-checkpoint",
+        action="store_true",
+        help="stop replay immediately after writing a checkpoint",
+    )
+    p.add_argument(
+        "--program-cache-in",
+        type=Path,
+        help="load a lowered P3 program cache for the exact linked image",
+    )
+    p.add_argument(
+        "--program-cache-out",
+        type=Path,
+        help="write the lowered P3 program before runtime callbacks are bound",
+    )
+    p.add_argument(
+        "--checkpoint-at-limit",
+        action="store_true",
+        help="write --checkpoint-out when execution stops at the step limit",
+    )
+    p.add_argument(
+        "--checkpoint-on-error",
+        action="store_true",
+        help="write --checkpoint-out before reporting any VM execution error",
     )
     return p.parse_args()
 
@@ -89,6 +201,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
     # Boot-first host ABI:
     #   service 1: write(ptr, len) to the host boot console.
     #   service 2: context_switch(prev,next,fresh_sp,start_fn,start_arg)
+    #   service 3: enter_userspace(pt_regs) after a successful Linux exec.
     if not args:
         raise VMError("Linux ecall requires a service number")
 
@@ -174,6 +287,62 @@ def linux_ecall(vm, args: tuple[int, ...]):
             "minimachine_ret_from_fork",
             (prev, start_fn, start_arg),
             stack_top=shadow_top,
+            result_count=0,
+        )
+        return HOST_CONTROL_TRANSFER
+
+    if service == 3:
+        if len(args) != 2:
+            raise VMError(
+                "Linux user-mode handoff ecall expects service,pt_regs; "
+                f"got {len(args)} args"
+            )
+        _, regs = args
+        pc = vm.memory.read(regs + 0, 64)
+        user_sp = vm.memory.read(regs + 8, 64)
+        status = vm.memory.read(regs + 80, 64)
+        if not (status & 1):
+            raise VMError(
+                "Linux user-mode handoff received non-user pt_regs: "
+                f"regs=0x{regs:x} status=0x{status:x}"
+            )
+
+        header = bytes(vm.memory.read(pc + i, 8) for i in range(12))
+        if header[:4] != b"MMP3":
+            raise VMError(
+                "MiniMachine user entry is not an MMP3 payload: "
+                f"pc=0x{pc:x} magic={header[:4]!r}"
+            )
+        size = int.from_bytes(header[8:12], "big")
+        if size > 16 * 1024 * 1024:
+            raise VMError(f"MiniMachine user payload too large: {size}")
+        payload = bytes(vm.memory.read(pc + i, 8) for i in range(12 + size))
+        try:
+            function = unpack_user_payload(payload)
+        except UserImageError as exc:
+            raise VMError(f"invalid MiniMachine user payload: {exc}") from exc
+
+        # User images are loaded dynamically after Linux binfmt_flat has
+        # validated and installed them.  Keep their P3 symbol namespace
+        # separate from the kernel program.
+        base_name = function.name
+        suffix = 0
+        while function.name in vm.program.functions or function.name in vm.program.symbol_addresses:
+            suffix += 1
+            function.name = f"__mm_user_{base_name}_{suffix}"
+        verify_p3(function)
+        vm.program.add_function(function)
+
+        print(
+            "BOOT_EXEC_USER_HANDOFF "
+            f"regs=0x{regs:x} pc=0x{pc:x} user_sp=0x{user_sp:x} "
+            f"function={function.name} payload_bytes={12 + size}",
+            flush=True,
+        )
+        vm.enter_function(
+            function.name,
+            (),
+            stack_top=user_sp,
             result_count=0,
         )
         return HOST_CONTROL_TRANSFER
@@ -499,6 +668,438 @@ def probe_linux_memory_helpers(vm) -> None:
         )
 
 
+def _call_linux_function_preserving_control(
+    vm,
+    name: str,
+    args: tuple[int, ...],
+    *,
+    result_count: int,
+    max_extra_steps: int = 2_000_000,
+) -> tuple[int, ...]:
+    if name not in vm.program.functions:
+        raise VMError(f"rootfs injection missing Linux function: {name}")
+
+    saved = (
+        vm.sp,
+        vm.current_function,
+        vm.current_block,
+        vm.ip,
+        vm.halted,
+        vm.steps,
+    )
+    linked = vm.program.functions[name]
+    temp_stack_top = 0x0F00_0000
+    result_words = max(1, result_count)
+    total = linked.frame_size + len(args) * 8 + result_words * 8
+    callee_sp = temp_stack_top - total
+    result_base = callee_sp + linked.frame_size + len(args) * 8
+
+    try:
+        vm.enter_function(
+            name,
+            args,
+            stack_top=temp_stack_top,
+            result_count=result_count,
+        )
+        vm.run(max_steps=saved[5] + max_extra_steps)
+        return tuple(
+            vm.memory.read(result_base + i * 8, 64)
+            for i in range(result_count)
+        )
+    finally:
+        (
+            vm.sp,
+            vm.current_function,
+            vm.current_block,
+            vm.ip,
+            vm.halted,
+            vm.steps,
+        ) = saved
+
+
+def skip_prepare_namespace_after_hot_init(vm) -> None:
+    if vm.current_function != "prepare_namespace" or vm.ip != 0:
+        raise VMError(
+            "prepare_namespace hot skip requires an entry checkpoint; "
+            f"got function={vm.current_function} block={vm.current_block} ip={vm.ip}"
+        )
+
+    command = vm.program.symbol_addresses.get("ramdisk_execute_command")
+    if command is None:
+        raise VMError("ramdisk_execute_command symbol is missing")
+    initial_command = vm.program.initial_memory.read(command, 64)
+    if not initial_command:
+        raise VMError("ramdisk_execute_command has no initial /init pointer")
+    vm.memory.write(command, 64, initial_command)
+
+    result_count = vm.memory.read(vm.sp + RESULT_COUNT, 64)
+    if result_count != 0:
+        raise VMError(
+            f"prepare_namespace caller expects {result_count} results"
+        )
+    caller_sp = vm.memory.read(vm.sp + CALLER_SP, 64)
+    ret_pc = vm.memory.read(vm.sp + RET_PC, 64)
+    vm.sp = caller_sp
+    vm.halted = False
+    vm._set_code(ret_pc)
+    print(
+        "BOOT_EXEC_PREPARE_NAMESPACE_SKIPPED "
+        f"ramdisk_execute_command=0x{initial_command:x} ret_pc=0x{ret_pc:x}",
+        flush=True,
+    )
+
+
+def probe_live_rootfs(vm) -> None:
+    def guest_cstring(text: str) -> int:
+        data = text.encode("utf-8") + b"\0"
+        ptr = vm.alloc_bytes(len(data), align=8)
+        for i, byte in enumerate(data):
+            vm.memory.write(ptr + i, 8, byte)
+        return ptr
+
+    current_addr = vm.program.symbol_addresses.get("minimachine_current_task")
+    current = vm.memory.read(current_addr, 64) if current_addr is not None else 0
+    print(
+        "BOOT_EXEC_ROOTFS_PROBE_CURRENT "
+        f"symbol=0x{(current_addr or 0):x} task=0x{current:x}",
+        flush=True,
+    )
+
+    for path in ("/", "/dev", "/dev/console", "/root", "/init"):
+        ptr = guest_cstring(path)
+        try:
+            result, = _call_linux_function_preserving_control(
+                vm,
+                "init_eaccess",
+                (ptr,),
+                result_count=1,
+            )
+        except VMError as exc:
+            print(
+                f"BOOT_EXEC_ROOTFS_PROBE path={path} error={exc}",
+                flush=True,
+            )
+            continue
+        signed = result - (1 << 64) if result & (1 << 63) else result
+        print(
+            f"BOOT_EXEC_ROOTFS_PROBE path={path} result={signed}",
+            flush=True,
+        )
+
+    tmp = guest_cstring("/mm-probe")
+    try:
+        result, = _call_linux_function_preserving_control(
+            vm,
+            "init_mkdir",
+            (tmp, 0o755),
+            result_count=1,
+        )
+        signed = result - (1 << 64) if result & (1 << 63) else result
+        print(
+            f"BOOT_EXEC_ROOTFS_PROBE mkdir=/mm-probe result={signed}",
+            flush=True,
+        )
+    except VMError as exc:
+        print(
+            f"BOOT_EXEC_ROOTFS_PROBE mkdir=/mm-probe error={exc}",
+            flush=True,
+        )
+
+
+def inject_live_root_init(vm, path: Path) -> None:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise VMError(f"cannot read injected /init image: {exc}") from exc
+    if not data:
+        raise VMError("injected /init image is empty")
+
+    guest_path = b"/init\0"
+    path_ptr = vm.alloc_bytes(len(guest_path), align=8)
+    for i, byte in enumerate(guest_path):
+        vm.memory.write(path_ptr + i, 8, byte)
+
+    data_ptr = vm.alloc_bytes(len(data), align=8)
+    for i, byte in enumerate(data):
+        vm.memory.write(data_ptr + i, 8, byte)
+
+    pos_ptr = vm.alloc_bytes(8, align=8)
+    vm.memory.write(pos_ptr, 64, 0)
+
+    # Linux asm-generic flags: O_WRONLY | O_CREAT | O_TRUNC.
+    open_flags = 0x1 | 0x40 | 0x200
+    file_ptr, = _call_linux_function_preserving_control(
+        vm,
+        "filp_open",
+        (path_ptr, open_flags, 0o755),
+        result_count=1,
+    )
+    if file_ptr >= (1 << 64) - 4095:
+        signed = file_ptr - (1 << 64)
+        raise VMError(f"filp_open(/init) failed: {signed}")
+
+    try:
+        written, = _call_linux_function_preserving_control(
+            vm,
+            "kernel_write",
+            (file_ptr, data_ptr, len(data), pos_ptr),
+            result_count=1,
+            max_extra_steps=8_000_000,
+        )
+        if written != len(data):
+            signed = written - (1 << 64) if written & (1 << 63) else written
+            raise VMError(
+                f"kernel_write(/init) wrote {signed}, expected {len(data)}"
+            )
+    finally:
+        _call_linux_function_preserving_control(
+            vm,
+            "fput",
+            (file_ptr,),
+            result_count=0,
+        )
+
+    access, = _call_linux_function_preserving_control(
+        vm,
+        "init_eaccess",
+        (path_ptr,),
+        result_count=1,
+    )
+    if access != 0:
+        signed = access - (1 << 64) if access & (1 << 63) else access
+        raise VMError(f"init_eaccess(/init) after injection failed: {signed}")
+
+    print(
+        "BOOT_EXEC_ROOTFS_INJECTED "
+        f"path=/init bytes={len(data)} mode=0755",
+        flush=True,
+    )
+
+
+
+def inject_live_root_init_vfs(vm, path: Path) -> None:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise VMError(f"cannot read VFS-injected /init image: {exc}") from exc
+    if not data:
+        raise VMError("VFS-injected /init image is empty")
+
+    required = (
+        "kern_path_create",
+        "d_inode",
+        "mnt_idmap",
+        "vfs_create",
+        "done_path_create",
+        "filp_open",
+        "kernel_write",
+        "fput",
+        "init_chmod",
+        "init_eaccess",
+    )
+    missing = [name for name in required if name not in vm.program.functions]
+    if missing:
+        raise VMError(
+            "VFS /init injection helpers missing: " + ",".join(missing)
+        )
+
+    guest_path = b"/init\0"
+    path_ptr = vm.alloc_bytes(len(guest_path), align=8)
+    for i, byte in enumerate(guest_path):
+        vm.memory.write(path_ptr + i, 8, byte)
+
+    data_ptr = vm.alloc_bytes(len(data), align=8)
+    for i, byte in enumerate(data):
+        vm.memory.write(data_ptr + i, 8, byte)
+
+    # struct path is { struct vfsmount *mnt; struct dentry *dentry; }.
+    create_path = vm.alloc_bytes(16, align=8)
+    vm.memory.write(create_path + 0, 64, 0)
+    vm.memory.write(create_path + 8, 64, 0)
+
+    dentry, = _call_linux_function_preserving_control(
+        vm,
+        "kern_path_create",
+        ((1 << 64) - 100, path_ptr, create_path, 0),
+        result_count=1,
+    )
+    if dentry >= (1 << 64) - 4095:
+        signed = dentry - (1 << 64)
+        raise VMError(f"kern_path_create(/init) failed: {signed}")
+
+    create_rc = None
+    try:
+        mnt = vm.memory.read(create_path + 0, 64)
+        parent_dentry = vm.memory.read(create_path + 8, 64)
+        if not mnt or not parent_dentry:
+            raise VMError(
+                "kern_path_create(/init) returned incomplete parent path: "
+                f"mnt=0x{mnt:x} dentry=0x{parent_dentry:x}"
+            )
+
+        parent_inode, = _call_linux_function_preserving_control(
+            vm,
+            "d_inode",
+            (parent_dentry,),
+            result_count=1,
+        )
+        idmap, = _call_linux_function_preserving_control(
+            vm,
+            "mnt_idmap",
+            (mnt,),
+            result_count=1,
+        )
+        if not parent_inode or not idmap:
+            raise VMError(
+                "cannot resolve VFS create parent: "
+                f"inode=0x{parent_inode:x} idmap=0x{idmap:x}"
+            )
+
+        create_rc, = _call_linux_function_preserving_control(
+            vm,
+            "vfs_create",
+            (idmap, parent_inode, dentry, 0o100755, 1),
+            result_count=1,
+            max_extra_steps=8_000_000,
+        )
+        if create_rc != 0:
+            signed = (
+                create_rc - (1 << 64)
+                if create_rc & (1 << 63)
+                else create_rc
+            )
+            raise VMError(f"vfs_create(/init) failed: {signed}")
+    finally:
+        _call_linux_function_preserving_control(
+            vm,
+            "done_path_create",
+            (create_path, dentry),
+            result_count=0,
+        )
+
+    # The dentry now exists. Open without O_CREAT and write the executable.
+    file_ptr, = _call_linux_function_preserving_control(
+        vm,
+        "filp_open",
+        (path_ptr, 0x2, 0),
+        result_count=1,
+    )
+    if file_ptr >= (1 << 64) - 4095:
+        signed = file_ptr - (1 << 64)
+        raise VMError(f"filp_open(existing /init) failed: {signed}")
+
+    # Linux 6.6.143 riscv64 struct file: f_mode is field #2 at byte offset 16.
+    file_mode = vm.memory.read(file_ptr + 16, 32)
+    print(
+        "BOOT_EXEC_ROOTFS_FILE "
+        f"path=/init file=0x{file_ptr:x} f_mode=0x{file_mode:x}",
+        flush=True,
+    )
+
+    pos_ptr = vm.alloc_bytes(8, align=8)
+    vm.memory.write(pos_ptr, 64, 0)
+    try:
+        written, = _call_linux_function_preserving_control(
+            vm,
+            "kernel_write",
+            (file_ptr, data_ptr, len(data), pos_ptr),
+            result_count=1,
+            max_extra_steps=8_000_000,
+        )
+        if written != len(data):
+            signed = written - (1 << 64) if written & (1 << 63) else written
+            raise VMError(
+                f"kernel_write(/init) wrote {signed}, expected {len(data)}"
+            )
+    finally:
+        _call_linux_function_preserving_control(
+            vm,
+            "fput",
+            (file_ptr,),
+            result_count=0,
+        )
+
+    chmod_rc, = _call_linux_function_preserving_control(
+        vm,
+        "init_chmod",
+        (path_ptr, 0o755),
+        result_count=1,
+    )
+    if chmod_rc != 0:
+        signed = chmod_rc - (1 << 64) if chmod_rc & (1 << 63) else chmod_rc
+        raise VMError(f"init_chmod(/init) failed: {signed}")
+
+    access, = _call_linux_function_preserving_control(
+        vm,
+        "init_eaccess",
+        (path_ptr,),
+        result_count=1,
+    )
+    if access != 0:
+        signed = access - (1 << 64) if access & (1 << 63) else access
+        raise VMError(f"init_eaccess(/init) after VFS create failed: {signed}")
+
+    print(
+        "BOOT_EXEC_ROOTFS_VFS_CREATED "
+        f"path=/init bytes={len(data)} mode=0755",
+        flush=True,
+    )
+
+
+def inject_live_root_initramfs(vm, path: Path) -> None:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise VMError(f"cannot read injected initramfs: {exc}") from exc
+    if not data:
+        raise VMError("injected initramfs is empty")
+    if "unpack_to_rootfs" not in vm.program.functions:
+        raise VMError("Linux unpack_to_rootfs is missing from P3 program")
+
+    data_ptr = vm.alloc_bytes(len(data), align=8)
+    for i, byte in enumerate(data):
+        vm.memory.write(data_ptr + i, 8, byte)
+
+    error_ptr, = _call_linux_function_preserving_control(
+        vm,
+        "unpack_to_rootfs",
+        (data_ptr, len(data)),
+        result_count=1,
+        max_extra_steps=25_000_000,
+    )
+    if error_ptr:
+        raw = bytearray()
+        for i in range(256):
+            byte = vm.memory.read(error_ptr + i, 8)
+            if byte == 0:
+                break
+            raw.append(byte)
+        message = raw.decode("utf-8", errors="replace")
+        raise VMError(
+            f"unpack_to_rootfs(initramfs) failed: ptr=0x{error_ptr:x} "
+            f"message={message!r}"
+        )
+
+    guest_path = b"/init\0"
+    path_ptr = vm.alloc_bytes(len(guest_path), align=8)
+    for i, byte in enumerate(guest_path):
+        vm.memory.write(path_ptr + i, 8, byte)
+    access, = _call_linux_function_preserving_control(
+        vm,
+        "init_eaccess",
+        (path_ptr,),
+        result_count=1,
+    )
+    if access != 0:
+        signed = access - (1 << 64) if access & (1 << 63) else access
+        raise VMError(f"init_eaccess(/init) after initramfs unpack failed: {signed}")
+
+    print(
+        "BOOT_EXEC_ROOTFS_UNPACKED "
+        f"path=/init archive_bytes={len(data)} via=unpack_to_rootfs",
+        flush=True,
+    )
+
 def current_instruction(vm):
     if vm.current_function is None or vm.current_block is None:
         return None
@@ -514,34 +1115,87 @@ def current_instruction(vm):
 def main() -> int:
     args = parse_args()
     llvm_text = args.input.read_text()
+    linked_image_sha256 = image_fingerprint(llvm_text)
     linker_contract = LinkerContract.load(args.linker_contract)
 
-    functions, _stats = legalize_module(llvm_text)
-    image = parse_module_image(llvm_text)
+    if args.program_cache_in is not None:
+        try:
+            cached = load_program_cache(
+                args.program_cache_in,
+                image_sha256=linked_image_sha256,
+            )
+        except ProgramCacheError as exc:
+            print(f"BOOT_EXEC_BLOCKED stage=program-cache error={exc}")
+            return 1
+        program = cached.program
+        surface = cached.surface
+        reasons = set(cached.reasons)
+        blocked_functions = list(cached.blocked_functions)
+        image = cached.image
+        task_sched_class_offset = cached.task_sched_class_offset
+        p3_function_count = cached.function_count
+        print(
+            "BOOT_EXEC_PROGRAM_CACHE_LOADED "
+            f"path={args.program_cache_in} functions={p3_function_count}",
+            flush=True,
+        )
+    else:
+        functions, _stats = legalize_module(llvm_text)
+        image = parse_module_image(llvm_text)
+
+        strict_source = []
+        p3_functions = []
+        blocked_functions: list[tuple[str, int]] = []
+        reasons: set[str] = set()
+
+        for function in functions:
+            verify_muir(function)
+            reasons.update(trap_reasons(function))
+            expanded, _abi_stats = expand_function(function)
+            escapes = arch_escapes(expanded)
+            if escapes:
+                blocked_functions.append((function.name, len(escapes)))
+                continue
+            lowered = lower_function(expanded)
+            verify_p3(lowered)
+            strict_source.append(function)
+            p3_functions.append(lowered)
+
+        program = Program(p3_functions)
+        surface = collect_runtime_surface(strict_source)
+        layout = DataLayout.from_module(llvm_text)
+        task_info = layout.info("%struct.task_struct")
+        task_sched_class_offset = (
+            task_info.field_offsets[15]
+            if task_info.field_offsets is not None
+            and len(task_info.field_offsets) > 15
+            else None
+        )
+        p3_function_count = len(p3_functions)
+
+        if args.program_cache_out is not None:
+            save_program_cache(
+                ProgramCache(
+                    image_sha256=linked_image_sha256,
+                    program=program,
+                    surface=surface,
+                    reasons=frozenset(reasons),
+                    blocked_functions=tuple(blocked_functions),
+                    image=image,
+                    task_sched_class_offset=task_sched_class_offset,
+                ),
+                args.program_cache_out,
+            )
+            print(
+                "BOOT_EXEC_PROGRAM_CACHE_SAVED "
+                f"path={args.program_cache_out} functions={p3_function_count}",
+                flush=True,
+            )
+
     image_sections = {
         obj.section for obj in image.objects if obj.section is not None
     }
 
-    strict_source = []
-    p3_functions = []
-    blocked_functions: list[tuple[str, int]] = []
-    reasons: set[str] = set()
-
-    for function in functions:
-        verify_muir(function)
-        reasons.update(trap_reasons(function))
-        expanded, _abi_stats = expand_function(function)
-        escapes = arch_escapes(expanded)
-        if escapes:
-            blocked_functions.append((function.name, len(escapes)))
-            continue
-        lowered = lower_function(expanded)
-        verify_p3(lowered)
-        strict_source.append(function)
-        p3_functions.append(lowered)
-
-    program = Program(p3_functions)
-    surface = collect_runtime_surface(strict_source)
     install_runtime(program, surface)
     accelerated_runtime = accelerate_direct_runtime(program)
     if accelerated_runtime:
@@ -580,6 +1234,36 @@ def main() -> int:
             flush=True,
         )
 
+    if args.initramfs is not None:
+        try:
+            initramfs_data = args.initramfs.read_bytes()
+        except OSError as exc:
+            print(f"BOOT_EXEC_BLOCKED stage=initramfs error={exc}")
+            return 1
+        if not initramfs_data:
+            print("BOOT_EXEC_BLOCKED stage=initramfs error=empty image")
+            return 1
+        try:
+            initramfs_start = program.define_data_symbol(
+                "__initramfs_start",
+                initramfs_data,
+                align=4,
+            )
+            initramfs_size_addr = program.define_data_symbol(
+                "__initramfs_size",
+                len(initramfs_data).to_bytes(8, "little"),
+                align=8,
+            )
+        except VMError as exc:
+            print(f"BOOT_EXEC_BLOCKED stage=initramfs error={exc}")
+            return 1
+        print(
+            "BOOT_EXEC_INITRAMFS "
+            f"path={args.initramfs} bytes={len(initramfs_data)} "
+            f"start=0x{initramfs_start:x} size_symbol=0x{initramfs_size_addr:x}",
+            flush=True,
+        )
+
     try:
         install_module_image(
             program,
@@ -597,7 +1281,7 @@ def main() -> int:
 
     print(
         "BOOT_EXEC_START "
-        f"entry={args.entry} functions={len(p3_functions)} "
+        f"entry={args.entry} functions={p3_function_count} "
         f"blocked_functions={len(blocked_functions)} "
         f"arch_escape_sites={sum(sites for _, sites in blocked_functions)} "
         f"image_objects={len(image.objects)} image_bytes={image.byte_size} "
@@ -611,10 +1295,78 @@ def main() -> int:
     # Reserve the top 16 MiB for the boot task's existing P3 stack. New
     # Linux tasks receive independent P3 continuation stacks below it.
     vm.linux_shadow_stack_next = vm.stack_top - 0x01000000
-    layout = DataLayout.from_module(llvm_text)
-    task_info = layout.info("%struct.task_struct")
-    if task_info.field_offsets is not None and len(task_info.field_offsets) > 15:
-        vm.linux_task_sched_class_offset = task_info.field_offsets[15]
+    if task_sched_class_offset is not None:
+        vm.linux_task_sched_class_offset = task_sched_class_offset
+
+    resumed_from_checkpoint = False
+    if args.checkpoint_in is not None:
+        try:
+            load_checkpoint(
+                vm,
+                args.checkpoint_in,
+                image_sha256=linked_image_sha256,
+            )
+        except CheckpointError as exc:
+            print(f"BOOT_EXEC_BLOCKED stage=checkpoint error={exc}")
+            return 1
+        vm.ecall_handler = linux_ecall
+        resumed_from_checkpoint = True
+        if args.probe_rootfs_after_checkpoint:
+            try:
+                probe_live_rootfs(vm)
+            except VMError as exc:
+                print(f"BOOT_EXEC_BLOCKED stage=rootfs-probe error={exc}")
+                return 1
+        injection_count = sum(
+            value is not None
+            for value in (
+                args.inject_init,
+                args.inject_init_vfs,
+                args.inject_initramfs_cpio,
+            )
+        )
+        if injection_count > 1:
+            print(
+                "BOOT_EXEC_BLOCKED stage=rootfs-inject "
+                "error=choose exactly one hot /init injection source"
+            )
+            return 1
+        if args.inject_init_vfs is not None:
+            try:
+                inject_live_root_init_vfs(vm, args.inject_init_vfs)
+                if args.skip_prepare_namespace_after_inject:
+                    skip_prepare_namespace_after_hot_init(vm)
+            except VMError as exc:
+                print(f"BOOT_EXEC_BLOCKED stage=rootfs-inject error={exc}")
+                return 1
+        elif args.inject_initramfs_cpio is not None:
+            try:
+                inject_live_root_initramfs(vm, args.inject_initramfs_cpio)
+                if args.skip_prepare_namespace_after_inject:
+                    skip_prepare_namespace_after_hot_init(vm)
+            except VMError as exc:
+                print(f"BOOT_EXEC_BLOCKED stage=rootfs-inject error={exc}")
+                return 1
+        elif args.inject_init is not None:
+            try:
+                inject_live_root_init(vm, args.inject_init)
+                if args.skip_prepare_namespace_after_inject:
+                    skip_prepare_namespace_after_hot_init(vm)
+            except VMError as exc:
+                print(f"BOOT_EXEC_BLOCKED stage=rootfs-inject error={exc}")
+                return 1
+        elif args.skip_prepare_namespace_after_inject:
+            print(
+                "BOOT_EXEC_BLOCKED stage=rootfs-inject "
+                "error=--skip-prepare-namespace-after-inject requires an injection source"
+            )
+            return 1
+        print(
+            "BOOT_EXEC_CHECKPOINT_RESTORED "
+            f"path={args.checkpoint_in} steps={vm.steps} "
+            f"function={vm.current_function} block={vm.current_block} ip={vm.ip}",
+            flush=True,
+        )
 
     if args.probe_kallsyms is not None:
         symbol = args.probe_kallsyms
@@ -692,6 +1444,17 @@ def main() -> int:
         "do_one_initcall",
         "wait_for_initramfs",
         "async_synchronize_full",
+        "async_synchronize_full_domain",
+        "async_synchronize_cookie_domain",
+        "async_run_entry_fn",
+        "worker_thread",
+        "process_one_work",
+        "schedule",
+        "__schedule",
+        "schedule_timeout",
+        "schedule_timeout_uninterruptible",
+        "msleep",
+        "__const_udelay",
         "free_initmem",
         "mark_readonly",
         "run_init_process",
@@ -707,8 +1470,28 @@ def main() -> int:
     symbols_by_address: dict[int, list[str]] = {}
     for symbol, address in program.symbol_addresses.items():
         symbols_by_address.setdefault(address, []).append(symbol)
-    last_initcall_enter_step: int | None = None
-    last_initcall_symbol = "<none>"
+    last_initcall_enter_step: int | None = (
+        vm.steps if resumed_from_checkpoint and args.checkpoint_initcall else None
+    )
+    last_initcall_symbol = (
+        args.checkpoint_initcall
+        if resumed_from_checkpoint and args.checkpoint_initcall
+        else "<none>"
+    )
+    checkpoint_written = False
+    checkpoint_after_armed = bool(
+        resumed_from_checkpoint
+        and args.checkpoint_after_initcall is not None
+        and args.checkpoint_initcall == args.checkpoint_after_initcall
+    )
+    if checkpoint_after_armed:
+        print(
+            "BOOT_EXEC_CHECKPOINT_ARMED "
+            f"after_initcall={args.checkpoint_after_initcall} "
+            f"steps={vm.steps} source=resume",
+            flush=True,
+        )
+    checkpoint_function_hits = 0
 
     def install_sched_watch() -> None:
         nonlocal sched_watch_installed
@@ -756,6 +1539,33 @@ def main() -> int:
     def observe_function_entry(function: str) -> None:
         nonlocal last_milestone_function
         nonlocal last_initcall_enter_step, last_initcall_symbol
+        nonlocal checkpoint_written, checkpoint_after_armed
+        nonlocal checkpoint_function_hits
+
+        if function == "panic":
+            frame_size = vm.memory.read(vm.sp + 24, 64)
+            argc = vm.memory.read(vm.sp + 56, 64)
+            arg_base = vm.sp + frame_size
+            raw_args = [
+                vm.memory.read(arg_base + 8 * i, 64)
+                for i in range(min(argc, 8))
+            ]
+            fmt_ptr = raw_args[0] if raw_args else 0
+            raw_fmt = bytearray()
+            if fmt_ptr:
+                for i in range(512):
+                    byte = vm.memory.read(fmt_ptr + i, 8)
+                    if byte == 0:
+                        break
+                    raw_fmt.append(byte)
+            print(
+                "BOOT_EXEC_PANIC_ENTER "
+                f"steps={vm.steps} argc={argc} "
+                f"fmt_ptr=0x{fmt_ptr:x} "
+                f"fmt={raw_fmt.decode('utf-8', errors='replace')!r} "
+                f"args={','.join(f'0x{x:x}' for x in raw_args)}",
+                flush=True,
+            )
 
         if function == "do_one_initcall":
             frame_size = vm.memory.read(vm.sp + 24, 64)
@@ -774,8 +1584,89 @@ def main() -> int:
                 f"ptr=0x{initcall_ptr:x} symbol={initcall_symbol}",
                 flush=True,
             )
+            previous_initcall_symbol = last_initcall_symbol
             last_initcall_enter_step = vm.steps
             last_initcall_symbol = initcall_symbol
+
+            if (
+                not checkpoint_written
+                and checkpoint_after_armed
+                and args.checkpoint_out is not None
+            ):
+                save_checkpoint(
+                    vm,
+                    args.checkpoint_out,
+                    image_sha256=linked_image_sha256,
+                )
+                checkpoint_written = True
+                checkpoint_after_armed = False
+                print(
+                    "BOOT_EXEC_CHECKPOINT_SAVED "
+                    f"path={args.checkpoint_out} steps={vm.steps} "
+                    f"after_initcall={previous_initcall_symbol} "
+                    f"next_initcall={initcall_symbol}",
+                    flush=True,
+                )
+                if args.stop_after_checkpoint:
+                    vm.halted = True
+
+            if (
+                not checkpoint_written
+                and args.checkpoint_out is not None
+                and args.checkpoint_initcall == initcall_symbol
+            ):
+                save_checkpoint(
+                    vm,
+                    args.checkpoint_out,
+                    image_sha256=linked_image_sha256,
+                )
+                checkpoint_written = True
+                print(
+                    "BOOT_EXEC_CHECKPOINT_SAVED "
+                    f"path={args.checkpoint_out} steps={vm.steps} "
+                    f"initcall={initcall_symbol}",
+                    flush=True,
+                )
+                if args.stop_after_checkpoint:
+                    vm.halted = True
+
+            if (
+                not checkpoint_written
+                and args.checkpoint_out is not None
+                and args.checkpoint_after_initcall == initcall_symbol
+            ):
+                checkpoint_after_armed = True
+                print(
+                    "BOOT_EXEC_CHECKPOINT_ARMED "
+                    f"after_initcall={initcall_symbol} steps={vm.steps}",
+                    flush=True,
+                )
+
+        if (
+            not checkpoint_written
+            and args.checkpoint_function is not None
+            and function == args.checkpoint_function
+        ):
+            checkpoint_function_hits += 1
+            if checkpoint_function_hits == args.checkpoint_function_hit:
+                if args.checkpoint_out is None:
+                    raise VMError(
+                        "--checkpoint-function requires --checkpoint-out"
+                    )
+                save_checkpoint(
+                    vm,
+                    args.checkpoint_out,
+                    image_sha256=linked_image_sha256,
+                )
+                checkpoint_written = True
+                print(
+                    "BOOT_EXEC_CHECKPOINT_SAVED "
+                    f"path={args.checkpoint_out} steps={vm.steps} "
+                    f"function={function} hit={checkpoint_function_hits}",
+                    flush=True,
+                )
+                if args.stop_after_checkpoint:
+                    vm.halted = True
 
         if function == "sched_fork":
             install_sched_watch()
@@ -797,6 +1688,19 @@ def main() -> int:
         traced_entry_codes[
             vm.program.block_code[(function, entry_block)]
         ] = function
+
+    if args.checkpoint_function is not None:
+        linked = vm.program.functions.get(args.checkpoint_function)
+        if linked is None or not linked.function.blocks:
+            print(
+                "BOOT_EXEC_BLOCKED stage=checkpoint "
+                f"missing_function={args.checkpoint_function}"
+            )
+            return 1
+        entry_block = linked.function.blocks[0].label
+        traced_entry_codes[
+            vm.program.block_code[(args.checkpoint_function, entry_block)]
+        ] = args.checkpoint_function
 
     original_set_code = vm._set_code
 
@@ -844,13 +1748,53 @@ def main() -> int:
         vm.step = progress_step
 
     try:
-        vm.run_function(
-            args.entry,
-            (),
-            result_count=0,
-            max_steps=args.max_steps,
-        )
+        if resumed_from_checkpoint:
+            resume_limit = vm.steps + args.max_steps
+            print(
+                "BOOT_EXEC_CHECKPOINT_BUDGET "
+                f"saved_steps={vm.steps} additional_steps={args.max_steps} "
+                f"absolute_limit={resume_limit}",
+                flush=True,
+            )
+            vm.run(max_steps=resume_limit)
+        else:
+            vm.run_function(
+                args.entry,
+                (),
+                result_count=0,
+                max_steps=args.max_steps,
+            )
     except VMError as exc:
+        checkpoint_reason = None
+        if args.checkpoint_on_error and args.checkpoint_out is not None:
+            checkpoint_reason = "error"
+        elif (
+            args.checkpoint_at_limit
+            and args.checkpoint_out is not None
+            and "step limit exceeded" in str(exc)
+        ):
+            checkpoint_reason = "step_limit"
+        if checkpoint_reason is not None:
+            save_checkpoint(
+                vm,
+                args.checkpoint_out,
+                image_sha256=linked_image_sha256,
+            )
+            checkpoint_written = True
+            print(
+                "BOOT_EXEC_CHECKPOINT_SAVED "
+                f"path={args.checkpoint_out} steps={vm.steps} "
+                f"reason={checkpoint_reason} function={vm.current_function} "
+                f"block={vm.current_block} ip={vm.ip}",
+                flush=True,
+            )
+        if args.checkpoint_function is not None:
+            print(
+                "BOOT_EXEC_CHECKPOINT_FUNCTION_PROGRESS "
+                f"function={args.checkpoint_function} "
+                f"hits={checkpoint_function_hits} steps={vm.steps}",
+                flush=True,
+            )
         inst = current_instruction(vm)
         print(
             "BOOT_EXEC_BLOCKED "

@@ -1,0 +1,98 @@
+name: Linux MiniMachine Hot Roll Forward
+
+on:
+  workflow_run:
+    workflows: ["Linux MiniMachine BLAKE2s Fast Hot Continue"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: minimachine-hot-roll-forward
+  cancel-in-progress: true
+
+jobs:
+  roll:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'work/checkpoint-after-kallsyms'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: work/checkpoint-after-kallsyms
+
+      - name: Download previous hot checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          name: minimachine-blake2s-fast-${{ github.event.workflow_run.id }}
+          path: previous-source
+
+      - name: Download P3 program cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33249488447
+          github-token: ${{ github.token }}
+          name: minimachine-double-hot-33249488447
+          path: p3-cache-source
+
+      - name: Find matching Linux LLVM artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(
+            gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/linux-minimachine-boot.yml/runs?status=completed&per_page=30"               --jq '.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main") | .id' |
+              head -n 1
+          )"
+          test -n "$run_id"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download linked Linux LLVM image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: minimachine-linux-boot-*
+          path: replay-source
+          merge-multiple: true
+
+      - name: Prepare hot inputs
+        run: |
+          checkpoint="$(find previous-source -name 'blake2s-fast-next.chk.gz' -print -quit)"
+          cache="$(find p3-cache-source -name 'linux-p3-cache.pkl.gz' -print -quit)"
+          test -n "$checkpoint"
+          test -n "$cache"
+          cp "$checkpoint" replay-source/llvm/hot-roll.chk.gz
+          cp "$cache" replay-source/llvm/linux-p3-cache.pkl.gz
+
+      - name: Roll 40M steps toward prepare_namespace
+        run: |
+          set +e
+          set -o pipefail
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/hot-roll.chk.gz             --checkpoint-out replay-source/llvm/hot-roll-next.chk.gz             --checkpoint-function prepare_namespace             --checkpoint-function-hit 1             --stop-after-checkpoint             --checkpoint-at-limit             --checkpoint-on-error             --max-steps 40000000             --progress-every 0             2>&1 | tee replay-source/llvm/hot-roll.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "HOT_ROLL_STATUS $status"
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED' replay-source/llvm/hot-roll.log
+          test -s replay-source/llvm/hot-roll-next.chk.gz || true
+          tail -n 220 replay-source/llvm/hot-roll.log
+
+      - name: Upload rolled checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-hot-roll-${{ github.run_id }}
+          path: |
+            replay-source/llvm/hot-roll.log
+            replay-source/llvm/hot-roll-next.chk.gz
+          if-no-files-found: ignore
+          retention-days: 14

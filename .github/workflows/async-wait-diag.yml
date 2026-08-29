@@ -1,0 +1,89 @@
+name: Linux MiniMachine Async Wait Diagnostic
+
+on:
+  push:
+    branches: [work/checkpoint-after-kallsyms]
+    paths:
+      - .github/workflows/async-wait-diag.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download 722M checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33262009924
+          github-token: ${{ github.token }}
+          name: minimachine-blake2s-fast-33262009924
+          path: checkpoint-source
+
+      - name: Download P3 program cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33249488447
+          github-token: ${{ github.token }}
+          name: minimachine-double-hot-33249488447
+          path: p3-cache-source
+
+      - name: Find matching Linux LLVM artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(
+            gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/linux-minimachine-boot.yml/runs?status=completed&per_page=30"               --jq '.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main") | .id' |
+              head -n 1
+          )"
+          test -n "$run_id"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download linked Linux LLVM image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: minimachine-linux-boot-*
+          path: replay-source
+          merge-multiple: true
+
+      - name: Prepare diagnostic inputs
+        run: |
+          checkpoint="$(find checkpoint-source -name 'blake2s-fast-next.chk.gz' -print -quit)"
+          cache="$(find p3-cache-source -name 'linux-p3-cache.pkl.gz' -print -quit)"
+          test -n "$checkpoint"
+          test -n "$cache"
+          cp "$checkpoint" replay-source/llvm/hot-722m.chk.gz
+          cp "$cache" replay-source/llvm/linux-p3-cache.pkl.gz
+
+      - name: Trace async wait for 3M steps
+        run: |
+          set +e
+          set -o pipefail
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/hot-722m.chk.gz             --checkpoint-out replay-source/llvm/async-diag-next.chk.gz             --checkpoint-function run_init_process             --checkpoint-function-hit 1             --stop-after-checkpoint             --checkpoint-at-limit             --checkpoint-on-error             --max-steps 3000000             --progress-every 0             2>&1 | tee replay-source/llvm/async-diag.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "ASYNC_DIAG_STATUS $status"
+          grep -E 'BOOT_EXEC_(MILESTONE|CHECKPOINT_RESTORED|CHECKPOINT_SAVED|BLOCKED|HALTED)' replay-source/llvm/async-diag.log | tail -n 260 || true
+
+      - name: Upload diagnostic checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-async-diag-${{ github.run_id }}
+          path: |
+            replay-source/llvm/async-diag.log
+            replay-source/llvm/async-diag-next.chk.gz
+          if-no-files-found: ignore
+          retention-days: 14
