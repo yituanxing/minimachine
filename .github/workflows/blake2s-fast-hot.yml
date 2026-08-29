@@ -22,13 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download 552M hot checkpoint
+      - name: Download 592M hot checkpoint
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33258702406
+          run-id: 33259338414
           github-token: ${{ github.token }}
-          name: minimachine-blake2s-fast-33258702406
+          name: minimachine-blake2s-fast-33259338414
           path: checkpoint-source
 
       - name: Download P3 program cache
@@ -68,15 +68,15 @@ jobs:
           cache="$(find p3-cache-source -name 'linux-p3-cache.pkl.gz' -print -quit)"
           test -n "$checkpoint"
           test -n "$cache"
-          cp "$checkpoint" replay-source/llvm/hot-552m.chk.gz
+          cp "$checkpoint" replay-source/llvm/hot-592m.chk.gz
           cp "$cache" replay-source/llvm/linux-p3-cache.pkl.gz
 
-      - name: Continue from 552M toward prepare_namespace
+      - name: Continue from 592M toward prepare_namespace
         run: |
           set +e
           set -o pipefail
           start=$(date +%s)
-          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/hot-552m.chk.gz             --checkpoint-initcall blake2s_mod_init             --checkpoint-out replay-source/llvm/blake2s-fast-next.chk.gz             --checkpoint-function prepare_namespace             --checkpoint-function-hit 1             --stop-after-checkpoint             --checkpoint-at-limit             --max-steps 40000000             --progress-every 0             2>&1 | tee replay-source/llvm/blake2s-fast.log
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/hot-592m.chk.gz             --checkpoint-initcall blake2s_mod_init             --checkpoint-out replay-source/llvm/blake2s-fast-next.chk.gz             --checkpoint-function prepare_namespace             --checkpoint-function-hit 1             --stop-after-checkpoint             --checkpoint-at-limit             --max-steps 60000000             --progress-every 0             2>&1 | tee replay-source/llvm/blake2s-fast.log
           status=${PIPESTATUS[0]}
           end=$(date +%s)
           set -e
