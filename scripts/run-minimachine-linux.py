@@ -67,6 +67,10 @@ def parse_args():
         "--checkpoint-initcall",
         help="write --checkpoint-out on entry to this Linux initcall",
     )
+    p.add_argument(
+        "--checkpoint-after-initcall",
+        help="write --checkpoint-out when the initcall after this one begins",
+    )
     return p.parse_args()
 
 
@@ -757,6 +761,7 @@ def main() -> int:
         else "<none>"
     )
     checkpoint_written = False
+    checkpoint_after_armed = False
 
     def install_sched_watch() -> None:
         nonlocal sched_watch_installed
@@ -804,7 +809,7 @@ def main() -> int:
     def observe_function_entry(function: str) -> None:
         nonlocal last_milestone_function
         nonlocal last_initcall_enter_step, last_initcall_symbol
-        nonlocal checkpoint_written
+        nonlocal checkpoint_written, checkpoint_after_armed
 
         if function == "do_one_initcall":
             frame_size = vm.memory.read(vm.sp + 24, 64)
@@ -823,8 +828,29 @@ def main() -> int:
                 f"ptr=0x{initcall_ptr:x} symbol={initcall_symbol}",
                 flush=True,
             )
+            previous_initcall_symbol = last_initcall_symbol
             last_initcall_enter_step = vm.steps
             last_initcall_symbol = initcall_symbol
+
+            if (
+                not checkpoint_written
+                and checkpoint_after_armed
+                and args.checkpoint_out is not None
+            ):
+                save_checkpoint(
+                    vm,
+                    args.checkpoint_out,
+                    image_sha256=linked_image_sha256,
+                )
+                checkpoint_written = True
+                checkpoint_after_armed = False
+                print(
+                    "BOOT_EXEC_CHECKPOINT_SAVED "
+                    f"path={args.checkpoint_out} steps={vm.steps} "
+                    f"after_initcall={previous_initcall_symbol} "
+                    f"next_initcall={initcall_symbol}",
+                    flush=True,
+                )
 
             if (
                 not checkpoint_written
@@ -841,6 +867,18 @@ def main() -> int:
                     "BOOT_EXEC_CHECKPOINT_SAVED "
                     f"path={args.checkpoint_out} steps={vm.steps} "
                     f"initcall={initcall_symbol}",
+                    flush=True,
+                )
+
+            if (
+                not checkpoint_written
+                and args.checkpoint_out is not None
+                and args.checkpoint_after_initcall == initcall_symbol
+            ):
+                checkpoint_after_armed = True
+                print(
+                    "BOOT_EXEC_CHECKPOINT_ARMED "
+                    f"after_initcall={initcall_symbol} steps={vm.steps}",
                     flush=True,
                 )
 
