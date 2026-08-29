@@ -1,3 +1,5 @@
+import gzip
+import pickle
 import tempfile
 import unittest
 from pathlib import Path
@@ -62,6 +64,59 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(restored.linux_task_shadow_stacks, {0x10: 0x5000})
         self.assertEqual(restored.linux_shadow_stack_next, 0x6000)
         self.assertEqual(restored.linux_task_sched_class_offset, 88)
+
+    def test_checkpoint_stores_memory_delta(self):
+        fn = muir.Function(
+            "entry",
+            [muir.Block("entry", [muir.Ret(None)])],
+            set(),
+        )
+        program = Program([machine(fn)])
+        vm = program.new_vm()
+        vm.memory.write(0x20000, 64, 0x12345678)
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "linux.chk.gz"
+            save_checkpoint(vm, path, image_sha256="abc")
+            with gzip.open(path, "rb") as handle:
+                payload = pickle.load(handle)
+
+        self.assertEqual(payload["version"], 2)
+        self.assertIn("memory_delta", payload)
+        self.assertNotIn("memory", payload)
+        self.assertLess(len(payload["memory_delta"]), len(vm.memory.bytes))
+        self.assertEqual(payload["memory_delta"][0x20000], 0x78)
+
+    def test_loader_accepts_v1_full_memory_checkpoint(self):
+        fn = muir.Function(
+            "entry",
+            [muir.Block("entry", [muir.Ret(None)])],
+            set(),
+        )
+        program = Program([machine(fn)])
+        vm = program.new_vm()
+        vm.enter_function("entry", (), stack_top=vm.stack_top, result_count=0)
+        vm.steps = 77
+        vm.memory.write(0x24000, 64, 0xCAFEBABE)
+
+        with tempfile.TemporaryDirectory() as td:
+            v2_path = Path(td) / "v2.chk.gz"
+            v1_path = Path(td) / "v1.chk.gz"
+            save_checkpoint(vm, v2_path, image_sha256="abc")
+            with gzip.open(v2_path, "rb") as handle:
+                payload = pickle.load(handle)
+            payload["version"] = 1
+            payload["memory"] = dict(vm.memory.bytes)
+            payload.pop("memory_delta", None)
+            with gzip.open(v1_path, "wb", compresslevel=3) as handle:
+                pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+            restored = program.new_vm()
+            load_checkpoint(restored, v1_path, image_sha256="abc")
+
+        self.assertEqual(restored.steps, 77)
+        self.assertEqual(restored.memory.read(0x24000, 64), 0xCAFEBABE)
+        self.assertEqual(restored.current_function, "entry")
 
     def test_checkpoint_rejects_other_linked_image(self):
         fn = muir.Function(
