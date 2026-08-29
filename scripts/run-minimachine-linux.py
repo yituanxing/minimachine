@@ -18,7 +18,11 @@ from src.minimachine.legalize import legalize_module
 from src.minimachine.layout import DataLayout
 from src.minimachine.linker import LinkerContract
 from src.minimachine.lower_p3 import lower_function
-from src.minimachine.runtime import collect_runtime_surface, install_runtime
+from src.minimachine.runtime import (
+    accelerate_direct_runtime,
+    collect_runtime_surface,
+    install_runtime,
+)
 from src.minimachine.verify import verify_muir, verify_p3
 from src.minimachine.vm import HOST_CONTROL_TRANSFER, Program, VMError
 
@@ -533,6 +537,12 @@ def main() -> int:
     program = Program(p3_functions)
     surface = collect_runtime_surface(strict_source)
     install_runtime(program, surface)
+    accelerated_runtime = accelerate_direct_runtime(program)
+    if accelerated_runtime:
+        print(
+            "BOOT_EXEC_FAST_RUNTIME symbols=" + ",".join(accelerated_runtime),
+            flush=True,
+        )
     register_traps(program, reasons)
 
     missing_helpers = tuple(getattr(program, "runtime_missing_helpers", ()))
