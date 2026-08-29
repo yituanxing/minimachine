@@ -26,10 +26,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33249865846
+          run-id: 33257496633
           github-token: ${{ github.token }}
-          name: minimachine-after-pty-33249865846
-          path: after-pty-source
+          name: minimachine-blake2s-scout2-33257496633
+          path: scout1-source
 
       - name: Download P3 program cache
         uses: actions/download-artifact@v4
@@ -64,21 +64,21 @@ jobs:
 
       - name: Prepare hot inputs
         run: |
-          checkpoint="$(find after-pty-source -name 'after-pty.chk.gz' -print -quit)"
+          checkpoint="$(find scout1-source -name 'blake2s-scout2.chk.gz' -print -quit)"
           cache="$(find p3-cache-source -name 'linux-p3-cache.pkl.gz' -print -quit)"
           test -n "$checkpoint"
           test -n "$cache"
-          cp "$checkpoint" replay-source/llvm/after-pty.chk.gz
+          cp "$checkpoint" replay-source/llvm/scout1.chk.gz
           cp "$cache" replay-source/llvm/linux-p3-cache.pkl.gz
 
-      - name: Scout 20M steps after PTY
+      - name: Continue 20M steps through BLAKE2s selftest
         run: |
           set +e
           set -o pipefail
-          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/after-pty.chk.gz             --checkpoint-initcall aio_setup             --checkpoint-out replay-source/llvm/after-pty-scout.chk.gz             --checkpoint-function prepare_namespace             --checkpoint-function-hit 1             --stop-after-checkpoint             --checkpoint-at-limit             --max-steps 20000000             --progress-every 0             2>&1 | tee replay-source/llvm/after-pty-scout.log
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/scout1.chk.gz             --checkpoint-initcall blake2s_mod_init             --checkpoint-out replay-source/llvm/after-pty-scout.chk.gz             --checkpoint-function prepare_namespace             --checkpoint-function-hit 1             --stop-after-checkpoint             --checkpoint-at-limit             --max-steps 20000000             --progress-every 0             2>&1 | tee replay-source/llvm/blake2s-scout2.log
           status=${PIPESTATUS[0]}
           set -e
-          echo "HOT_SCOUT_STATUS $status"
+          echo "BLAKE2S_SCOUT2_STATUS $status"
           grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED' replay-source/llvm/after-pty-scout.log
           test -s replay-source/llvm/after-pty-scout.chk.gz
           tail -n 180 replay-source/llvm/after-pty-scout.log
