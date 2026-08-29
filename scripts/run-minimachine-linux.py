@@ -945,6 +945,8 @@ def main() -> int:
                     f"next_initcall={initcall_symbol}",
                     flush=True,
                 )
+                if args.stop_after_checkpoint:
+                    vm.halted = True
 
             if (
                 not checkpoint_written
@@ -963,6 +965,8 @@ def main() -> int:
                     f"initcall={initcall_symbol}",
                     flush=True,
                 )
+                if args.stop_after_checkpoint:
+                    vm.halted = True
 
             if (
                 not checkpoint_written
