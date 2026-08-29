@@ -911,7 +911,8 @@ def main() -> int:
                 )
 
         if (
-            args.checkpoint_function is not None
+            not checkpoint_written
+            and args.checkpoint_function is not None
             and function == args.checkpoint_function
         ):
             checkpoint_function_hits += 1
