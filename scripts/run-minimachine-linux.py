@@ -82,6 +82,14 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--inject-initramfs-cpio",
+        type=Path,
+        help=(
+            "after restoring a checkpoint, unpack a newc/cpio archive into "
+            "the live Linux rootfs through Linux unpack_to_rootfs()"
+        ),
+    )
+    p.add_argument(
         "--probe-rootfs-after-checkpoint",
         action="store_true",
         help="probe live Linux rootfs paths and current task after checkpoint restore",
@@ -860,6 +868,61 @@ def inject_live_root_init(vm, path: Path) -> None:
     )
 
 
+
+def inject_live_root_initramfs(vm, path: Path) -> None:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise VMError(f"cannot read injected initramfs: {exc}") from exc
+    if not data:
+        raise VMError("injected initramfs is empty")
+    if "unpack_to_rootfs" not in vm.program.functions:
+        raise VMError("Linux unpack_to_rootfs is missing from P3 program")
+
+    data_ptr = vm.alloc_bytes(len(data), align=8)
+    for i, byte in enumerate(data):
+        vm.memory.write(data_ptr + i, 8, byte)
+
+    error_ptr, = _call_linux_function_preserving_control(
+        vm,
+        "unpack_to_rootfs",
+        (data_ptr, len(data)),
+        result_count=1,
+        max_extra_steps=25_000_000,
+    )
+    if error_ptr:
+        raw = bytearray()
+        for i in range(256):
+            byte = vm.memory.read(error_ptr + i, 8)
+            if byte == 0:
+                break
+            raw.append(byte)
+        message = raw.decode("utf-8", errors="replace")
+        raise VMError(
+            f"unpack_to_rootfs(initramfs) failed: ptr=0x{error_ptr:x} "
+            f"message={message!r}"
+        )
+
+    guest_path = b"/init\0"
+    path_ptr = vm.alloc_bytes(len(guest_path), align=8)
+    for i, byte in enumerate(guest_path):
+        vm.memory.write(path_ptr + i, 8, byte)
+    access, = _call_linux_function_preserving_control(
+        vm,
+        "init_eaccess",
+        (path_ptr,),
+        result_count=1,
+    )
+    if access != 0:
+        signed = access - (1 << 64) if access & (1 << 63) else access
+        raise VMError(f"init_eaccess(/init) after initramfs unpack failed: {signed}")
+
+    print(
+        "BOOT_EXEC_ROOTFS_UNPACKED "
+        f"path=/init archive_bytes={len(data)} via=unpack_to_rootfs",
+        flush=True,
+    )
+
 def current_instruction(vm):
     if vm.current_function is None or vm.current_block is None:
         return None
@@ -1077,7 +1140,21 @@ def main() -> int:
             except VMError as exc:
                 print(f"BOOT_EXEC_BLOCKED stage=rootfs-probe error={exc}")
                 return 1
-        if args.inject_init is not None:
+        if args.inject_init is not None and args.inject_initramfs_cpio is not None:
+            print(
+                "BOOT_EXEC_BLOCKED stage=rootfs-inject "
+                "error=choose only one of --inject-init or --inject-initramfs-cpio"
+            )
+            return 1
+        if args.inject_initramfs_cpio is not None:
+            try:
+                inject_live_root_initramfs(vm, args.inject_initramfs_cpio)
+                if args.skip_prepare_namespace_after_inject:
+                    skip_prepare_namespace_after_hot_init(vm)
+            except VMError as exc:
+                print(f"BOOT_EXEC_BLOCKED stage=rootfs-inject error={exc}")
+                return 1
+        elif args.inject_init is not None:
             try:
                 inject_live_root_init(vm, args.inject_init)
                 if args.skip_prepare_namespace_after_inject:
@@ -1088,7 +1165,7 @@ def main() -> int:
         elif args.skip_prepare_namespace_after_inject:
             print(
                 "BOOT_EXEC_BLOCKED stage=rootfs-inject "
-                "error=--skip-prepare-namespace-after-inject requires --inject-init"
+                "error=--skip-prepare-namespace-after-inject requires an injection source"
             )
             return 1
         print(
