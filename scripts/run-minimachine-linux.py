@@ -637,6 +637,7 @@ def main() -> int:
         symbols_by_address.setdefault(address, []).append(symbol)
     last_initcall_enter_step: int | None = None
     last_initcall_symbol = "<none>"
+    next_initcall_sample_step: int | None = None
 
     def install_sched_watch() -> None:
         nonlocal sched_watch_installed
@@ -684,6 +685,7 @@ def main() -> int:
     def observe_function_entry(function: str) -> None:
         nonlocal last_milestone_function
         nonlocal last_initcall_enter_step, last_initcall_symbol
+        nonlocal next_initcall_sample_step
 
         if function == "do_one_initcall":
             frame_size = vm.memory.read(vm.sp + 24, 64)
@@ -704,6 +706,7 @@ def main() -> int:
             )
             last_initcall_enter_step = vm.steps
             last_initcall_symbol = initcall_symbol
+            next_initcall_sample_step = vm.steps + 1_000_000
 
         if function == "sched_fork":
             install_sched_watch()
@@ -729,10 +732,25 @@ def main() -> int:
     original_set_code = vm._set_code
 
     def traced_set_code(code: int) -> None:
+        nonlocal next_initcall_sample_step
         function = traced_entry_codes.get(code)
         original_set_code(code)
         if function is not None:
             observe_function_entry(function)
+        if (
+            next_initcall_sample_step is not None
+            and last_initcall_enter_step is not None
+            and vm.steps >= next_initcall_sample_step
+        ):
+            print(
+                "BOOT_EXEC_INITCALL_SAMPLE "
+                f"steps={vm.steps} elapsed={vm.steps - last_initcall_enter_step} "
+                f"initcall={last_initcall_symbol} "
+                f"function={vm.current_function} block={vm.current_block} ip={vm.ip}",
+                flush=True,
+            )
+            while vm.steps >= next_initcall_sample_step:
+                next_initcall_sample_step += 1_000_000
 
     vm._set_code = traced_set_code
 
