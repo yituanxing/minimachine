@@ -562,6 +562,7 @@ def main() -> int:
     last_milestone_function = None
     milestone_functions = {
         "sched_init",
+        "sched_fork",
         "early_irq_init",
         "init_IRQ",
         "tick_init",
@@ -580,8 +581,48 @@ def main() -> int:
         "kthreadd",
     }
 
+    sched_watch_installed = False
+
     def traced_step():
-        nonlocal next_progress, last_milestone_function
+        nonlocal next_progress, last_milestone_function, sched_watch_installed
+
+        if vm.current_function == "sched_fork" and not sched_watch_installed:
+            linked = vm.program.functions.get("sched_fork")
+            sched_off = getattr(vm, "linux_task_sched_class_offset", None)
+            if linked is not None and sched_off is not None:
+                frame_size = vm.memory.read(vm.sp + 24, 64)
+                argc = vm.memory.read(vm.sp + 56, 64)
+                if argc >= 2:
+                    arg_base = vm.sp + frame_size
+                    task = vm.memory.read(arg_base + 8, 64)
+                    watched = task + sched_off
+                    print(
+                        "BOOT_EXEC_SCHED_WATCH_START "
+                        f"steps={vm.steps} task=0x{task:x} address=0x{watched:x} "
+                        f"value=0x{vm.memory.read(watched, 64):x}",
+                        flush=True,
+                    )
+                    original_memory_write = vm.memory.write
+
+                    def watched_write(address, bits, value):
+                        byte_count = bits // 8
+                        if address <= watched < address + byte_count:
+                            before = vm.memory.read(watched, 64)
+                            original_memory_write(address, bits, value)
+                            after = vm.memory.read(watched, 64)
+                            print(
+                                "BOOT_EXEC_SCHED_WATCH_WRITE "
+                                f"steps={vm.steps} function={vm.current_function} "
+                                f"block={vm.current_block} ip={vm.ip} "
+                                f"address=0x{address:x} bits={bits} "
+                                f"before=0x{before:x} after=0x{after:x}",
+                                flush=True,
+                            )
+                            return
+                        original_memory_write(address, bits, value)
+
+                    vm.memory.write = watched_write
+                    sched_watch_installed = True
         if (
             vm.current_function in milestone_functions
             and vm.current_function != last_milestone_function
