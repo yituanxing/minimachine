@@ -6,6 +6,7 @@ from dataclasses import fields, is_dataclass
 from pathlib import Path
 import re
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -941,6 +942,7 @@ def current_instruction(vm):
 
 
 def main() -> int:
+    runner_started = time.perf_counter()
     args = parse_args()
     llvm_text = args.input.read_text()
     linked_image_sha256 = image_fingerprint(llvm_text)
@@ -965,6 +967,11 @@ def main() -> int:
         print(
             "BOOT_EXEC_PROGRAM_CACHE_LOADED "
             f"path={args.program_cache_in} functions={p3_function_count}",
+            flush=True,
+        )
+        print(
+            "BOOT_EXEC_STAGE "
+            f"stage=program-cache elapsed_s={time.perf_counter() - runner_started:.3f}",
             flush=True,
         )
     else:
@@ -1118,8 +1125,15 @@ def main() -> int:
 
     if args.native_vm:
         from src.minimachine.native_vm import NativeVM
+        native_init_started = time.perf_counter()
         vm = NativeVM(program)
         print("BOOT_EXEC_BACKEND backend=native-c", flush=True)
+        print(
+            "BOOT_EXEC_STAGE "
+            f"stage=native-vm-init seconds={time.perf_counter() - native_init_started:.3f} "
+            f"elapsed_s={time.perf_counter() - runner_started:.3f}",
+            flush=True,
+        )
     else:
         vm = program.new_vm()
         print("BOOT_EXEC_BACKEND backend=python", flush=True)
@@ -1233,6 +1247,8 @@ def main() -> int:
         return 0
 
     last_milestone_function = None
+    last_milestone_time = None
+    execution_started = None
     milestone_functions = {
         "sched_init",
         "sched_fork",
@@ -1355,7 +1371,7 @@ def main() -> int:
         sched_watch_installed = True
 
     def observe_function_entry(function: str) -> None:
-        nonlocal last_milestone_function
+        nonlocal last_milestone_function, last_milestone_time
         nonlocal last_initcall_enter_step, last_initcall_symbol
         nonlocal checkpoint_written, checkpoint_after_armed
         nonlocal checkpoint_function_hits
@@ -1490,12 +1506,21 @@ def main() -> int:
             install_sched_watch()
 
         if function in milestone_functions:
+            now = time.perf_counter()
+            elapsed = now - execution_started if execution_started is not None else 0.0
+            since_last = (
+                now - last_milestone_time
+                if last_milestone_time is not None
+                else elapsed
+            )
             print(
                 "BOOT_EXEC_MILESTONE "
-                f"steps={vm.steps} function={function}",
+                f"steps={vm.steps} function={function} "
+                f"elapsed_s={elapsed:.3f} since_last_s={since_last:.3f}",
                 flush=True,
             )
             last_milestone_function = function
+            last_milestone_time = now
 
     traced_entry_codes: dict[int, str] = {}
     for function in milestone_functions:
@@ -1567,6 +1592,12 @@ def main() -> int:
 
         vm.step = progress_step
 
+    execution_started = time.perf_counter()
+    print(
+        "BOOT_EXEC_STAGE "
+        f"stage=execute-start elapsed_s={execution_started - runner_started:.3f}",
+        flush=True,
+    )
     try:
         if resumed_from_checkpoint:
             resume_limit = vm.steps + args.max_steps
@@ -1643,6 +1674,12 @@ def main() -> int:
         "BOOT_EXEC_HALTED "
         f"steps={vm.steps} function={vm.current_function} "
         f"block={vm.current_block} ip={vm.ip}"
+    )
+    print(
+        "BOOT_EXEC_STAGE "
+        f"stage=execute-end execute_s={time.perf_counter() - execution_started:.3f} "
+        f"total_s={time.perf_counter() - runner_started:.3f}",
+        flush=True,
     )
     return 0
 
