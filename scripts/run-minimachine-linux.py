@@ -220,16 +220,24 @@ def linux_ecall(vm, args: tuple[int, ...]):
         vm.linux_user_regs = regs
         vm.linux_user_pc = pc
         vm.linux_user_sp = user_sp
+
+        shadow_top = vm.linux_shadow_stack_next
+        vm.linux_shadow_stack_next -= 0x01000000
+        if vm.linux_shadow_stack_next <= vm.heap_next:
+            raise VMError("MiniMachine Linux user shadow stack exhausted")
+        vm.linux_user_shadow_stack_top = shadow_top
+
         print(
             "BOOT_EXEC_USER_ENTER "
             f"steps={vm.steps} task=0x{task:x} regs=0x{regs:x} "
-            f"pc=0x{pc:x} sp=0x{user_sp:x} function={function.name}",
+            f"pc=0x{pc:x} sp=0x{user_sp:x} p3_stack_top=0x{shadow_top:x} "
+            f"function={function.name}",
             flush=True,
         )
         vm.enter_function(
             function.name,
             (user_sp,),
-            stack_top=user_sp,
+            stack_top=shadow_top,
             result_count=0,
         )
         return HOST_CONTROL_TRANSFER
@@ -599,6 +607,17 @@ def main() -> int:
     program = Program(p3_functions)
     surface = collect_runtime_surface(strict_source)
     install_runtime(program, surface)
+
+    def user_milestone(_vm, args):
+        user_sp = args[0] if args else 0
+        print(
+            "BOOT_EXEC_USER_MILESTONE "
+            f"steps={_vm.steps} user_sp=0x{user_sp:x}",
+            flush=True,
+        )
+        return None
+
+    program.register_system("user_milestone", user_milestone)
     accelerated_runtime = accelerate_direct_runtime(program)
     if accelerated_runtime:
         print(
