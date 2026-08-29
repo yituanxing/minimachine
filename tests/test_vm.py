@@ -144,6 +144,26 @@ class VMTests(unittest.TestCase):
         # calls are redirected for replay acceleration.
         self.assertEqual(program.new_vm().run_function("dec", (41,)), (40,))
 
+    def test_runtime_loaded_function_installs_into_live_vm(self):
+        base = muir.Function(
+            "base",
+            [muir.Block("entry", [muir.Ret(muir.Imm(1))])],
+            set(),
+        )
+        runtime = muir.Function(
+            "runtime_user",
+            [muir.Block("entry", [muir.Ret(muir.Imm(7))])],
+            set(),
+        )
+        program = Program([machine(base)])
+        vm = program.new_vm()
+
+        vm.install_function(machine(runtime))
+
+        descriptor = program.symbol_addresses["runtime_user"]
+        self.assertNotEqual(vm.memory.read(descriptor, 64), 0)
+        self.assertEqual(vm.run_function("runtime_user", ()), (7,))
+
     def test_multi_result_system_service_executes(self):
         fn = muir.Function(
             "sys_pair_user",
