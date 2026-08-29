@@ -112,14 +112,24 @@ def main() -> int:
         description="Build the standard MiniMachine Linux initramfs cpio."
     )
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--init-output",
+        type=Path,
+        help="also write the raw executable /init bFLT image",
+    )
     args = parser.parse_args()
 
+    init_image = build_init_image()
     archive, init_size = build_cpio()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(archive)
+    if args.init_output is not None:
+        args.init_output.parent.mkdir(parents=True, exist_ok=True)
+        args.init_output.write_bytes(init_image)
     print(
         f"INITRAMFS_READY path={args.output} bytes={len(archive)} "
-        f"init_bytes={init_size} format=newc entries=8"
+        f"init_bytes={init_size} format=newc entries=8 "
+        f"init_output={args.init_output if args.init_output is not None else '-'}"
     )
     return 0
 
