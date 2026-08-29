@@ -2,7 +2,7 @@ name: Core IR Contract
 
 on:
   push:
-    branches: [main]
+    branches: [main, work/p3-kallsyms]
     paths:
       - src/minimachine/**
       - tests/**
