@@ -12,14 +12,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.minimachine import muir
-from src.minimachine.abi import expand_function
+from src.minimachine.abi import CALLER_SP, RESULT_COUNT, RESULT_PTR, RET_PC, expand_function
 from src.minimachine.image import ImageError, install_module_image, parse_module_image
 from src.minimachine.legalize import legalize_module
 from src.minimachine.linker import LinkerContract
 from src.minimachine.lower_p3 import lower_function
 from src.minimachine.runtime import collect_runtime_surface, install_runtime
 from src.minimachine.verify import verify_muir, verify_p3
-from src.minimachine.vm import Program, VMError
+from src.minimachine.vm import HOST_CONTROL_TRANSFER, Program, VMError
 
 
 def parse_args():
@@ -77,18 +77,78 @@ def register_traps(program: Program, reasons: set[str]) -> None:
 def linux_ecall(vm, args: tuple[int, ...]):
     # Boot-first host ABI:
     #   service 1: write(ptr, len) to the host boot console.
-    if len(args) != 3:
-        raise VMError(f"Linux ecall expects service,ptr,len; got {len(args)} args")
-    service, ptr, size = args
-    if service != 1:
-        raise VMError(f"unsupported MiniMachine Linux ecall service: {service}")
-    if size > 1 << 20:
-        raise VMError(f"MiniMachine Linux console write too large: {size}")
-    data = bytes(vm.memory.read(ptr + i, 8) for i in range(size))
-    text = data.decode("utf-8", errors="replace")
-    sys.stdout.write(text)
-    sys.stdout.flush()
-    return None
+    #   service 2: context_switch(prev,next,fresh_sp,start_fn,start_arg)
+    if not args:
+        raise VMError("Linux ecall requires a service number")
+
+    service = args[0]
+    if service == 1:
+        if len(args) != 3:
+            raise VMError(
+                f"Linux console ecall expects service,ptr,len; got {len(args)} args"
+            )
+        _, ptr, size = args
+        if size > 1 << 20:
+            raise VMError(f"MiniMachine Linux console write too large: {size}")
+        data = bytes(vm.memory.read(ptr + i, 8) for i in range(size))
+        text = data.decode("utf-8", errors="replace")
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        return None
+
+    if service == 2:
+        if len(args) != 6:
+            raise VMError(
+                "Linux context-switch ecall expects "
+                "service,prev,next,fresh_sp,start_fn,start_arg"
+            )
+        _, prev, next_task, fresh_sp, start_fn, start_arg = args
+
+        result_count = vm.memory.read(vm.sp + RESULT_COUNT, 64)
+        if result_count != 1:
+            raise VMError(
+                f"Linux context switch expects one result, got {result_count}"
+            )
+
+        contexts = getattr(vm, "linux_task_contexts", None)
+        if contexts is None:
+            contexts = {}
+            vm.linux_task_contexts = contexts
+
+        # Save where __switch_to() must continue when this task is resumed,
+        # together with the system-call result slot carrying the last task.
+        contexts[prev] = (
+            vm.memory.read(vm.sp + CALLER_SP, 64),
+            vm.memory.read(vm.sp + RET_PC, 64),
+            vm.memory.read(vm.sp + RESULT_PTR, 64),
+        )
+
+        saved = contexts.get(next_task)
+        if saved is not None:
+            resume_sp, resume_pc, result_ptr = saved
+            vm.memory.write(result_ptr, 64, prev)
+            vm.sp = resume_sp
+            vm.halted = False
+            vm._set_code(resume_pc)
+            return HOST_CONTROL_TRANSFER
+
+        if not fresh_sp or not start_fn:
+            raise VMError(
+                "first MiniMachine task switch lacks fresh stack/function: "
+                f"next=0x{next_task:x} sp=0x{fresh_sp:x} fn=0x{start_fn:x}"
+            )
+        if "minimachine_ret_from_fork" not in vm.program.functions:
+            raise VMError("MiniMachine ret-from-fork trampoline is missing")
+
+        vm.enter_function(
+            "minimachine_ret_from_fork",
+            (prev, start_fn, start_arg),
+            stack_top=fresh_sp,
+            result_count=0,
+        )
+        return HOST_CONTROL_TRANSFER
+
+    raise VMError(f"unsupported MiniMachine Linux ecall service: {service}")
 
 
 def referenced_slots(value):
@@ -376,6 +436,7 @@ def main() -> int:
 
     vm = program.new_vm()
     vm.ecall_handler = linux_ecall
+    vm.linux_task_contexts = {}
 
     original_step = vm.step
     next_progress = args.progress_every
@@ -394,8 +455,10 @@ def main() -> int:
         "console_init",
         "arch_call_rest_init",
         "rest_init",
+        "minimachine_ret_from_fork",
         "kernel_init",
         "kernel_init_freeable",
+        "kthreadd",
     }
 
     def traced_step():
