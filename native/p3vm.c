@@ -202,6 +202,129 @@ static void mem_write(MMVM *vm, uint64_t addr, unsigned bits, uint64_t v) {
         mem_write8(vm, addr + i, (uint8_t)(v >> (8 * i)));
 }
 
+
+static int mem_read_bytes(MMVM *vm, uint64_t addr, uint8_t *out, uint64_t n) {
+    while (n) {
+        uint64_t off = addr & (MM_PAGE_SIZE - 1);
+        uint64_t chunk = MM_PAGE_SIZE - off;
+        if (chunk > n) chunk = n;
+        MMPage *p = get_page(vm, addr >> MM_PAGE_SHIFT, 0);
+        if (p) memcpy(out, p->data + off, (size_t)chunk);
+        else memset(out, 0, (size_t)chunk);
+        addr += chunk;
+        out += chunk;
+        n -= chunk;
+    }
+    return 1;
+}
+
+static int mem_write_bytes(MMVM *vm, uint64_t addr, const uint8_t *in, uint64_t n) {
+    while (n) {
+        uint64_t off = addr & (MM_PAGE_SIZE - 1);
+        uint64_t chunk = MM_PAGE_SIZE - off;
+        if (chunk > n) chunk = n;
+        MMPage *p = get_page(vm, addr >> MM_PAGE_SHIFT, 1);
+        if (!p) return 0;
+        memcpy(p->data + off, in, (size_t)chunk);
+        addr += chunk;
+        in += chunk;
+        n -= chunk;
+    }
+    return !vm->oom;
+}
+
+static int mem_fill_bytes(MMVM *vm, uint64_t addr, uint8_t value, uint64_t n) {
+    while (n) {
+        uint64_t off = addr & (MM_PAGE_SIZE - 1);
+        uint64_t chunk = MM_PAGE_SIZE - off;
+        if (chunk > n) chunk = n;
+        MMPage *p = get_page(vm, addr >> MM_PAGE_SHIFT, 1);
+        if (!p) return 0;
+        memset(p->data + off, value, (size_t)chunk);
+        addr += chunk;
+        n -= chunk;
+    }
+    return !vm->oom;
+}
+
+static int mem_copy_bytes(MMVM *vm, uint64_t dst, uint64_t src,
+                          uint64_t n, int move_semantics) {
+    if (!n || dst == src) return 1;
+    uint8_t *tmp = (uint8_t *)malloc(MM_PAGE_SIZE);
+    if (!tmp) { vm->oom = 1; return 0; }
+
+    int backwards = (
+        move_semantics &&
+        dst > src &&
+        (dst - src) < n
+    );
+
+    if (backwards) {
+        uint64_t remaining = n;
+        while (remaining) {
+            uint64_t chunk = remaining > MM_PAGE_SIZE ? MM_PAGE_SIZE : remaining;
+            uint64_t start = remaining - chunk;
+            mem_read_bytes(vm, src + start, tmp, chunk);
+            if (!mem_write_bytes(vm, dst + start, tmp, chunk)) {
+                free(tmp);
+                return 0;
+            }
+            remaining = start;
+        }
+    } else {
+        uint64_t done = 0;
+        while (done < n) {
+            uint64_t chunk = n - done;
+            if (chunk > MM_PAGE_SIZE) chunk = MM_PAGE_SIZE;
+            mem_read_bytes(vm, src + done, tmp, chunk);
+            if (!mem_write_bytes(vm, dst + done, tmp, chunk)) {
+                free(tmp);
+                return 0;
+            }
+            done += chunk;
+        }
+    }
+
+    free(tmp);
+    return !vm->oom;
+}
+
+static int mem_compare_bytes(MMVM *vm, uint64_t a, uint64_t b, uint64_t n) {
+    uint8_t abuf[4096];
+    uint8_t bbuf[4096];
+    uint64_t done = 0;
+    while (done < n) {
+        uint64_t chunk = n - done;
+        if (chunk > sizeof(abuf)) chunk = sizeof(abuf);
+        mem_read_bytes(vm, a + done, abuf, chunk);
+        mem_read_bytes(vm, b + done, bbuf, chunk);
+        if (memcmp(abuf, bbuf, (size_t)chunk) != 0) {
+            for (uint64_t i = 0; i < chunk; ++i) {
+                if (abuf[i] != bbuf[i])
+                    return (int)abuf[i] - (int)bbuf[i];
+            }
+        }
+        done += chunk;
+    }
+    return 0;
+}
+
+static uint64_t mem_strlen_bytes(MMVM *vm, uint64_t addr) {
+    uint64_t length = 0;
+    for (;;) {
+        uint64_t off = addr & (MM_PAGE_SIZE - 1);
+        uint64_t chunk = MM_PAGE_SIZE - off;
+        MMPage *p = get_page(vm, addr >> MM_PAGE_SHIFT, 0);
+        if (!p) return length;
+        void *hit = memchr(p->data + off, 0, (size_t)chunk);
+        if (hit) {
+            return length + (uint64_t)((uint8_t *)hit - (p->data + off));
+        }
+        addr += chunk;
+        length += chunk;
+    }
+}
+
 static int find_block(MMVM *vm, uint64_t code, size_t *idx) {
     size_t lo = 0, hi = vm->block_count;
     while (lo < hi) {
@@ -361,6 +484,26 @@ uint64_t mm_vm_mem_read(MMVM *vm, uint64_t addr, unsigned bits) {
 void mm_vm_mem_write(MMVM *vm, uint64_t addr,
                      unsigned bits, uint64_t value) {
     mem_write(vm, addr, bits, value);
+}
+
+int mm_vm_mem_fill(MMVM *vm, uint64_t dst, uint8_t value, uint64_t n) {
+    return mem_fill_bytes(vm, dst, value, n);
+}
+
+int mm_vm_mem_copy(MMVM *vm, uint64_t dst, uint64_t src, uint64_t n) {
+    return mem_copy_bytes(vm, dst, src, n, 0);
+}
+
+int mm_vm_mem_move(MMVM *vm, uint64_t dst, uint64_t src, uint64_t n) {
+    return mem_copy_bytes(vm, dst, src, n, 1);
+}
+
+int mm_vm_mem_compare(MMVM *vm, uint64_t a, uint64_t b, uint64_t n) {
+    return mem_compare_bytes(vm, a, b, n);
+}
+
+uint64_t mm_vm_mem_strlen(MMVM *vm, uint64_t addr) {
+    return mem_strlen_bytes(vm, addr);
 }
 
 int mm_vm_set_watches(MMVM *vm, const uint64_t *codes, size_t n) {
