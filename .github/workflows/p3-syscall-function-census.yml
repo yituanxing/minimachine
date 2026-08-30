@@ -35,7 +35,7 @@ jobs:
           import gzip,pickle
           with gzip.open("hot/exec-hot-p3-cache.pkl.gz","rb") as f:
               obj=pickle.load(f)
-          program=obj.program
+          program=obj["cache"].program
           keys=sorted(program.functions)
           needles=("ksys_","__se_sys_","__do_sys_","sys_","do_execve","kernel_execve","vfs_","filp_open")
           hits=[k for k in keys if any(n in k for n in needles)]
