@@ -1,0 +1,42 @@
+name: MiniMachine Initcall Rootfs Static Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/initcall-rootfs-static-probe.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download exact initramfs artifact
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: exact
+
+      - name: Inspect rootfs initcall records
+        run: |
+          set -euo pipefail
+          ll=exact/llvm/linked.ll
+          echo ROOTFS_SECTION_COUNT=$(grep -c 'section ".initcallrootfs.init"' "$ll" || true)
+          echo POPULATE_ROOTFS_DEF_COUNT=$(grep -c '^define .*@populate_rootfs(' "$ll" || true)
+          echo DO_POPULATE_ROOTFS_DEF_COUNT=$(grep -c '^define .*@do_populate_rootfs(' "$ll" || true)
+          echo UNPACK_TO_ROOTFS_DEF_COUNT=$(grep -c '^define .*@unpack_to_rootfs(' "$ll" || true)
+          echo WAIT_FOR_INITRAMFS_DEF_COUNT=$(grep -c '^define .*@wait_for_initramfs(' "$ll" || true)
+          echo '--- rootfs initcall globals ---'
+          grep -n -B2 -A3 'section ".initcallrootfs.init"' "$ll" | head -120 || true
+          echo '--- populate references ---'
+          grep -n -E '@(populate_rootfs|do_populate_rootfs|unpack_to_rootfs|wait_for_initramfs)' "$ll" | head -160 || true
