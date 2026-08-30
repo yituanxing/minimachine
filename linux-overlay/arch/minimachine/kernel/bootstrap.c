@@ -7,6 +7,7 @@
  * service problem and will be split into focused files after first boot.
  */
 
+#include <linux/console.h>
 #include <linux/delay.h>
 #include <linux/uaccess.h>
 #include <linux/fs.h>
@@ -151,6 +152,28 @@ static int __init minimachine_console_device_init(void)
 	return 0;
 }
 device_initcall(minimachine_console_device_init);
+
+static void minimachine_printk_write(struct console *console,
+				     const char *text,
+				     unsigned int len)
+{
+	(void)console;
+	minimachine_boot_console(text, len);
+}
+
+static struct console minimachine_printk_console = {
+	.name = "ttyMM",
+	.write = minimachine_printk_write,
+	.flags = CON_PRINTBUFFER | CON_ENABLED,
+	.index = 0,
+};
+
+static int __init minimachine_printk_console_init(void)
+{
+	register_console(&minimachine_printk_console);
+	return 0;
+}
+console_initcall(minimachine_printk_console_init);
 
 static unsigned long minimachine_irq_state;
 
