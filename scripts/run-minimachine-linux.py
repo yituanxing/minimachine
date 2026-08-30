@@ -378,6 +378,29 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return (1 << 64) - 1
         return raw
 
+    if original == "isatty":
+        def user_isatty(vm, args):
+            if len(args) != 1:
+                raise VMError("isatty expects fd")
+            if "__se_sys_ioctl" not in vm.program.functions:
+                raise VMError("Linux image is missing __se_sys_ioctl")
+            fd = int(args[0])
+            termios = vm.alloc_bytes(64, align=8)
+            result, = _call_linux_function_preserving_control(
+                vm,
+                "__se_sys_ioctl",
+                (fd, 0x5401, termios),
+                result_count=1,
+                max_extra_steps=2_000_000,
+            )
+            signed = result - (1 << 64) if result & (1 << 63) else result
+            if signed < 0:
+                set_errno(vm, -signed)
+                return 0
+            return 1
+
+        return user_isatty
+
     if original == "getcwd":
         def user_getcwd(vm, args):
             if len(args) != 2:
