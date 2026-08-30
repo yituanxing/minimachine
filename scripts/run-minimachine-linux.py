@@ -371,6 +371,47 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
         if errno_address is not None:
             vm.memory.write(errno_address, 32, value & 0xFFFFFFFF)
 
+    def libc_linux_result(vm, raw: int) -> int:
+        signed = raw - (1 << 64) if raw & (1 << 63) else raw
+        if -4095 <= signed < 0:
+            set_errno(vm, -signed)
+            return (1 << 64) - 1
+        return raw
+
+    if original == "getcwd":
+        def user_getcwd(vm, args):
+            if len(args) != 2:
+                raise VMError("getcwd expects buffer,size")
+            buf, size = map(int, args)
+            if "__se_sys_getcwd" not in vm.program.functions:
+                raise VMError("Linux image is missing __se_sys_getcwd")
+
+            if buf == 0:
+                alloc_size = size if size else 4096
+                if alloc_size <= 0:
+                    set_errno(vm, 22)
+                    return 0
+                buf = vm.alloc_bytes(alloc_size, align=1)
+                size = alloc_size
+            elif size == 0:
+                set_errno(vm, 22)
+                return 0
+
+            result, = _call_linux_function_preserving_control(
+                vm,
+                "__se_sys_getcwd",
+                (buf, size),
+                result_count=1,
+                max_extra_steps=2_000_000,
+            )
+            signed = result - (1 << 64) if result & (1 << 63) else result
+            if signed < 0:
+                set_errno(vm, -signed)
+                return 0
+            return buf
+
+        return user_getcwd
+
     def check_signal_number(vm, signum: int) -> bool:
         if 1 <= signum <= 64:
             return True
@@ -586,6 +627,11 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
         "read": (63, 3),
         "write": (64, 3),
         "_exit": (93, 1),
+        "chdir": (49, 1),
+        "close": (57, 1),
+        "gettimeofday": (169, 2),
+        "umask": (166, 1),
+        "times": (153, 1),
         "getpid": (172, 0),
         "getppid": (173, 0),
         "getuid": (174, 0),
@@ -604,7 +650,8 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     f"{original} expects {argc} arguments, got {len(args)}"
                 )
             padded = tuple(args) + (0,) * (6 - len(args))
-            return user_syscall(vm, (nr, *padded))
+            raw = user_syscall(vm, (nr, *padded))
+            return libc_linux_result(vm, raw)
         return libc_syscall
 
     def unimplemented(_vm, args):
@@ -961,10 +1008,15 @@ def user_syscall(vm, args: tuple[int, ...]):
 
     nr, *argv = args
     fallback = {
+        49: ("__se_sys_chdir", 1),
+        57: ("__se_sys_close", 1),
         63: ("__se_sys_read", 3),
         64: ("__se_sys_write", 3),
         93: ("__se_sys_exit", 1),
         94: ("__se_sys_exit_group", 1),
+        153: ("__se_sys_times", 1),
+        166: ("__se_sys_umask", 1),
+        169: ("__se_sys_gettimeofday", 2),
         172: ("sys_getpid", 0),
         173: ("sys_getppid", 0),
         174: ("sys_getuid", 0),
