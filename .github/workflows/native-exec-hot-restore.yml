@@ -7,8 +7,6 @@ on:
     paths:
       - scripts/run-minimachine-linux.py
       - src/minimachine/checkpoint.py
-      - src/minimachine/native_vm.py
-      - native/p3vm.c
       - .github/workflows/native-exec-hot-restore.yml
 
 permissions:
