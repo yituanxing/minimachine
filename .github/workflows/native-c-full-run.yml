@@ -6,6 +6,7 @@ on:
     paths:
       - native/**
       - src/minimachine/native_vm.py
+      - src/minimachine/runtime.py
       - scripts/run-minimachine-linux.py
       - .github/workflows/native-c-full-run.yml
   workflow_dispatch:
@@ -48,6 +49,7 @@ jobs:
             --initramfs replay-source/out/minimachine-initramfs.cpio \
             --native-vm \
             --native-boot-phases-only \
+            --native-report-every 50000000 \
             --stop-after-user-handoff \
             --max-steps 0 \
             --progress-every 0 \
