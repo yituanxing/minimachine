@@ -22,11 +22,13 @@
 #include <linux/seq_file.h>
 #include <linux/screen_info.h>
 #include <linux/string.h>
+#include <linux/syscalls.h>
 
 #include <asm/page.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
 #include <asm/sections.h>
+#include <asm/unistd.h>
 
 #define MINIMACHINE_BOOT_RAM_SIZE (32UL * 1024 * 1024)
 
@@ -70,6 +72,46 @@ static __always_inline void minimachine_boot_console(const char *text,
 }
 
 static unsigned long minimachine_irq_state;
+
+/*
+ * Semantic user -> kernel syscall boundary.
+ *
+ * User P3 code traps through the MiniMachine host transport, which then
+ * invokes this architecture entry.  Keep Linux fd/VFS semantics on the
+ * kernel side instead of implementing userspace I/O in the host.
+ *
+ * Stage 1 intentionally exposes only the calls required to prove an
+ * interactive userspace prompt.  Process/exec syscalls are added after the
+ * read/write/exit path is validated end-to-end.
+ */
+long __used minimachine_user_syscall(unsigned long nr,
+				     unsigned long arg0,
+				     unsigned long arg1,
+				     unsigned long arg2,
+				     unsigned long arg3,
+				     unsigned long arg4,
+				     unsigned long arg5)
+{
+	(void)arg3;
+	(void)arg4;
+	(void)arg5;
+
+	switch (nr) {
+	case __NR_read:
+		return ksys_read((unsigned int)arg0,
+				 (char __user *)arg1,
+				 (size_t)arg2);
+	case __NR_write:
+		return ksys_write((unsigned int)arg0,
+				  (const char __user *)arg1,
+				  (size_t)arg2);
+	case __NR_exit:
+	case __NR_exit_group:
+		do_exit((long)arg0);
+	default:
+		return -ENOSYS;
+	}
+}
 
 unsigned long minimachine_irq_save_flags(void)
 {
