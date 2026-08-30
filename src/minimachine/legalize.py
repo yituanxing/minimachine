@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 import re
+import struct
 
 from . import muir
 from .llvm_text import TextBlock, TextFunction, TextInst, parse_module
@@ -64,6 +65,8 @@ class LegalizeStats:
     lowered_indirectbr: int = 0
     lowered_undef_indirectbr: int = 0
     lowered_switch: int = 0
+    lowered_float_ops: int = 0
+    lowered_float_casts: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -102,6 +105,8 @@ class LegalizeStats:
             "lowered_indirectbr": self.lowered_indirectbr,
             "lowered_undef_indirectbr": self.lowered_undef_indirectbr,
             "lowered_switch": self.lowered_switch,
+            "lowered_float_ops": self.lowered_float_ops,
+            "lowered_float_casts": self.lowered_float_casts,
         }
 
 
@@ -142,10 +147,20 @@ def _storage_width(bits: int) -> muir.Width:
     raise ValueError(f"integer width exceeds one MiniMachine slot: i{bits}")
 
 
+_FP_BITS = {
+    "half": 16,
+    "float": 32,
+    "double": 64,
+}
+
+
 def _first_width(text: str, *, default_pointer: bool = False) -> muir.Width:
     m = _INT_TYPE_RE.search(text)
     if m:
         return _storage_width(int(m.group(1)))
+    for ty, bits in _FP_BITS.items():
+        if re.search(rf"\b{ty}\b", text):
+            return _storage_width(bits)
     if default_pointer and re.search(r"\bptr\b", text):
         return muir.Width.I64
     raise ValueError(f"cannot determine supported width from: {text}")
@@ -171,6 +186,69 @@ def _value(segment: str) -> muir.Value:
     if token in {"false", "null"}:
         return muir.Imm(0)
     return muir.Imm(int(token))
+
+
+def _fp_constant_bits(ty: str, text: str) -> int:
+    bits = _FP_BITS.get(ty)
+    if bits not in {32, 64}:
+        raise ValueError(f"unsupported floating type: {ty}")
+    raw = text.strip()
+
+    if raw.startswith(("0x", "0X")):
+        encoded = int(raw[2:], 16)
+        if bits == 64:
+            return encoded & ((1 << 64) - 1)
+        digits = raw[2:]
+        if len(digits) <= 8:
+            return encoded & 0xFFFFFFFF
+        if len(digits) > 16:
+            raise ValueError(f"unsupported float hexadecimal constant: {raw}")
+        # LLVM commonly prints float hexadecimal literals in the exact
+        # double-width notation accepted by the assembler. Decode that exact
+        # double value, then round it once to binary32.
+        value = struct.unpack(">d", encoded.to_bytes(8, "big"))[0]
+        return int.from_bytes(struct.pack(">f", value), "big")
+
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"cannot parse floating constant {ty} {raw}") from exc
+
+    fmt = ">f" if bits == 32 else ">d"
+    try:
+        packed = struct.pack(fmt, value)
+    except OverflowError:
+        packed = struct.pack(
+            fmt,
+            float("-inf") if value < 0 else float("inf"),
+        )
+    return int.from_bytes(packed, "big")
+
+
+def _fp_value(ty: str, text: str) -> muir.Value:
+    raw = text.strip()
+    if re.search(r"\bpoison\b", raw):
+        return muir.Arbitrary("poison")
+    if re.search(r"\bundef\b", raw):
+        return muir.Arbitrary("undef")
+    locals_ = _LOCAL_RE.findall(raw)
+    if locals_:
+        return _slot(locals_[-1])
+    symbols = re.findall(r"@[-A-Za-z$._0-9]+", raw)
+    if symbols:
+        return muir.Symbol(symbols[-1][1:])
+    return muir.Imm(_fp_constant_bits(ty, raw))
+
+
+def _call_scalar_value(segment: str, layout: DataLayout) -> muir.Value:
+    if "getelementptr" in segment:
+        pos = segment.find("getelementptr")
+        return _const_gep_value(segment[pos:], layout)
+    fm = re.search(r"\b(half|float|double)\b\s+(.+)$", segment)
+    if fm:
+        ty, value_text = fm.groups()
+        return _fp_value(ty, value_text)
+    return _value(segment)
 
 
 def _strip_memory_qualifiers(text: str) -> str:
@@ -539,6 +617,8 @@ def _const_scalar_value(text: str, layout: DataLayout) -> muir.Value:
 
 def _parse_phi(inst: TextInst, layout: DataLayout):
     width = _first_width(inst.text, default_pointer=True)
+    fp_match = re.match(r"phi\s+(half|float|double)\b", inst.text.strip())
+    fp_ty = fp_match.group(1) if fp_match else None
     incoming=[]
     text=inst.text
     stack=[]
@@ -564,6 +644,8 @@ def _parse_phi(inst: TextInst, layout: DataLayout):
                         value=_DeferredIcmp(
                             pred, bits, lhs_text, rhs_text
                         )
+                    elif fp_ty is not None:
+                        value=_fp_value(fp_ty, value_text)
                     else:
                         value=_value(value_text)
                     incoming.append((value, parts[1][1:]))
@@ -580,6 +662,8 @@ def _scalar_size(ty: str) -> int | None:
         return int(m.group(1)) // 8
     if ty == "ptr":
         return 8
+    if ty in _FP_BITS:
+        return _FP_BITS[ty] // 8
     m = re.fullmatch(r"\[(\d+)\s+x\s+i(8|16|32|64)\]", ty)
     if m:
         return int(m.group(1)) * (int(m.group(2)) // 8)
@@ -683,11 +767,7 @@ def _call_args(text: str, callee_end: int, layout: DataLayout) -> tuple[muir.Val
         if c == "," and depth == 0:
             segment = "".join(part).strip()
             if segment:
-                if "getelementptr" in segment:
-                    pos = segment.find("getelementptr")
-                    args.append(_const_gep_value(segment[pos:], layout))
-                else:
-                    args.append(_value(segment))
+                args.append(_call_scalar_value(segment, layout))
             part = []
         else:
             part.append(c)
@@ -1995,10 +2075,14 @@ def legalize_function(
                         else:
                             stats.folded_gep_mem += 1
 
-                    if ty=="ptr" or re.fullmatch(r"i\d+",ty):
+                    if ty=="ptr" or re.fullmatch(r"i\d+",ty) or ty in _FP_BITS:
                         if ty=="ptr":
                             width=muir.Width.I64
                             out.append(muir.Mov(width,result,muir.Mem(addr,width)))
+                        elif ty in _FP_BITS:
+                            bits = _FP_BITS[ty]
+                            width = _storage_width(bits)
+                            out.append(muir.Mov(width, result, muir.Mem(addr, width)))
                         else:
                             bits=int(ty[1:])
                             if bits in {1,8,16,32,64}:
@@ -2050,6 +2134,8 @@ def legalize_function(
                         raise ValueError(f"cannot parse store pointer: {inst.text}")
                     if value_text.startswith("getelementptr"):
                         src = _const_gep_value(value_text, layout)
+                    elif ty in _FP_BITS:
+                        src = _fp_value(ty, value_text)
                     else:
                         src = _value(value_text)
                     ptr_text=pm.group(1).strip()
@@ -2066,10 +2152,14 @@ def legalize_function(
                         else:
                             stats.folded_gep_mem += 1
 
-                    if ty=="ptr" or re.fullmatch(r"i\d+",ty):
+                    if ty=="ptr" or re.fullmatch(r"i\d+",ty) or ty in _FP_BITS:
                         if ty=="ptr":
                             width=muir.Width.I64
                             out.append(muir.Mov(width,muir.Mem(addr,width),src))
+                        elif ty in _FP_BITS:
+                            bits = _FP_BITS[ty]
+                            width = _storage_width(bits)
+                            out.append(muir.Mov(width, muir.Mem(addr, width), src))
                         else:
                             bits=int(ty[1:])
                             if bits in {1,8,16,32,64}:
@@ -2106,6 +2196,169 @@ def legalize_function(
                                 None,
                             )
                         )
+                    continue
+
+
+                if op in {"fadd", "fsub", "fmul", "fdiv"}:
+                    m = re.match(
+                        rf"{op}(?:\s+[A-Za-z]+)*\s+(half|float|double)\s+(.+)$",
+                        inst.text,
+                    )
+                    if not m or result is None:
+                        raise ValueError(f"cannot parse floating op {op}: {inst.text}")
+                    ty, body = m.groups()
+                    bits = _FP_BITS[ty]
+                    if bits not in {32, 64}:
+                        raise ValueError(f"unsupported floating width: {ty}")
+                    operands = _split_top_commas(body)
+                    if len(operands) != 2:
+                        raise ValueError(
+                            f"cannot parse floating operands {op}: {inst.text}"
+                        )
+                    lhs = _fp_value(ty, operands[0])
+                    rhs = _fp_value(ty, operands[1])
+                    stats.temporary_helpers += 1
+                    stats.lowered_float_ops += 1
+                    out.append(
+                        muir.Helper(
+                            f"__mm_{op}_{bits}",
+                            (lhs, rhs),
+                            result,
+                        )
+                    )
+                    continue
+
+                if op == "fneg":
+                    m = re.match(
+                        r"fneg(?:\s+[A-Za-z]+)*\s+(half|float|double)\s+(.+)$",
+                        inst.text,
+                    )
+                    if not m or result is None:
+                        raise ValueError(f"cannot parse fneg: {inst.text}")
+                    ty, value_text = m.groups()
+                    bits = _FP_BITS[ty]
+                    if bits not in {32, 64}:
+                        raise ValueError(f"unsupported floating width: {ty}")
+                    stats.temporary_helpers += 1
+                    stats.lowered_float_ops += 1
+                    out.append(
+                        muir.Helper(
+                            f"__mm_fneg_{bits}",
+                            (_fp_value(ty, value_text),),
+                            result,
+                        )
+                    )
+                    continue
+
+                if op == "fcmp":
+                    predicates = (
+                        "false|oeq|ogt|oge|olt|ole|one|ord|"
+                        "ueq|ugt|uge|ult|ule|une|uno|true"
+                    )
+                    m = re.match(
+                        rf"fcmp(?:\s+[A-Za-z]+)*\s+({predicates})\s+"
+                        r"(half|float|double)\s+(.+)$",
+                        inst.text,
+                    )
+                    if not m or result is None:
+                        raise ValueError(f"cannot parse fcmp: {inst.text}")
+                    pred, ty, body = m.groups()
+                    bits = _FP_BITS[ty]
+                    if bits not in {32, 64}:
+                        raise ValueError(f"unsupported floating width: {ty}")
+                    operands = _split_top_commas(body)
+                    if len(operands) != 2:
+                        raise ValueError(f"cannot parse fcmp operands: {inst.text}")
+                    stats.temporary_helpers += 1
+                    stats.lowered_float_ops += 1
+                    out.append(
+                        muir.Helper(
+                            f"__mm_fcmp_{pred}_{bits}",
+                            (
+                                _fp_value(ty, operands[0]),
+                                _fp_value(ty, operands[1]),
+                            ),
+                            result,
+                        )
+                    )
+                    continue
+
+                if op in {"sitofp", "uitofp"}:
+                    m = re.match(
+                        rf"{op}\s+i(\d+)\s+(.+?)\s+to\s+(half|float|double)$",
+                        inst.text,
+                    )
+                    if not m or result is None:
+                        raise ValueError(f"cannot parse {op}: {inst.text}")
+                    src_bits = int(m.group(1))
+                    value_text = m.group(2)
+                    dst_ty = m.group(3)
+                    dst_bits = _FP_BITS[dst_ty]
+                    if src_bits > 64 or dst_bits not in {32, 64}:
+                        raise ValueError(
+                            f"unsupported {op} width i{src_bits}->{dst_ty}"
+                        )
+                    stats.temporary_helpers += 1
+                    stats.lowered_float_casts += 1
+                    out.append(
+                        muir.Helper(
+                            f"__mm_{op}_{src_bits}_{dst_bits}",
+                            (_value(value_text),),
+                            result,
+                        )
+                    )
+                    continue
+
+                if op in {"fptosi", "fptoui"}:
+                    m = re.match(
+                        rf"{op}\s+(half|float|double)\s+(.+?)\s+to\s+i(\d+)$",
+                        inst.text,
+                    )
+                    if not m or result is None:
+                        raise ValueError(f"cannot parse {op}: {inst.text}")
+                    src_ty = m.group(1)
+                    value_text = m.group(2)
+                    dst_bits = int(m.group(3))
+                    src_bits = _FP_BITS[src_ty]
+                    if src_bits not in {32, 64} or dst_bits > 64:
+                        raise ValueError(
+                            f"unsupported {op} width {src_ty}->i{dst_bits}"
+                        )
+                    stats.temporary_helpers += 1
+                    stats.lowered_float_casts += 1
+                    out.append(
+                        muir.Helper(
+                            f"__mm_{op}_{src_bits}_{dst_bits}",
+                            (_fp_value(src_ty, value_text),),
+                            result,
+                        )
+                    )
+                    continue
+
+                if op in {"fpext", "fptrunc"}:
+                    m = re.match(
+                        rf"{op}\s+(half|float|double)\s+(.+?)\s+to\s+"
+                        r"(half|float|double)$",
+                        inst.text,
+                    )
+                    if not m or result is None:
+                        raise ValueError(f"cannot parse {op}: {inst.text}")
+                    src_ty, value_text, dst_ty = m.groups()
+                    src_bits = _FP_BITS[src_ty]
+                    dst_bits = _FP_BITS[dst_ty]
+                    if src_bits not in {32, 64} or dst_bits not in {32, 64}:
+                        raise ValueError(
+                            f"unsupported {op} width {src_ty}->{dst_ty}"
+                        )
+                    stats.temporary_helpers += 1
+                    stats.lowered_float_casts += 1
+                    out.append(
+                        muir.Helper(
+                            f"__mm_{op}_{src_bits}_{dst_bits}",
+                            (_fp_value(src_ty, value_text),),
+                            result,
+                        )
+                    )
                     continue
 
 
@@ -2428,8 +2681,23 @@ def legalize_function(
                         raise ValueError(f"cannot parse select condition: {inst.text}")
                     cond=_value(cm.group(1))
                     try:
-                        tv=_value(parts[1])
-                        fv=_value(parts[2])
+                        fp_select = re.match(
+                            r"(half|float|double)\s+(.+)$",
+                            parts[1].strip(),
+                        )
+                        if fp_select is not None:
+                            select_ty = fp_select.group(1)
+                            tv = _fp_value(select_ty, fp_select.group(2))
+                            fv_match = re.match(
+                                rf"{select_ty}\s+(.+)$",
+                                parts[2].strip(),
+                            )
+                            if fv_match is None:
+                                raise ValueError("floating select type mismatch")
+                            fv = _fp_value(select_ty, fv_match.group(1))
+                        else:
+                            tv=_value(parts[1])
+                            fv=_value(parts[2])
                     except ValueError as e:
                         raise ValueError(f"cannot parse select values: {inst.text}") from e
                     type_text = re.sub(
@@ -2806,7 +3074,22 @@ def legalize_function(
                         out.append(muir.Ret(None))
                     else:
                         try:
-                            out.append(muir.Ret(_value(inst.text)))
+                            body = inst.text[len("ret "):].strip()
+                            fp_ret = re.match(
+                                r"(half|float|double)\s+(.+)$",
+                                body,
+                            )
+                            if fp_ret is not None:
+                                out.append(
+                                    muir.Ret(
+                                        _fp_value(
+                                            fp_ret.group(1),
+                                            fp_ret.group(2),
+                                        )
+                                    )
+                                )
+                            else:
+                                out.append(muir.Ret(_value(inst.text)))
                         except ValueError as e:
                             raise ValueError(f"cannot parse ret: {inst.text}") from e
                     continue

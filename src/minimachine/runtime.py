@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import re
+import struct
 from typing import Iterable
 
 from . import muir
@@ -108,6 +110,84 @@ def _icmp(pred: str, bits: int, a: int, b: int) -> int:
         return int(table[pred])
     except KeyError as exc:
         raise VMError(f"unknown icmp predicate: {pred}") from exc
+
+
+def _fp_decode(bits: int, value: int) -> float:
+    if bits == 32:
+        return struct.unpack(">f", (value & 0xFFFFFFFF).to_bytes(4, "big"))[0]
+    if bits == 64:
+        return struct.unpack(">d", (value & MASK64).to_bytes(8, "big"))[0]
+    raise VMError(f"unsupported floating width: {bits}")
+
+
+def _fp_encode(bits: int, value: float) -> int:
+    fmt = ">f" if bits == 32 else ">d" if bits == 64 else None
+    if fmt is None:
+        raise VMError(f"unsupported floating width: {bits}")
+    try:
+        packed = struct.pack(fmt, value)
+    except OverflowError:
+        packed = struct.pack(
+            fmt,
+            math.copysign(math.inf, value),
+        )
+    return int.from_bytes(packed, "big")
+
+
+def _fp_binary(op: str, bits: int, a_raw: int, b_raw: int) -> int:
+    a = _fp_decode(bits, a_raw)
+    b = _fp_decode(bits, b_raw)
+    if op == "fadd":
+        value = a + b
+    elif op == "fsub":
+        value = a - b
+    elif op == "fmul":
+        value = a * b
+    elif op == "fdiv":
+        if b == 0.0:
+            if math.isnan(a) or a == 0.0:
+                value = math.nan
+            else:
+                sign = (
+                    math.copysign(1.0, a)
+                    * math.copysign(1.0, b)
+                )
+                value = math.copysign(math.inf, sign)
+        else:
+            value = a / b
+    else:
+        raise VMError(f"unsupported floating binary op: {op}")
+    return _fp_encode(bits, value)
+
+
+def _fp_compare(pred: str, bits: int, a_raw: int, b_raw: int) -> int:
+    a = _fp_decode(bits, a_raw)
+    b = _fp_decode(bits, b_raw)
+    unordered = math.isnan(a) or math.isnan(b)
+    ordered = not unordered
+
+    table = {
+        "false": False,
+        "oeq": ordered and a == b,
+        "ogt": ordered and a > b,
+        "oge": ordered and a >= b,
+        "olt": ordered and a < b,
+        "ole": ordered and a <= b,
+        "one": ordered and a != b,
+        "ord": ordered,
+        "ueq": unordered or a == b,
+        "ugt": unordered or a > b,
+        "uge": unordered or a >= b,
+        "ult": unordered or a < b,
+        "ule": unordered or a <= b,
+        "une": unordered or a != b,
+        "uno": unordered,
+        "true": True,
+    }
+    try:
+        return int(table[pred])
+    except KeyError as exc:
+        raise VMError(f"unsupported floating predicate: {pred}") from exc
 
 
 def _int_abi_align(bits: int) -> int:
@@ -243,6 +323,107 @@ def helper_callback(symbol: str):
 
         return va_end
 
+
+    m = re.fullmatch(r"__mm_(fadd|fsub|fmul|fdiv)_(32|64)", symbol)
+    if m:
+        op, bits_text = m.groups()
+        bits = int(bits_text)
+
+        def fp_binary(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError(f"{symbol} expects 2 arguments")
+            return _fp_binary(op, bits, args[0], args[1])
+
+        return fp_binary
+
+    m = re.fullmatch(r"__mm_fneg_(32|64)", symbol)
+    if m:
+        bits = int(m.group(1))
+        sign_bit = 1 << (bits - 1)
+        mask = (1 << bits) - 1
+
+        def fp_neg(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects 1 argument")
+            return (args[0] ^ sign_bit) & mask
+
+        return fp_neg
+
+    m = re.fullmatch(
+        r"__mm_fcmp_(false|oeq|ogt|oge|olt|ole|one|ord|"
+        r"ueq|ugt|uge|ult|ule|une|uno|true)_(32|64)",
+        symbol,
+    )
+    if m:
+        pred, bits_text = m.groups()
+        bits = int(bits_text)
+
+        def fp_compare(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError(f"{symbol} expects 2 arguments")
+            return _fp_compare(pred, bits, args[0], args[1])
+
+        return fp_compare
+
+    m = re.fullmatch(r"__mm_(sitofp|uitofp)_(\d+)_(32|64)", symbol)
+    if m:
+        op, src_text, dst_text = m.groups()
+        src_bits = int(src_text)
+        dst_bits = int(dst_text)
+        src_mask = (1 << src_bits) - 1
+
+        def int_to_fp(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects 1 argument")
+            value = args[0] & src_mask
+            if op == "sitofp":
+                value = _signed(value, src_bits)
+            return _fp_encode(dst_bits, float(value))
+
+        return int_to_fp
+
+    m = re.fullmatch(r"__mm_(fptosi|fptoui)_(32|64)_(\d+)", symbol)
+    if m:
+        op, src_text, dst_text = m.groups()
+        src_bits = int(src_text)
+        dst_bits = int(dst_text)
+        dst_mask = (1 << dst_bits) - 1
+
+        def fp_to_int(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects 1 argument")
+            value = _fp_decode(src_bits, args[0])
+            if not math.isfinite(value):
+                raise VMError(f"{symbol} reached LLVM poison non-finite input")
+            integer = math.trunc(value)
+            if op == "fptosi":
+                lo = -(1 << (dst_bits - 1))
+                hi = 1 << (dst_bits - 1)
+                if not (lo <= integer < hi):
+                    raise VMError(
+                        f"{symbol} reached LLVM poison out-of-range input"
+                    )
+            else:
+                if not (0 <= integer < (1 << dst_bits)):
+                    raise VMError(
+                        f"{symbol} reached LLVM poison out-of-range input"
+                    )
+            return integer & dst_mask
+
+        return fp_to_int
+
+    m = re.fullmatch(r"__mm_(fpext|fptrunc)_(32|64)_(32|64)", symbol)
+    if m:
+        _op, src_text, dst_text = m.groups()
+        src_bits = int(src_text)
+        dst_bits = int(dst_text)
+
+        def fp_cast(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects 1 argument")
+            return _fp_encode(dst_bits, _fp_decode(src_bits, args[0]))
+
+        return fp_cast
 
     m = re.fullmatch(
         r"__mm_(and|or|xor|shl|lshr|ashr|mul|udiv|sdiv|urem|srem)_(\d+)",

@@ -301,6 +301,59 @@ class LegalizerTests(unittest.TestCase):
         self.assertEqual(entry[1].false_target.label, "taken")
         self.assertEqual(stats.lowered_static_branch, 1)
 
+    def test_float_ops_lower_to_ieee_bit_helpers(self):
+        fn, stats = self.lower_one(
+            """
+            define i32 @fp(i32 %x, ptr %p) {
+            entry:
+              %a = sitofp i32 %x to double
+              %b = fmul double %a, 2.500000e+00
+              %c = fcmp ogt double %b, 0.000000e+00
+              store double %b, ptr %p
+              %d = load double, ptr %p
+              %e = fptosi double %d to i32
+              %r = select i1 %c, i32 %e, i32 0
+              ret i32 %r
+            }
+            """
+        )
+        helpers = [
+            inst.symbol
+            for block in fn.blocks
+            for inst in block.instructions
+            if isinstance(inst, muir.Helper)
+        ]
+        self.assertIn("__mm_sitofp_32_64", helpers)
+        self.assertIn("__mm_fmul_64", helpers)
+        self.assertIn("__mm_fcmp_ogt_64", helpers)
+        self.assertIn("__mm_fptosi_64_32", helpers)
+        self.assertEqual(stats.lowered_float_ops, 2)
+        self.assertEqual(stats.lowered_float_casts, 2)
+
+    def test_float_phi_and_return_constant_are_raw_bits(self):
+        fn, _ = self.lower_one(
+            """
+            define double @fp_phi(i1 %c) {
+            entry:
+              br i1 %c, label %yes, label %no
+            yes:
+              br label %join
+            no:
+              br label %join
+            join:
+              %v = phi double [ 1.500000e+00, %yes ], [ 2.500000e+00, %no ]
+              ret double %v
+            }
+            """
+        )
+        self.assertTrue(
+            any(
+                isinstance(inst, muir.Mov)
+                for block in fn.blocks
+                for inst in block.instructions
+            )
+        )
+
     def test_busybox_forget_const_inline_asm_is_identity(self):
         fn, stats = self.lower_one(
             r"""

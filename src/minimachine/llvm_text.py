@@ -31,6 +31,8 @@ _OPCODE_RE = re.compile(
     r"^(?:(?:tail|musttail|notail)\s+)?"
     r"(callbr|call|ret|br|switch|indirectbr|unreachable|"
     r"add|sub|mul|udiv|sdiv|urem|srem|shl|lshr|ashr|and|or|xor|"
+    r"fadd|fsub|fmul|fdiv|frem|fneg|fcmp|"
+    r"uitofp|sitofp|fptoui|fptosi|fptrunc|fpext|"
     r"alloca|load|store|getelementptr|trunc|zext|sext|ptrtoint|inttoptr|"
     r"bitcast|addrspacecast|icmp|phi|select|freeze|extractvalue|insertvalue)\b"
 )

@@ -116,6 +116,54 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(result, (((-2) & ((1 << 64) - 1)),))
 
+    def test_soft_float_helpers_execute_end_to_end(self):
+        functions, stats = legalize_module(
+            """
+            define i32 @fp_roundtrip(i32 %x, ptr %p) {
+            entry:
+              %a = sitofp i32 %x to double
+              %b = fmul double %a, 2.500000e+00
+              %c = fadd double %b, 1.000000e+00
+              store double %c, ptr %p
+              %d = load double, ptr %p
+              %ok = fcmp ogt double %d, 0.000000e+00
+              %n = fptosi double %d to i32
+              %r = select i1 %ok, i32 %n, i32 0
+              ret i32 %r
+            }
+            """
+        )
+        self.assertEqual(stats.lowered_float_ops, 3)
+        self.assertEqual(stats.lowered_float_casts, 2)
+        program = executable(functions)
+        vm = program.new_vm()
+        self.assertEqual(
+            vm.run_function("fp_roundtrip", (4, 0x3900)),
+            (11,),
+        )
+
+    def test_soft_float_extend_truncate_and_negate(self):
+        functions, _ = legalize_module(
+            """
+            define i32 @fp_cast(i16 %x) {
+            entry:
+              %a = uitofp i16 %x to float
+              %b = fpext float %a to double
+              %c = fneg double %b
+              %d = fsub double 0.000000e+00, %c
+              %e = fptrunc double %d to float
+              %f = fpext float %e to double
+              %r = fptoui double %f to i32
+              ret i32 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("fp_cast", (123,)),
+            (123,),
+        )
+
     def test_supervisor_state_system_service_executes(self):
         fn = muir.Function(
             "state_user",
