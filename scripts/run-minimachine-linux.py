@@ -2672,6 +2672,22 @@ def main() -> int:
         probe_linux_memory_helpers(vm)
         return 1
 
+    restart_result_base = getattr(
+        vm,
+        "init_exec_restart_result_base",
+        None,
+    )
+    if restart_result_base is not None:
+        raw = vm.memory.read(restart_result_base, 64)
+        raw32 = raw & 0xFFFFFFFF
+        signed = raw32 - (1 << 32) if raw32 & (1 << 31) else raw32
+        print(
+            "BOOT_EXEC_INIT_EXEC_RESTART_RESULT "
+            f"result={signed} raw=0x{raw:x} "
+            f"result_ptr=0x{restart_result_base:x}",
+            flush=True,
+        )
+
     print(
         "BOOT_EXEC_HALTED "
         f"steps={vm.steps} function={vm.current_function} "
