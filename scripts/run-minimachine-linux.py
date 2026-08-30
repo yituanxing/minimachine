@@ -1195,8 +1195,18 @@ def inject_live_root_init(vm, path: Path) -> None:
         vm.memory.write(path_ptr + i, 8, byte)
 
     data_ptr = vm.alloc_bytes(len(data), align=8)
-    for i, byte in enumerate(data):
-        vm.memory.write(data_ptr + i, 8, byte)
+    bulk_write = getattr(vm.memory, "bulk_write", None)
+    if bulk_write is not None:
+        started = time.perf_counter()
+        bulk_write(data_ptr, data)
+        print(
+            "BOOT_EXEC_HOST_BULK_WRITE "
+            f"bytes={len(data)} seconds={time.perf_counter() - started:.3f}",
+            flush=True,
+        )
+    else:
+        for i, byte in enumerate(data):
+            vm.memory.write(data_ptr + i, 8, byte)
 
     pos_ptr = vm.alloc_bytes(8, align=8)
     vm.memory.write(pos_ptr, 64, 0)
@@ -1263,8 +1273,18 @@ def inject_live_root_initramfs(vm, path: Path) -> None:
         raise VMError("Linux unpack_to_rootfs is missing from P3 program")
 
     data_ptr = vm.alloc_bytes(len(data), align=8)
-    for i, byte in enumerate(data):
-        vm.memory.write(data_ptr + i, 8, byte)
+    bulk_write = getattr(vm.memory, "bulk_write", None)
+    if bulk_write is not None:
+        started = time.perf_counter()
+        bulk_write(data_ptr, data)
+        print(
+            "BOOT_EXEC_HOST_BULK_WRITE "
+            f"bytes={len(data)} seconds={time.perf_counter() - started:.3f}",
+            flush=True,
+        )
+    else:
+        for i, byte in enumerate(data):
+            vm.memory.write(data_ptr + i, 8, byte)
 
     error_ptr, = _call_linux_function_preserving_control(
         vm,

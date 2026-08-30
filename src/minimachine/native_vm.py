@@ -148,6 +148,13 @@ def _load_library():
         ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint, ctypes.c_uint64
     ]
     lib.mm_vm_mem_write.restype = None
+    lib.mm_vm_mem_write_blob.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_uint64,
+    ]
+    lib.mm_vm_mem_write_blob.restype = ctypes.c_int
     lib.mm_vm_mem_fill.argtypes = [
         ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint8, ctypes.c_uint64
     ]
@@ -223,6 +230,19 @@ class NativeMemory:
             value & MASK64,
         )
 
+
+    def bulk_write(self, dst: int, data: bytes | bytearray | memoryview) -> None:
+        raw = bytes(data)
+        if not raw:
+            return
+        buf = (ctypes.c_uint8 * len(raw)).from_buffer_copy(raw)
+        if not self._lib.mm_vm_mem_write_blob(
+            self._handle,
+            dst & MASK64,
+            buf,
+            len(raw),
+        ):
+            raise VMError("native bulk write failed")
 
     def bulk_set(self, dst: int, value: int, size: int) -> None:
         if size < 0:
