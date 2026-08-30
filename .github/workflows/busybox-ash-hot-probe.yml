@@ -5,12 +5,6 @@ on:
   push:
     branches: [work/native-p3-vm]
     paths:
-      - native/p3vm.c
-      - src/minimachine/native_vm.py
-      - src/minimachine/user_image.py
-      - src/minimachine/user_bundle.py
-      - src/minimachine/runtime.py
-      - scripts/run-minimachine-linux.py
       - .github/workflows/busybox-ash-hot-probe.yml
 
 permissions:
