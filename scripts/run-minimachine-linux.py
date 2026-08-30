@@ -894,6 +894,16 @@ def install_hot_filp_trace(vm) -> None:
         if linked is not None and argc <= 8:
             arg_base = vm.sp + frame_size
             args = [vm.memory.read(arg_base + i * 8, 64) for i in range(argc)]
+        if function == "open_last_lookups" and block == "entry" and len(args) >= 3:
+            op_ptr = args[2]
+            fields = [vm.memory.read(op_ptr + i * 4, 32) for i in range(5)]
+            print(
+                "BOOT_EXEC_HOT_OPEN_FLAGS "
+                f"ptr=0x{op_ptr:x} "
+                f"f0=0x{fields[0]:x} f1=0x{fields[1]:x} "
+                f"f2=0x{fields[2]:x} f3=0x{fields[3]:x} f4=0x{fields[4]:x}",
+                flush=True,
+            )
         print(
             "BOOT_EXEC_HOT_FILP_TRACE "
             f"seq={trace_count} steps={vm.steps} "
@@ -921,6 +931,22 @@ def install_hot_filp_trace(vm) -> None:
 
     vm._set_code = traced_set_code
     vm.enter_function = traced_enter_function
+    and32 = vm.program.host_services.get("__mm_and_32")
+    if and32 is not None:
+        def traced_and32(inner_vm, args):
+            result = and32(inner_vm, args)
+            if len(args) == 2 and (args[1] & 0xFFFFFFFF) == 579:
+                print(
+                    "BOOT_EXEC_HOT_AND32 "
+                    f"steps={inner_vm.steps} "
+                    f"a=0x{args[0] & 0xffffffff:x} "
+                    f"b=0x{args[1] & 0xffffffff:x} "
+                    f"result=0x{int(result) & 0xffffffff:x}",
+                    flush=True,
+                )
+            return result
+        vm.program.host_services["__mm_and_32"] = traced_and32
+
     print(
         "BOOT_EXEC_HOT_FILP_TRACE_ARMED "
         f"functions={len(targets)} codes={len(traced_codes)} limit={trace_limit}",
