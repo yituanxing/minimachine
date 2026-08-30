@@ -57,9 +57,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33317187138
+          run-id: 33321008157
           github-token: ${{ github.token }}
-          name: minimachine-linux-p3-console-current-33317187138
+          name: minimachine-linux-p3-console-current-33321008157
           path: console-refresh
 
       - name: Restart fresh init exec and run ash
