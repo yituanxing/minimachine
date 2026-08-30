@@ -990,6 +990,40 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return out
         return realloc
 
+    if original == "atoi":
+        def user_atoi(vm, args):
+            if len(args) != 1:
+                raise VMError("atoi expects string")
+            ptr = int(args[0])
+            data = bytearray()
+            for index in range(256):
+                byte = vm.memory.read(ptr + index, 8)
+                if byte == 0:
+                    break
+                data.append(byte)
+            text = data.decode("ascii", errors="ignore")
+            pos = 0
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+            sign = 1
+            if pos < len(text) and text[pos] in "+-":
+                if text[pos] == "-":
+                    sign = -1
+                pos += 1
+            value = 0
+            while pos < len(text) and text[pos].isdigit():
+                value = value * 10 + (ord(text[pos]) - ord("0"))
+                pos += 1
+            value *= sign
+            print(
+                "BOOT_EXEC_USER_ATOI "
+                f"text={text!r} result={value}",
+                flush=True,
+            )
+            return value & ((1 << 64) - 1)
+
+        return user_atoi
+
     if original == "vsnprintf":
         def user_vsnprintf(vm, args):
             if len(args) != 4:
