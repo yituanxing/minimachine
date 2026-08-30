@@ -1415,7 +1415,10 @@ def inject_live_root_init(vm, path: Path) -> None:
             "kernel_write",
             (file_ptr, data_ptr, len(data), pos_ptr),
             result_count=1,
-            max_extra_steps=8_000_000,
+            max_extra_steps=max(
+                8_000_000,
+                len(data) * 32,
+            ),
         )
         if written != len(data):
             signed = written - (1 << 64) if written & (1 << 63) else written
