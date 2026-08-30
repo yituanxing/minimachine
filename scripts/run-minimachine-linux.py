@@ -592,6 +592,104 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return 0
         return user_puts
 
+    def encode_dev(major: int, minor: int) -> int:
+        return (
+            (minor & 0xFF)
+            | ((major & 0xFFF) << 8)
+            | ((minor & ~0xFF) << 12)
+            | ((major & ~0xFFF) << 32)
+        ) & ((1 << 64) - 1)
+
+    def write_user_stat_from_statx(vm, stat_ptr: int, statx_ptr: int) -> None:
+        # RISC-V glibc struct stat (128 bytes), probed with the exact
+        # cross libc used by the BusyBox carrier.
+        for i in range(128):
+            vm.memory.write(stat_ptr + i, 8, 0)
+
+        stx_blksize = vm.memory.read(statx_ptr + 4, 32)
+        stx_nlink = vm.memory.read(statx_ptr + 16, 32)
+        stx_uid = vm.memory.read(statx_ptr + 20, 32)
+        stx_gid = vm.memory.read(statx_ptr + 24, 32)
+        stx_mode = vm.memory.read(statx_ptr + 28, 16)
+        stx_ino = vm.memory.read(statx_ptr + 32, 64)
+        stx_size = vm.memory.read(statx_ptr + 40, 64)
+        stx_blocks = vm.memory.read(statx_ptr + 48, 64)
+        stx_rdev_major = vm.memory.read(statx_ptr + 128, 32)
+        stx_rdev_minor = vm.memory.read(statx_ptr + 132, 32)
+        stx_dev_major = vm.memory.read(statx_ptr + 136, 32)
+        stx_dev_minor = vm.memory.read(statx_ptr + 140, 32)
+
+        vm.memory.write(
+            stat_ptr + 0,
+            64,
+            encode_dev(stx_dev_major, stx_dev_minor),
+        )
+        vm.memory.write(stat_ptr + 8, 64, stx_ino)
+        vm.memory.write(stat_ptr + 16, 32, stx_mode)
+        vm.memory.write(stat_ptr + 20, 32, stx_nlink)
+        vm.memory.write(stat_ptr + 24, 32, stx_uid)
+        vm.memory.write(stat_ptr + 28, 32, stx_gid)
+        vm.memory.write(
+            stat_ptr + 32,
+            64,
+            encode_dev(stx_rdev_major, stx_rdev_minor),
+        )
+        vm.memory.write(stat_ptr + 48, 64, stx_size)
+        vm.memory.write(stat_ptr + 56, 64, stx_blksize)
+        vm.memory.write(stat_ptr + 64, 64, stx_blocks)
+
+        # struct statx timestamps: atime@64, btime@80, ctime@96, mtime@112.
+        # struct stat timestamps: atim@72, mtim@88, ctim@104.
+        for dst_off, src_off in ((72, 64), (88, 112), (104, 96)):
+            sec = vm.memory.read(statx_ptr + src_off, 64)
+            nsec = vm.memory.read(statx_ptr + src_off + 8, 32)
+            vm.memory.write(stat_ptr + dst_off, 64, sec)
+            vm.memory.write(stat_ptr + dst_off + 8, 64, nsec)
+
+    if original in {"stat", "lstat"}:
+        def user_stat(vm, args):
+            if len(args) != 2:
+                raise VMError(f"{original} expects path,stat")
+            path_ptr, stat_ptr = map(int, args)
+            if "__se_sys_statx" not in vm.program.functions:
+                raise VMError("Linux image is missing __se_sys_statx")
+
+            statx_ptr = vm.alloc_bytes(256, align=8)
+            bulk_fill = getattr(vm.memory, "bulk_fill", None)
+            if bulk_fill is not None:
+                bulk_fill(statx_ptr, 0, 256)
+            else:
+                for i in range(256):
+                    vm.memory.write(statx_ptr + i, 8, 0)
+
+            at_fdcwd = (-100) & ((1 << 64) - 1)
+            flags = 0x100 if original == "lstat" else 0
+            statx_basic_stats = 0x000007FF
+            result, = _call_linux_function_preserving_control(
+                vm,
+                "__se_sys_statx",
+                (at_fdcwd, path_ptr, flags, statx_basic_stats, statx_ptr),
+                result_count=1,
+                max_extra_steps=4_000_000,
+            )
+            signed = result - (1 << 64) if result & (1 << 63) else result
+            if signed < 0:
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+
+            write_user_stat_from_statx(vm, stat_ptr, statx_ptr)
+            print(
+                "BOOT_EXEC_USER_STAT "
+                f"kind={original} path_ptr=0x{path_ptr:x} "
+                f"stat_ptr=0x{stat_ptr:x} "
+                f"mode=0{vm.memory.read(stat_ptr + 16, 32):o} "
+                f"size={vm.memory.read(stat_ptr + 48, 64)}",
+                flush=True,
+            )
+            return 0
+
+        return user_stat
+
     if original == "isatty":
         def user_isatty(vm, args):
             if len(args) != 1:
