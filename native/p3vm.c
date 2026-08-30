@@ -335,8 +335,29 @@ static uint64_t mem_strlen_bytes(MMVM *vm, uint64_t addr) {
     }
 }
 
+static int find_block_in_segment(const MMSegment *segment,
+                                 uint64_t code, size_t *idx) {
+    size_t lo = 0, hi = segment->block_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        uint64_t c = segment->blocks[mid].code;
+        if (c == code) {
+            *idx = mid;
+            return 1;
+        }
+        if (c < code) lo = mid + 1;
+        else hi = mid;
+    }
+    return 0;
+}
+
 static int find_block(MMVM *vm, uint64_t code,
                       size_t *segment_index, size_t *idx) {
+    if (vm->segment_count == 1) {
+        *segment_index = 0;
+        return find_block_in_segment(&vm->segments[0], code, idx);
+    }
+
     for (size_t si = 0; si < vm->segment_count; ++si) {
         const MMSegment *segment = &vm->segments[si];
         if (!segment->block_count)
@@ -345,18 +366,9 @@ static int find_block(MMVM *vm, uint64_t code,
         uint64_t last_code = segment->blocks[segment->block_count - 1].code;
         if (code < first_code || code > last_code)
             continue;
-
-        size_t lo = 0, hi = segment->block_count;
-        while (lo < hi) {
-            size_t mid = lo + (hi - lo) / 2;
-            uint64_t c = segment->blocks[mid].code;
-            if (c == code) {
-                *segment_index = si;
-                *idx = mid;
-                return 1;
-            }
-            if (c < code) lo = mid + 1;
-            else hi = mid;
+        if (find_block_in_segment(segment, code, idx)) {
+            *segment_index = si;
+            return 1;
         }
     }
     return 0;
