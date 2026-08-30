@@ -5,6 +5,9 @@ on:
   push:
     branches: [work/native-p3-vm]
     paths:
+      - native/p3vm.c
+      - src/minimachine/native_vm.py
+      - src/minimachine/checkpoint.py
       - .github/workflows/native-checkpoint-roundtrip.yml
 
 jobs:
