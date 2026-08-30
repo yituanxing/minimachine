@@ -1,0 +1,45 @@
+name: MiniMachine Refresh Console P3 Cache
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - scripts/refresh-p3-cache-function.py
+      - .github/workflows/refresh-console-p3-cache.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download exact frozen Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33295701837
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33295701837
+          path: exact
+
+      - name: Refresh console-read P3 body
+        run: |
+          mkdir -p build
+          python3 scripts/refresh-p3-cache-function.py             exact/llvm/linked.ll             exact/llvm/linux-initramfs-p3-cache.pkl.gz             build/linux-initramfs-p3-cache-console-current.pkl.gz             --function minimachine_console_read             2>&1 | tee build/refresh.log
+          grep -F 'P3_CACHE_FUNCTION_REFRESH function=minimachine_console_read' build/refresh.log
+          grep -F 'new_symbol_refs=1' build/refresh.log
+
+      - name: Upload refreshed cache
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-linux-p3-console-current-${{ github.run_id }}
+          path: |
+            build/linux-initramfs-p3-cache-console-current.pkl.gz
+            build/refresh.log
+          retention-days: 14
