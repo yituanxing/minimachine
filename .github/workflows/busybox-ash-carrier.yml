@@ -8,7 +8,6 @@ on:
       - src/minimachine/user_image.py
       - src/minimachine/user_bundle.py
       - src/minimachine/legalize.py
-      - src/minimachine/runtime.py
       - scripts/build-minimachine-busybox.py
       - scripts/build-minimachine-initramfs.py
       - .github/workflows/busybox-ash-carrier.yml

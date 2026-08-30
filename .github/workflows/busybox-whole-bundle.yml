@@ -7,7 +7,6 @@ on:
     paths:
       - src/minimachine/user_image.py
       - src/minimachine/user_bundle.py
-      - src/minimachine/runtime.py
       - scripts/build-minimachine-busybox.py
       - tests/test_user_bundle.py
       - .github/workflows/busybox-whole-bundle.yml

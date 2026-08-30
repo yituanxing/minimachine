@@ -7,9 +7,7 @@ on:
     paths:
       - src/minimachine/llvm_text.py
       - src/minimachine/legalize.py
-      - src/minimachine/runtime.py
       - tests/test_legalizer.py
-      - tests/test_runtime.py
       - .github/workflows/busybox-frozen-census.yml
 
 permissions:

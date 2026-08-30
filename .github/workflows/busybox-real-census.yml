@@ -6,7 +6,6 @@ on:
     branches: [work/native-p3-vm]
     paths:
       - src/minimachine/legalize.py
-      - src/minimachine/runtime.py
       - .github/workflows/busybox-real-census.yml
 
 permissions:

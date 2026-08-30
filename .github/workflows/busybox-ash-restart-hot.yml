@@ -7,7 +7,6 @@ on:
     paths:
       - scripts/run-minimachine-linux.py
       - src/minimachine/runtime.py
-      - tests/test_runtime.py
       - .github/workflows/busybox-ash-restart-hot.yml
 
 permissions:
