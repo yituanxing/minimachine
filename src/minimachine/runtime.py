@@ -1437,11 +1437,37 @@ def direct_runtime_callback(symbol: str):
                 raise VMError(f"{symbol} expects dst,src,size")
             dst, src, size = args
             bulk = getattr(vm.memory, "bulk_copy", None)
+            trace_console_copy = (
+                0 < size <= 256
+                and src < 0x1000
+                and dst >= 0x1000
+            )
+            if trace_console_copy:
+                before = bytes(
+                    vm.memory.read(src + i, 8)
+                    for i in range(min(32, size))
+                )
+                print(
+                    "BOOT_EXEC_CONSOLE_MEMCPY "
+                    f"dst=0x{dst:x} src=0x{src:x} size={size} "
+                    f"src_data={before.hex()}",
+                    flush=True,
+                )
             if bulk is not None:
                 bulk(dst, src, size)
             else:
                 for i in range(size):
                     vm.memory.write(dst + i, 8, vm.memory.read(src + i, 8))
+            if trace_console_copy:
+                after = bytes(
+                    vm.memory.read(dst + i, 8)
+                    for i in range(min(32, size))
+                )
+                print(
+                    "BOOT_EXEC_CONSOLE_MEMCPY_RESULT "
+                    f"dst=0x{dst:x} data={after.hex()}",
+                    flush=True,
+                )
             return dst
         return memcpy
 
