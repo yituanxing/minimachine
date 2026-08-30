@@ -55,12 +55,15 @@ jobs:
           name: minimachine-busybox-ash-carrier-33302954924
           path: ash
 
-      - name: Probe injected ash exec result
+      - name: Hot-run frozen ash carrier
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
         run: |
           set -o pipefail
-          /usr/bin/time -f 'ASH_EXEC_PROBE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          set +e
+          printf 'echo BUSYBOX_MINIMACHINE_HELLO\nexit\n' | \
+          /usr/bin/time -f 'ASH_CARRIER_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 180 \
           python3 scripts/run-minimachine-linux.py console/llvm/linked.ll \
             --linker-contract configs/linux-6.6.143-minimachine-linker.json \
             --program-cache-in console/llvm/linux-initramfs-p3-cache.pkl.gz \
@@ -68,17 +71,18 @@ jobs:
             --native-vm \
             --checkpoint-in echo/mmsh-echo-kernel-execve.chk.gz \
             --inject-init ash/busybox-ash-first.bflt \
-            --probe-run-init-after-checkpoint \
             --stop-on-panic \
             --max-steps 0 \
-            --progress-every 0 \
+            --progress-every 1000000 \
             2>&1 | tee build/ash-carrier-hot.log
-          grep -F 'BOOT_EXEC_INIT_EXEC_PROBE ' build/ash-carrier-hot.log
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "ASH_CARRIER_HOT_STATUS=$status" | tee -a build/ash-carrier-hot.log
 
       - name: Summarize real ash path
         if: always()
         run: |
-          grep -E 'BOOT_EXEC_(PROGRAM_CACHE_LOADED|STAGE|NATIVE_PACK|HOST_BULK_WRITE|ROOTFS_INJECTED|CHECKPOINT_RESTORED|USER_RUNTIME|USER_EXTERNAL_SURFACE|USER_EXTERNAL_DATA|USER_IMAGE_DATA|USER_ARGS|USER_HANDOFF|NATIVE_APPEND_PACK|NATIVE_APPEND|NATIVE_HOST_APPEND|NATIVE_DATA_APPEND|USER_EXTERNAL|USER_SYSCALL|HOST_INPUT|USER_READ_BUFFER|BLOCKED|HALTED)|BOOT_EXEC_INIT_EXEC_PROBE|BUSYBOX_MINIMACHINE_HELLO|ASH_EXEC_PROBE_WALL|(^| )[/#] ' \
+          grep -E 'BOOT_EXEC_(PROGRAM_CACHE_LOADED|STAGE|NATIVE_PACK|HOST_BULK_WRITE|ROOTFS_INJECTED|CHECKPOINT_RESTORED|USER_RUNTIME|USER_EXTERNAL_SURFACE|USER_EXTERNAL_DATA|USER_IMAGE_DATA|USER_ARGS|USER_HANDOFF|NATIVE_APPEND_PACK|NATIVE_APPEND|NATIVE_HOST_APPEND|NATIVE_DATA_APPEND|USER_EXTERNAL|USER_SYSCALL|HOST_INPUT|USER_READ_BUFFER|BLOCKED|HALTED)|BOOT_EXEC_INIT_EXEC_PROBE|BUSYBOX_MINIMACHINE_HELLO|ASH_CARRIER_HOT_(WALL|STATUS)|(^| )[/#] ' \
             build/ash-carrier-hot.log | tail -360 || true
 
       - name: Upload hot trace
