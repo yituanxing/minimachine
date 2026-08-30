@@ -55,6 +55,14 @@ def parse_args():
     )
     p.add_argument("--entry", default="start_kernel")
     p.add_argument(
+        "--native-boot-phases-only",
+        action="store_true",
+        help=(
+            "for native full boot, trace only low-frequency boot phase "
+            "milestones so scheduler/initcall tracing does not dominate runtime"
+        ),
+    )
+    p.add_argument(
         "--stop-after-user-handoff",
         action="store_true",
         help=(
@@ -1312,6 +1320,32 @@ def main() -> int:
         "kernel_execve",
         "kthreadd",
     }
+
+    if args.native_vm and args.native_boot_phases_only:
+        milestone_functions = {
+            "console_init",
+            "arch_call_rest_init",
+            "rest_init",
+            "kernel_init",
+            "kernel_init_freeable",
+            "do_pre_smp_initcalls",
+            "do_basic_setup",
+            "do_initcalls",
+            "free_initmem",
+            "mark_readonly",
+            "console_on_rootfs",
+            "do_mounts_initrd",
+            "prepare_namespace",
+            "init_post",
+            "run_init_process",
+            "try_to_run_init_process",
+            "kernel_execve",
+        }
+        print(
+            "BOOT_EXEC_NATIVE_BOOT_PHASE_TRACE "
+            f"functions={len(milestone_functions)}",
+            flush=True,
+        )
 
     sched_watch_installed = False
 
