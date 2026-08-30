@@ -92,6 +92,11 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=10_000_000)
     p.add_argument("--progress-every", type=int, default=250_000)
     p.add_argument(
+        "--probe-initcall-table",
+        action="store_true",
+        help="dump installed initcall table/boundaries and exit before execution",
+    )
+    p.add_argument(
         "--probe-kallsyms",
         metavar="SYMBOL",
         help="probe Linux kallsyms against one P3 function and exit",
@@ -1146,6 +1151,62 @@ def main() -> int:
     except (ImageError, VMError, ValueError) as exc:
         print(f"BOOT_EXEC_BLOCKED stage=image error={exc}")
         return 1
+
+    if args.probe_initcall_table:
+        reverse_symbols: dict[int, list[str]] = {}
+        for name, address in program.symbol_addresses.items():
+            reverse_symbols.setdefault(address, []).append(name)
+
+        boundary_names = (
+            "__initcall5_start",
+            "__initcallrootfs_start",
+            "__initcall6_start",
+            "__initcall7_start",
+            "__initcall_end",
+        )
+        for name in boundary_names:
+            address = program.symbol_addresses.get(name)
+            print(
+                "BOOT_EXEC_INITCALL_BOUNDARY "
+                f"name={name} "
+                f"address={f'0x{address:x}' if address is not None else 'missing'}",
+                flush=True,
+            )
+
+        start = program.symbol_addresses.get("__initcall5_start")
+        end = program.symbol_addresses.get("__initcall6_start")
+        if start is not None and end is not None:
+            print(
+                "BOOT_EXEC_INITCALL_RANGE "
+                f"start=0x{start:x} end=0x{end:x} "
+                f"bytes={end-start} entries={(end-start)//8}",
+                flush=True,
+            )
+            for address in range(start, end, 8):
+                value = program.initial_memory.read(address, 64)
+                names = reverse_symbols.get(value, ())
+                print(
+                    "BOOT_EXEC_INITCALL_ENTRY "
+                    f"address=0x{address:x} value=0x{value:x} "
+                    f"symbols={'|'.join(sorted(names)[:6]) if names else '<unknown>'}",
+                    flush=True,
+                )
+
+        levels = program.symbol_addresses.get("initcall_levels")
+        if levels is not None:
+            print(f"BOOT_EXEC_INITCALL_LEVELS address=0x{levels:x}", flush=True)
+            for index in range(9):
+                value = program.initial_memory.read(levels + index * 8, 64)
+                names = reverse_symbols.get(value, ())
+                print(
+                    "BOOT_EXEC_INITCALL_LEVEL "
+                    f"index={index} value=0x{value:x} "
+                    f"symbols={'|'.join(sorted(names)[:6]) if names else '<unknown>'}",
+                    flush=True,
+                )
+        else:
+            print("BOOT_EXEC_INITCALL_LEVELS address=missing", flush=True)
+        return 0
 
     if args.entry not in program.functions:
         print(f"BOOT_EXEC_BLOCKED stage=entry missing={args.entry}")
