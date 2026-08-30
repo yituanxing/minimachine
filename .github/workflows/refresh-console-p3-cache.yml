@@ -5,6 +5,11 @@ on:
   push:
     branches: [work/native-p3-vm]
     paths:
+      - src/minimachine/program_cache.py
+      - src/minimachine/llvm_text.py
+      - src/minimachine/legalize.py
+      - src/minimachine/abi.py
+      - src/minimachine/lower_p3.py
       - scripts/refresh-p3-cache-function.py
       - .github/workflows/refresh-console-p3-cache.yml
 
