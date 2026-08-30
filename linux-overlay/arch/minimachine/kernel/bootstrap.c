@@ -8,6 +8,8 @@
  */
 
 #include <linux/delay.h>
+#include <linux/uaccess.h>
+#include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/kernel.h>
@@ -70,6 +72,86 @@ static __always_inline void minimachine_boot_console(const char *text,
 	 */
 	asm volatile("ecall" : : "r"(1UL), "r"(text), "r"(len) : "memory");
 }
+
+#define MINIMACHINE_CONSOLE_MAJOR 240
+#define MINIMACHINE_CONSOLE_CHUNK 256
+
+static char minimachine_console_buffer[MINIMACHINE_CONSOLE_CHUNK];
+
+static ssize_t minimachine_console_write(struct file *file,
+					 const char __user *buffer,
+					 size_t count, loff_t *ppos)
+{
+	size_t done = 0;
+
+	(void)file;
+	(void)ppos;
+	while (done < count) {
+		size_t chunk = min_t(size_t, count - done,
+				     sizeof(minimachine_console_buffer));
+
+		if (copy_from_user(minimachine_console_buffer,
+				   buffer + done, chunk))
+			return done ? (ssize_t)done : -EFAULT;
+		minimachine_boot_console(minimachine_console_buffer, chunk);
+		done += chunk;
+	}
+	return (ssize_t)done;
+}
+
+static ssize_t minimachine_console_read(struct file *file,
+					char __user *buffer,
+					size_t count, loff_t *ppos)
+{
+	unsigned long got;
+	size_t chunk;
+
+	(void)file;
+	(void)ppos;
+	if (!count)
+		return 0;
+
+	chunk = min_t(size_t, count, sizeof(minimachine_console_buffer));
+	/*
+	 * Service 4 is host input.  The VM copies at most chunk bytes into the
+	 * kernel buffer and returns the byte count.  Linux still owns the file
+	 * descriptor, read syscall, and user-copy semantics.
+	 */
+	asm volatile("ecall"
+		     : "=r"(got)
+		     : "r"(4UL),
+		       "r"((unsigned long)minimachine_console_buffer),
+		       "r"((unsigned long)chunk)
+		     : "memory");
+
+	if (got > chunk)
+		return -EIO;
+	if (!got)
+		return 0;
+	if (copy_to_user(buffer, minimachine_console_buffer, got))
+		return -EFAULT;
+	return (ssize_t)got;
+}
+
+static const struct file_operations minimachine_console_fops = {
+	.owner = THIS_MODULE,
+	.read = minimachine_console_read,
+	.write = minimachine_console_write,
+	.llseek = no_llseek,
+};
+
+static int __init minimachine_console_device_init(void)
+{
+	int ret;
+
+	ret = register_chrdev(MINIMACHINE_CONSOLE_MAJOR,
+			      "minimachine-console",
+			      &minimachine_console_fops);
+	if (ret < 0)
+		return ret;
+	return 0;
+}
+device_initcall(minimachine_console_device_init);
 
 static unsigned long minimachine_irq_state;
 
