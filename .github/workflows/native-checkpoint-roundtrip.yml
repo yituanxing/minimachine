@@ -20,7 +20,7 @@ jobs:
         run: |
           mkdir -p build
           gcc -O3 -DNDEBUG -std=c11 -fPIC -shared native/p3vm.c -o build/libminimachine_p3vm.so
-      - name: Native instruction layout contract
+      - name: Native instruction ABI contract
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
         run: |
@@ -33,7 +33,7 @@ jobs:
               f"inst_bytes={ctypes.sizeof(CInst)}"
           )
           assert ctypes.sizeof(COperand) == 32
-          assert ctypes.sizeof(CInst) == 136
+          assert ctypes.sizeof(CInst) == 200
           PY
 
       - name: Native checkpoint save restore
