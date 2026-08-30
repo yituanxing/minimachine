@@ -267,8 +267,14 @@ def refresh_host_service_descriptors(vm) -> None:
     metadata; restoring them does not alter live Linux data.
     """
     refreshed = 0
+    accelerated = 0
     for symbol in vm.program.host_services:
-        descriptor = vm.program.symbol_addresses.get(symbol)
+        descriptor_symbol = symbol
+        fast_prefix = "__mm_fast_"
+        if symbol.startswith(fast_prefix):
+            descriptor_symbol = symbol[len(fast_prefix):]
+            accelerated += 1
+        descriptor = vm.program.symbol_addresses.get(descriptor_symbol)
         if descriptor is None:
             continue
         for offset in range(16):
@@ -276,7 +282,8 @@ def refresh_host_service_descriptors(vm) -> None:
             vm.memory.write(descriptor + offset, 8, byte)
         refreshed += 1
     print(
-        f"BOOT_EXEC_HOST_DESCRIPTORS_REFRESHED count={refreshed}",
+        "BOOT_EXEC_HOST_DESCRIPTORS_REFRESHED "
+        f"count={refreshed} accelerated={accelerated}",
         flush=True,
     )
 
