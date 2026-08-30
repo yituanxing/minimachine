@@ -74,16 +74,16 @@ jobs:
           grep -E '^(CONFIG_ASH=|CONFIG_SH_IS_ASH=|CONFIG_ASH_ECHO=|CONFIG_STATIC=)' .config
           make -j2 CROSS_COMPILE=riscv64-linux-gnu- V=0
 
-      - name: Prove ash -c echo
+      - name: Prove direct ash -c echo
         working-directory: build/busybox
         run: |
-          qemu-riscv64 ./busybox ash -c 'echo QEMU_ASH_C_ECHO_OK'             | tee ../qemu-ash-c.log
+          qemu-riscv64 ./busybox -c 'echo QEMU_ASH_C_ECHO_OK' | tee ../qemu-ash-c.log
           grep -Fx 'QEMU_ASH_C_ECHO_OK' ../qemu-ash-c.log
 
-      - name: Prove stdin script echo
+      - name: Prove direct ash stdin script echo
         working-directory: build/busybox
         run: |
-          printf 'echo QEMU_ASH_STDIN_ECHO_OK\nexit\n'             | qemu-riscv64 ./busybox ash             | tee ../qemu-ash-stdin.log
+          printf 'echo QEMU_ASH_STDIN_ECHO_OK\nexit\n' | qemu-riscv64 ./busybox | tee ../qemu-ash-stdin.log
           grep -Fx 'QEMU_ASH_STDIN_ECHO_OK' ../qemu-ash-stdin.log
 
       - name: Upload QEMU proof
