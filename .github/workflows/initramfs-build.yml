@@ -7,7 +7,6 @@ on:
       - linux-overlay/arch/minimachine/**
       - scripts/build-minimachine-initramfs.py
       - scripts/check-minimachine-boot.sh
-      - scripts/run-minimachine-linux.py
       - .github/workflows/initramfs-build.yml
   workflow_dispatch:
 
