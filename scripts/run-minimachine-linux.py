@@ -35,6 +35,7 @@ from src.minimachine.program_cache import (
 from src.minimachine.runtime import (
     accelerate_direct_runtime,
     collect_runtime_surface,
+    helper_callback,
     install_runtime,
 )
 from src.minimachine.user_image import UserImageError, unpack_user_image
@@ -411,6 +412,26 @@ def linux_ecall(vm, args: tuple[int, ...]):
         functions = list(user_image.functions)
         entry_name = user_image.entry
 
+        registered_user_helpers = 0
+        for symbol in user_image.runtime_helpers:
+            if symbol in vm.program.symbol_addresses:
+                continue
+            callback = helper_callback(symbol)
+            if callback is None:
+                raise VMError(
+                    "MiniMachine userspace image requires unsupported "
+                    f"runtime helper {symbol}"
+                )
+            vm.program.register_service(symbol, callback)
+            registered_user_helpers += 1
+        if user_image.runtime_helpers:
+            print(
+                "BOOT_EXEC_USER_RUNTIME "
+                f"required={len(user_image.runtime_helpers)} "
+                f"registered={registered_user_helpers}",
+                flush=True,
+            )
+
         # Preserve the collision-safe legacy behavior for single-function
         # probes. Multi-function programs currently require a clean user
         # symbol namespace so internal function descriptors stay coherent.
@@ -460,16 +481,35 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 flush=True,
             )
 
+        entry_argv: tuple[int, ...] = ()
+        if user_image.entry_args == "linux-main":
+            argc = vm.memory.read(user_sp, 64)
+            if argc > 4096:
+                raise VMError(
+                    f"MiniMachine userspace argc is unreasonable: {argc}"
+                )
+            argv = (user_sp + 8) & ((1 << 64) - 1)
+            envp = (argv + (argc + 1) * 8) & ((1 << 64) - 1)
+            entry_argv = (argc, argv, envp)
+            argv0 = vm.memory.read(argv, 64) if argc else 0
+            print(
+                "BOOT_EXEC_USER_ARGS "
+                f"argc={argc} argv=0x{argv:x} envp=0x{envp:x} "
+                f"argv0=0x{argv0:x}",
+                flush=True,
+            )
+
         print(
             "BOOT_EXEC_USER_HANDOFF "
             f"regs=0x{regs:x} pc=0x{pc:x} user_sp=0x{user_sp:x} "
             f"function={entry_name} functions={len(functions)} "
+            f"entry_args={user_image.entry_args} "
             f"payload_bytes={12 + size}",
             flush=True,
         )
         vm.enter_function(
             entry_name,
-            (),
+            entry_argv,
             stack_top=user_sp,
             result_count=0,
         )
