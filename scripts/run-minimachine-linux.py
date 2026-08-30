@@ -378,6 +378,104 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return (1 << 64) - 1
         return raw
 
+    def stdio_fd(stream: int) -> int:
+        # Userspace external FILE* values are opaque MiniMachine handles.
+        # Keep stdio unbuffered and route visible I/O through Linux fds.
+        if stream == 2:
+            return 2
+        if stream == 1:
+            return 1
+        return 0
+
+    if original == "fflush":
+        def user_fflush(_vm, args):
+            if len(args) != 1:
+                raise VMError("fflush expects FILE*")
+            return 0
+        return user_fflush
+
+    if original == "clearerr":
+        def user_clearerr(_vm, args):
+            if len(args) != 1:
+                raise VMError("clearerr expects FILE*")
+            return None
+        return user_clearerr
+
+    if original == "ferror_unlocked":
+        def user_ferror(_vm, args):
+            if len(args) != 1:
+                raise VMError("ferror_unlocked expects FILE*")
+            return 0
+        return user_ferror
+
+    if original == "fputs_unlocked":
+        def user_fputs(vm, args):
+            if len(args) != 2:
+                raise VMError("fputs_unlocked expects string,FILE*")
+            ptr, stream = map(int, args)
+            length = 0
+            bulk_strlen = getattr(vm.memory, "bulk_strlen", None)
+            if bulk_strlen is not None:
+                length = bulk_strlen(ptr)
+            else:
+                while vm.memory.read(ptr + length, 8) != 0:
+                    length += 1
+            raw = user_syscall(
+                vm,
+                (64, stdio_fd(stream), ptr, length, 0, 0, 0),
+            )
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+            return 0
+        return user_fputs
+
+    if original == "putc_unlocked":
+        def user_putc(vm, args):
+            if len(args) != 2:
+                raise VMError("putc_unlocked expects char,FILE*")
+            ch, stream = map(int, args)
+            ptr = vm.alloc_bytes(1, align=1)
+            vm.memory.write(ptr, 8, ch & 0xFF)
+            raw = user_syscall(
+                vm,
+                (64, stdio_fd(stream), ptr, 1, 0, 0, 0),
+            )
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+            return ch & 0xFF
+        return user_putc
+
+    if original == "puts":
+        def user_puts(vm, args):
+            if len(args) != 1:
+                raise VMError("puts expects string")
+            ptr = int(args[0])
+            length = 0
+            bulk_strlen = getattr(vm.memory, "bulk_strlen", None)
+            if bulk_strlen is not None:
+                length = bulk_strlen(ptr)
+            else:
+                while vm.memory.read(ptr + length, 8) != 0:
+                    length += 1
+            raw = user_syscall(vm, (64, 1, ptr, length, 0, 0, 0))
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+            nl = vm.alloc_bytes(1, align=1)
+            vm.memory.write(nl, 8, 10)
+            raw = user_syscall(vm, (64, 1, nl, 1, 0, 0, 0))
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+            return 0
+        return user_puts
+
     if original == "isatty":
         def user_isatty(vm, args):
             if len(args) != 1:
@@ -703,8 +801,8 @@ def install_user_external_surface(vm, user_image, envp: int) -> None:
         "optind": 1,
         "optopt": 0,
         "stdin": 0,
-        "stdout": 0,
-        "stderr": 0,
+        "stdout": 1,
+        "stderr": 2,
     }
 
     installed_data = 0
