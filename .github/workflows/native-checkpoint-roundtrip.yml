@@ -43,13 +43,33 @@ jobs:
           vm.memory.write(0x12345000, 64, 0x1122334455667788)
           vm.memory.write(0x90001008, 32, 0xaabbccdd)
           vm.steps = 123456
+          print("CP_STAGE before_count", flush=True)
+          count = int(vm._lib.mm_vm_mem_page_count(vm._handle))
+          print("CP_STAGE page_count", count, flush=True)
+          print("CP_STAGE before_snapshot", flush=True)
+          snap = vm.memory.snapshot_pages()
+          print(
+              "CP_STAGE snapshot_ok",
+              len(snap["page_nos"]), len(snap["data"]),
+              flush=True,
+          )
+          print("CP_STAGE before_direct_restore", flush=True)
+          vm.memory.restore_pages(snap)
+          print("CP_STAGE direct_restore_ok", flush=True)
+          assert vm.memory.read(0x12345000, 64) == 0x1122334455667788
+          assert vm.memory.read(0x90001008, 32) == 0xaabbccdd
+
           path = Path("/tmp/native.chk.gz")
+          print("CP_STAGE before_save", flush=True)
           save_checkpoint(vm, path, image_sha256="native-roundtrip")
+          print("CP_STAGE save_ok", path.stat().st_size, flush=True)
 
           vm.memory.write(0x12345000, 64, 0)
           vm.memory.write(0x90001008, 32, 0)
           vm.steps = 1
+          print("CP_STAGE before_load", flush=True)
           load_checkpoint(vm, path, image_sha256="native-roundtrip")
+          print("CP_STAGE load_ok", flush=True)
 
           assert vm.memory.read(0x12345000, 64) == 0x1122334455667788
           assert vm.memory.read(0x90001008, 32) == 0xaabbccdd
