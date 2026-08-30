@@ -713,6 +713,38 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_isatty
 
+    if original == "strerror":
+        messages = {
+            0: b"Success",
+            2: b"No such file or directory",
+            5: b"Input/output error",
+            9: b"Bad file descriptor",
+            12: b"Cannot allocate memory",
+            13: b"Permission denied",
+            22: b"Invalid argument",
+            38: b"Function not implemented",
+            95: b"Operation not supported",
+        }
+
+        def user_strerror(vm, args):
+            if len(args) != 1:
+                raise VMError("strerror expects errno")
+            err = int(args[0]) & 0xFFFFFFFF
+            payload = messages.get(
+                err,
+                f"Unknown error {err}".encode("ascii"),
+            ) + b"\0"
+            ptr = vm.alloc_bytes(len(payload), align=1)
+            bulk_write = getattr(vm.memory, "bulk_write", None)
+            if bulk_write is not None:
+                bulk_write(ptr, payload)
+            else:
+                for i, byte in enumerate(payload):
+                    vm.memory.write(ptr + i, 8, byte)
+            return ptr
+
+        return user_strerror
+
     if original == "getcwd":
         def user_getcwd(vm, args):
             if len(args) != 2:
