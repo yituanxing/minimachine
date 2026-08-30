@@ -619,8 +619,12 @@ def helper_callback(symbol: str):
                 raise VMError(f"{symbol} expects dst,value,length[,volatile]")
             dst, value, length = args[:3]
             byte = value & 0xFF
-            for i in range(length):
-                vm.memory.write((dst + i) & MASK64, 8, byte)
+            bulk = getattr(vm.memory, "bulk_set", None)
+            if bulk is not None:
+                bulk(dst, byte, length)
+            else:
+                for i in range(length):
+                    vm.memory.write((dst + i) & MASK64, 8, byte)
             return None
 
         return memset
@@ -630,9 +634,13 @@ def helper_callback(symbol: str):
             if len(args) < 3:
                 raise VMError(f"{symbol} expects dst,src,length[,volatile]")
             dst, src, length = args[:3]
-            data = [vm.memory.read((src + i) & MASK64, 8) for i in range(length)]
-            for i, byte in enumerate(data):
-                vm.memory.write((dst + i) & MASK64, 8, byte)
+            bulk = getattr(vm.memory, "bulk_copy", None)
+            if bulk is not None:
+                bulk(dst, src, length)
+            else:
+                data = [vm.memory.read((src + i) & MASK64, 8) for i in range(length)]
+                for i, byte in enumerate(data):
+                    vm.memory.write((dst + i) & MASK64, 8, byte)
             return None
 
         return memcpy
@@ -642,9 +650,13 @@ def helper_callback(symbol: str):
             if len(args) < 3:
                 raise VMError(f"{symbol} expects dst,src,length[,volatile]")
             dst, src, length = args[:3]
-            data = [vm.memory.read((src + i) & MASK64, 8) for i in range(length)]
-            for i, byte in enumerate(data):
-                vm.memory.write((dst + i) & MASK64, 8, byte)
+            bulk = getattr(vm.memory, "bulk_move", None)
+            if bulk is not None:
+                bulk(dst, src, length)
+            else:
+                data = [vm.memory.read((src + i) & MASK64, 8) for i in range(length)]
+                for i, byte in enumerate(data):
+                    vm.memory.write((dst + i) & MASK64, 8, byte)
             return None
 
         return memmove
@@ -1178,8 +1190,12 @@ def direct_runtime_callback(symbol: str):
             if len(args) != 3:
                 raise VMError(f"{symbol} expects dst,src,size")
             dst, src, size = args
-            for i in range(size):
-                vm.memory.write(dst + i, 8, vm.memory.read(src + i, 8))
+            bulk = getattr(vm.memory, "bulk_copy", None)
+            if bulk is not None:
+                bulk(dst, src, size)
+            else:
+                for i in range(size):
+                    vm.memory.write(dst + i, 8, vm.memory.read(src + i, 8))
             return dst
         return memcpy
 
@@ -1188,9 +1204,13 @@ def direct_runtime_callback(symbol: str):
             if len(args) != 3:
                 raise VMError(f"{symbol} expects dst,src,size")
             dst, src, size = args
-            data = [vm.memory.read(src + i, 8) for i in range(size)]
-            for i, byte in enumerate(data):
-                vm.memory.write(dst + i, 8, byte)
+            bulk = getattr(vm.memory, "bulk_move", None)
+            if bulk is not None:
+                bulk(dst, src, size)
+            else:
+                data = [vm.memory.read(src + i, 8) for i in range(size)]
+                for i, byte in enumerate(data):
+                    vm.memory.write(dst + i, 8, byte)
             return dst
         return memmove
 
@@ -1200,8 +1220,12 @@ def direct_runtime_callback(symbol: str):
                 raise VMError(f"{symbol} expects dst,value,size")
             dst, value, size = args
             byte = value & 0xFF
-            for i in range(size):
-                vm.memory.write(dst + i, 8, byte)
+            bulk = getattr(vm.memory, "bulk_set", None)
+            if bulk is not None:
+                bulk(dst, byte, size)
+            else:
+                for i in range(size):
+                    vm.memory.write(dst + i, 8, byte)
             return dst
         return memset
 
@@ -1210,6 +1234,9 @@ def direct_runtime_callback(symbol: str):
             if len(args) != 3:
                 raise VMError("memcmp expects a,b,size")
             a, b, size = args
+            bulk = getattr(vm.memory, "bulk_compare", None)
+            if bulk is not None:
+                return bulk(a, b, size) & MASK64
             for i in range(size):
                 av = vm.memory.read(a + i, 8)
                 bv = vm.memory.read(b + i, 8)
@@ -1223,6 +1250,9 @@ def direct_runtime_callback(symbol: str):
             if len(args) != 1:
                 raise VMError("strlen expects string")
             ptr = args[0]
+            bulk = getattr(vm.memory, "bulk_strlen", None)
+            if bulk is not None:
+                return bulk(ptr)
             size = 0
             while vm.memory.read(ptr + size, 8) != 0:
                 size += 1
