@@ -133,6 +133,12 @@ def _load_library():
         ctypes.POINTER(CBlock), ctypes.c_size_t,
     ]
     lib.mm_vm_add_segment.restype = ctypes.c_int
+    lib.mm_vm_set_host_codes.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.c_size_t,
+    ]
+    lib.mm_vm_set_host_codes.restype = ctypes.c_int
     lib.mm_vm_load_bytes.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_uint64),
@@ -355,6 +361,7 @@ class NativeVM(VM):
         self._lib = _load_library()
         self._packed = None
         self._extra_packed = []
+        self._host_packed = None
         insts, blocks, hosts = self._pack_program(program)
         handle = self._lib.mm_vm_create(
             insts,
@@ -373,6 +380,7 @@ class NativeVM(VM):
         self._program_shape = self._shape(program)
         self._packed_block_codes = set(program.code_block)
         self._packed_function_names = set(program.functions)
+        self._packed_host_codes = set(program.host_code)
         self._watch_codes: tuple[int, ...] = ()
         self.native_report_every = 0
         self._load_initial_memory(program)
@@ -652,12 +660,41 @@ class NativeVM(VM):
 
         current_blocks = set(self.program.code_block)
         current_functions = set(self.program.functions)
+        current_hosts = set(self.program.host_code)
         new_block_codes = sorted(current_blocks - self._packed_block_codes)
         new_functions = current_functions - self._packed_function_names
+        new_hosts = sorted(current_hosts - self._packed_host_codes)
+        host_append_only = self._packed_host_codes.issubset(current_hosts)
+
+        if (
+            current_blocks == self._packed_block_codes
+            and current_functions == self._packed_function_names
+            and host_append_only
+            and new_hosts
+        ):
+            host_codes = sorted(current_hosts)
+            host_array = (ctypes.c_uint64 * len(host_codes))(*host_codes)
+            if not self._lib.mm_vm_set_host_codes(
+                self._handle,
+                host_array,
+                len(host_array),
+            ):
+                raise VMError("cannot append native P3 host service table")
+            self._host_packed = host_array
+            self._sync_appended_initial_memory()
+            self._packed_host_codes = current_hosts
+            self._program_shape = shape
+            print(
+                "BOOT_EXEC_NATIVE_HOST_APPEND "
+                f"hosts={len(new_hosts)} total={len(current_hosts)}",
+                flush=True,
+            )
+            return
+
         append_only = (
-            shape[2] == self._program_shape[2]
-            and self._packed_block_codes.issubset(current_blocks)
+            self._packed_block_codes.issubset(current_blocks)
             and self._packed_function_names.issubset(current_functions)
+            and host_append_only
             and bool(new_block_codes)
             and bool(new_functions)
         )
@@ -667,7 +704,7 @@ class NativeVM(VM):
                 (code, self.program.code_block[code])
                 for code in new_block_codes
             ]
-            insts, blocks, _hosts = self._pack_program(
+            insts, blocks, hosts = self._pack_program(
                 self.program,
                 ordered_blocks,
                 retain=False,
@@ -682,15 +719,25 @@ class NativeVM(VM):
             ):
                 raise VMError("cannot append native P3 program segment")
             self._extra_packed.append((insts, blocks))
+            if new_hosts:
+                if not self._lib.mm_vm_set_host_codes(
+                    self._handle,
+                    hosts,
+                    len(hosts),
+                ):
+                    raise VMError("cannot append native P3 host service table")
+                self._host_packed = hosts
             self._sync_appended_initial_memory()
 
             self._packed_block_codes = current_blocks
             self._packed_function_names = current_functions
+            self._packed_host_codes = current_hosts
             self._program_shape = shape
             print(
                 "BOOT_EXEC_NATIVE_APPEND "
                 f"functions={len(new_functions)} "
-                f"blocks={len(new_block_codes)}",
+                f"blocks={len(new_block_codes)} "
+                f"hosts={len(new_hosts)}",
                 flush=True,
             )
             return
@@ -708,9 +755,11 @@ class NativeVM(VM):
         ):
             raise VMError("cannot refresh native P3 program")
         self._extra_packed.clear()
+        self._host_packed = None
         self._sync_appended_initial_memory()
         self._packed_block_codes = current_blocks
         self._packed_function_names = current_functions
+        self._packed_host_codes = current_hosts
         self._program_shape = shape
         self.set_watch_codes(self._watch_codes)
 

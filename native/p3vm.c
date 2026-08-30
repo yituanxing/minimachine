@@ -499,6 +499,16 @@ int mm_vm_replace_program(MMVM *vm,
     return 1;
 }
 
+int mm_vm_set_host_codes(MMVM *vm,
+                         const uint64_t *host_codes,
+                         size_t host_count) {
+    if (!vm)
+        return 0;
+    vm->host_codes = host_codes;
+    vm->host_count = host_count;
+    return 1;
+}
+
 int mm_vm_add_segment(MMVM *vm,
                       const MMInst *insts, size_t inst_count,
                       const MMBlock *blocks, size_t block_count) {
