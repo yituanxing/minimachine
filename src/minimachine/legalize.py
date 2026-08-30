@@ -1158,11 +1158,11 @@ def _inline_asm_args(text: str, layout: DataLayout) -> tuple[muir.Value, ...]:
         return ()
     args = []
     for segment in _split_top_commas(body):
-        if "getelementptr" in segment:
-            pos = segment.find("getelementptr")
-            args.append(_const_gep_value(segment[pos:], layout))
-        else:
-            args.append(_value(segment))
+        try:
+            _ty, value_text = _split_typed_value(segment)
+        except ValueError:
+            value_text = segment.strip()
+        args.append(_const_scalar_value(value_text, layout))
     return tuple(args)
 
 

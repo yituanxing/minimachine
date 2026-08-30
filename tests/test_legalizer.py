@@ -301,6 +301,34 @@ class LegalizerTests(unittest.TestCase):
         self.assertEqual(entry[1].false_target.label, "taken")
         self.assertEqual(stats.lowered_static_branch, 1)
 
+    def test_ecall_preserves_ptrtoint_global_argument(self):
+        fn = self._one_function(
+            r"""
+            @console_buffer = internal global [256 x i8] zeroinitializer, align 1
+
+            define i64 @probe(i64 %count) {
+            entry:
+              %got = call i64 asm sideeffect "ecall", "=r,r,r,r,~{memory}"(
+                  i64 4,
+                  i64 ptrtoint (ptr @console_buffer to i64),
+                  i64 %count)
+              ret i64 %got
+            }
+            """
+        )
+        lowered, _ = legalize_function(fn, DataLayout(""))
+        sysops = [
+            inst
+            for block in lowered.blocks
+            for inst in block.instructions
+            if isinstance(inst, muir.Sys)
+        ]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(sysops[0].op, "ecall")
+        self.assertEqual(sysops[0].args[0], muir.Imm(4))
+        self.assertEqual(sysops[0].args[1], muir.Symbol("console_buffer"))
+        self.assertEqual(sysops[0].args[2], muir.Slot("count"))
+
     def test_aggregate_ecall_uses_multi_result_sysop(self):
         fn, stats = self.lower_one(
             """
