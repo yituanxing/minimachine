@@ -792,40 +792,64 @@ def user_syscall(vm, args: tuple[int, ...]):
         )
 
     nr, *argv = args
+    fallback = {
+        63: ("__se_sys_read", 3),
+        64: ("__se_sys_write", 3),
+        93: ("__se_sys_exit", 1),
+        94: ("__se_sys_exit_group", 1),
+        172: ("__se_sys_getpid", 0),
+        173: ("__se_sys_getppid", 0),
+        174: ("__se_sys_getuid", 0),
+        175: ("__se_sys_geteuid", 0),
+        176: ("__se_sys_getgid", 0),
+        177: ("__se_sys_getegid", 0),
+        221: ("__se_sys_execve", 3),
+    }
+
+    result = None
     if "minimachine_user_syscall" in vm.program.functions:
-        target = "minimachine_user_syscall"
-        call_args = tuple(args)
-    else:
-        # Exact pre-dispatcher Linux images already contain the generated
-        # syscall wrappers.  Use those as the semantic trap target so shell
-        # work can proceed from an existing exact checkpoint.  New images use
-        # minimachine_user_syscall above and converge on the arch entry.
-        fallback = {
-            63: ("__se_sys_read", 3),
-            64: ("__se_sys_write", 3),
-            93: ("__se_sys_exit", 1),
-            94: ("__se_sys_exit_group", 1),
-            221: ("__se_sys_execve", 3),
-        }
+        result, = _call_linux_function_preserving_control(
+            vm,
+            "minimachine_user_syscall",
+            tuple(args),
+            result_count=1,
+            max_extra_steps=8_000_000,
+        )
+
+    signed_result = (
+        result - (1 << 64)
+        if result is not None and result & (1 << 63)
+        else result
+    )
+    if result is None or signed_result == -38:
         spec = fallback.get(nr)
         if spec is None:
-            raise VMError(
-                f"MiniMachine userspace syscall {nr} has no semantic dispatch"
-            )
-        target, argc = spec
-        if target not in vm.program.functions:
-            raise VMError(
-                f"MiniMachine Linux image is missing syscall wrapper {target}"
-            )
-        call_args = tuple(argv[:argc])
+            if result is None:
+                raise VMError(
+                    f"MiniMachine userspace syscall {nr} has no semantic dispatch"
+                )
+        else:
+            target, argc = spec
+            if target in vm.program.functions:
+                result, = _call_linux_function_preserving_control(
+                    vm,
+                    target,
+                    tuple(argv[:argc]),
+                    result_count=1,
+                    max_extra_steps=8_000_000,
+                )
+                print(
+                    "BOOT_EXEC_USER_SYSCALL_FALLBACK "
+                    f"nr={nr} target={target}",
+                    flush=True,
+                )
+            elif result is None:
+                raise VMError(
+                    f"MiniMachine Linux image is missing syscall wrapper {target}"
+                )
 
-    result, = _call_linux_function_preserving_control(
-        vm,
-        target,
-        call_args,
-        result_count=1,
-        max_extra_steps=8_000_000,
-    )
+    if result is None:
+        result = ((1 << 64) - 38) & ((1 << 64) - 1)
     if nr == 63 and argv:
         user_ptr = argv[1]
         preview_len = min(32, max(0, int(result)))
