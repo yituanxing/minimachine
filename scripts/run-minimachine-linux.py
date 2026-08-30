@@ -131,6 +131,14 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--trace-hot-filp-open",
+        action="store_true",
+        help=(
+            "after checkpoint restore, trace the Linux filp_open O_CREAT "
+            "control path during hot /init injection"
+        ),
+    )
+    p.add_argument(
         "--probe-rootfs-after-checkpoint",
         action="store_true",
         help="probe live Linux rootfs paths and current task after checkpoint restore",
@@ -844,6 +852,80 @@ def probe_live_rootfs(vm) -> None:
             f"BOOT_EXEC_ROOTFS_PROBE mkdir=/mm-probe error={exc}",
             flush=True,
         )
+
+
+def install_hot_filp_trace(vm) -> None:
+    targets = {
+        "filp_open",
+        "file_open_name",
+        "do_filp_open",
+        "path_openat",
+        "path_init",
+        "link_path_walk",
+        "open_last_lookups",
+        "lookup_open",
+        "lookup_fast",
+        "d_lookup",
+        "d_alloc_parallel",
+        "mnt_want_write",
+        "may_o_create",
+        "do_open",
+        "vfs_open",
+    }
+    traced_codes: dict[int, tuple[str, str]] = {}
+    for code, pair in vm.program.code_block.items():
+        if pair[0] in targets:
+            traced_codes[code] = pair
+
+    original_set_code = vm._set_code
+    original_enter_function = vm.enter_function
+    trace_count = 0
+    trace_limit = 1200
+
+    def emit(function: str, block: str) -> None:
+        nonlocal trace_count
+        if trace_count >= trace_limit:
+            return
+        trace_count += 1
+        linked = vm.program.functions.get(function)
+        frame_size = vm.memory.read(vm.sp + 24, 64) if linked is not None else 0
+        argc = vm.memory.read(vm.sp + 56, 64) if linked is not None else 0
+        args = []
+        if linked is not None and argc <= 8:
+            arg_base = vm.sp + frame_size
+            args = [vm.memory.read(arg_base + i * 8, 64) for i in range(argc)]
+        print(
+            "BOOT_EXEC_HOT_FILP_TRACE "
+            f"seq={trace_count} steps={vm.steps} "
+            f"function={function} block={block} sp=0x{vm.sp:x} "
+            f"argc={argc} args={','.join(f'0x{x:x}' for x in args)}",
+            flush=True,
+        )
+
+    def traced_set_code(code: int) -> None:
+        original_set_code(code)
+        pair = traced_codes.get(code)
+        if pair is not None:
+            emit(pair[0], pair[1])
+
+    def traced_enter_function(name, args=(), *, stack_top, result_count=0):
+        original_enter_function(
+            name,
+            args,
+            stack_top=stack_top,
+            result_count=result_count,
+        )
+        if name in targets:
+            linked = vm.program.functions[name]
+            emit(name, linked.function.blocks[0].label)
+
+    vm._set_code = traced_set_code
+    vm.enter_function = traced_enter_function
+    print(
+        "BOOT_EXEC_HOT_FILP_TRACE_ARMED "
+        f"functions={len(targets)} codes={len(traced_codes)} limit={trace_limit}",
+        flush=True,
+    )
 
 
 def inject_live_root_init(vm, path: Path) -> None:
