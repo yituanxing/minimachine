@@ -398,6 +398,41 @@ def linux_ecall(vm, args: tuple[int, ...]):
     raise VMError(f"unsupported MiniMachine Linux ecall service: {service}")
 
 
+
+def user_syscall(vm, args: tuple[int, ...]):
+    """Semantic userspace trap into the MiniMachine Linux syscall entry."""
+    if len(args) != 7:
+        raise VMError(
+            "MiniMachine user syscall expects nr,arg0..arg5; "
+            f"got {len(args)} arguments"
+        )
+    if "minimachine_user_syscall" not in vm.program.functions:
+        raise VMError(
+            "MiniMachine Linux image has no userspace syscall dispatcher"
+        )
+
+    nr, *argv = args
+    result, = _call_linux_function_preserving_control(
+        vm,
+        "minimachine_user_syscall",
+        tuple(args),
+        result_count=1,
+        max_extra_steps=8_000_000,
+    )
+    count = int(getattr(vm, "user_syscall_count", 0)) + 1
+    vm.user_syscall_count = count
+    if count <= 64:
+        signed = result - (1 << 64) if result & (1 << 63) else result
+        print(
+            "BOOT_EXEC_USER_SYSCALL "
+            f"seq={count} nr={nr} "
+            f"args={','.join(f'0x{x:x}' for x in argv)} "
+            f"result={signed}",
+            flush=True,
+        )
+    return result
+
+
 def referenced_slots(value):
     seen: set[int] = set()
 
@@ -1328,6 +1363,9 @@ def main() -> int:
         f"image_objects={len(image.objects)} image_bytes={image.byte_size} "
         f"linker_boundaries={len(linker_contract.active_boundary_symbols(image_sections))}"
     )
+
+    if "__mm_user_syscall" not in program.symbol_addresses:
+        program.register_service("__mm_user_syscall", user_syscall)
 
     if args.native_vm:
         from src.minimachine.native_vm import NativeVM
