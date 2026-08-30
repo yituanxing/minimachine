@@ -51,38 +51,6 @@ class COperand(ctypes.Structure):
     ]
 
 
-class CMovArgs(ctypes.Structure):
-    _fields_ = [
-        ("dst", COperand),
-        ("src", COperand),
-    ]
-
-
-class CSubArgs(ctypes.Structure):
-    _fields_ = [
-        ("dst", COperand),
-        ("a", COperand),
-        ("b", COperand),
-    ]
-
-
-class CBrArgs(ctypes.Structure):
-    _fields_ = [
-        ("a", COperand),
-        ("b", COperand),
-        ("t", COperand),
-        ("f", COperand),
-    ]
-
-
-class CInstArgs(ctypes.Union):
-    _fields_ = [
-        ("mov", CMovArgs),
-        ("sub", CSubArgs),
-        ("br", CBrArgs),
-    ]
-
-
 class CInst(ctypes.Structure):
     _fields_ = [
         ("opcode", ctypes.c_uint8),
@@ -91,7 +59,10 @@ class CInst(ctypes.Structure):
         ("extend", ctypes.c_uint8),
         ("src_bits", ctypes.c_uint8),
         ("_pad", ctypes.c_uint8 * 3),
-        ("args", CInstArgs),
+        ("x0", COperand),
+        ("x1", COperand),
+        ("x2", COperand),
+        ("x3", COperand),
     ]
 
 
@@ -620,14 +591,14 @@ class NativeVM(VM):
                         "trunc": MM_EXT_TRUNC,
                     }[inst.extend]
                     out.src_bits = inst.src_bits or 0
-                    out.args.mov.dst = self._operand(inst.dst, linked, program)
-                    out.args.mov.src = self._operand(inst.src, linked, program)
+                    out.x0 = self._operand(inst.dst, linked, program)
+                    out.x1 = self._operand(inst.src, linked, program)
                 elif isinstance(inst, p3.Sub):
                     out.opcode = MM_OP_SUB
                     out.width = inst.width.value
-                    out.args.sub.dst = self._operand(inst.dst, linked, program)
-                    out.args.sub.a = self._operand(inst.a, linked, program)
-                    out.args.sub.b = self._operand(inst.b, linked, program)
+                    out.x0 = self._operand(inst.dst, linked, program)
+                    out.x1 = self._operand(inst.a, linked, program)
+                    out.x2 = self._operand(inst.b, linked, program)
                 elif isinstance(inst, p3.Br):
                     out.opcode = MM_OP_BR
                     out.width = inst.width.value
@@ -636,16 +607,16 @@ class NativeVM(VM):
                         muir.Cond.ULT: MM_COND_ULT,
                         muir.Cond.SLT: MM_COND_SLT,
                     }[inst.cond]
-                    out.args.br.a = self._operand(inst.a, linked, program)
-                    out.args.br.b = self._operand(inst.b, linked, program)
-                    out.args.br.t = self._target(
+                    out.x0 = self._operand(inst.a, linked, program)
+                    out.x1 = self._operand(inst.b, linked, program)
+                    out.x2 = self._target(
                         inst.true_target,
                         function_name,
                         linked,
                         program,
                         host_by_symbol,
                     )
-                    out.args.br.f = self._target(
+                    out.x3 = self._target(
                         inst.false_target,
                         function_name,
                         linked,

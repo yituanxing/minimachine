@@ -59,37 +59,16 @@ typedef struct {
 } MMOperand;
 
 typedef struct {
-    MMOperand dst;
-    MMOperand src;
-} MMMovArgs;
-
-typedef struct {
-    MMOperand dst;
-    MMOperand a;
-    MMOperand b;
-} MMSubArgs;
-
-typedef struct {
-    MMOperand a;
-    MMOperand b;
-    MMOperand t;
-    MMOperand f;
-} MMBrArgs;
-
-typedef union {
-    MMMovArgs mov;
-    MMSubArgs sub;
-    MMBrArgs br;
-} MMInstArgs;
-
-typedef struct {
     uint8_t opcode;
     uint8_t width;
     uint8_t cond;
     uint8_t extend;
     uint8_t src_bits;
     uint8_t _pad[3];
-    MMInstArgs args;
+    MMOperand x0;
+    MMOperand x1;
+    MMOperand x2;
+    MMOperand x3;
 } MMInst;
 
 typedef struct {
@@ -728,7 +707,7 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
 
         if (in->opcode == MM_OP_MOV) {
             uint64_t raw;
-            if (!read_value(vm, &in->args.mov.src, &raw)) {
+            if (!read_value(vm, &in->x1, &raw)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = MM_ERR_BAD_VALUE;
                 break;
@@ -736,14 +715,14 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
             unsigned dst_bits = in->width;
             uint64_t value = raw & mask_bits(dst_bits);
             if (in->extend != MM_EXT_NONE) {
-                unsigned src_bits = in->src_bits ? in->src_bits : in->args.mov.src.width;
+                unsigned src_bits = in->src_bits ? in->src_bits : in->x1.width;
                 raw &= mask_bits(src_bits);
                 if (in->extend == MM_EXT_SEXT)
                     value = (uint64_t)sext64(raw, src_bits) & mask_bits(dst_bits);
                 else
                     value = raw & mask_bits(dst_bits);
             }
-            if (!write_operand(vm, &in->args.mov.dst, value, dst_bits)) {
+            if (!write_operand(vm, &in->x0, value, dst_bits)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = vm->oom ? MM_ERR_OOM : MM_ERR_BAD_VALUE;
                 break;
@@ -754,14 +733,14 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
 
         if (in->opcode == MM_OP_SUB) {
             uint64_t a, b;
-            if (!read_value(vm, &in->args.sub.a, &a) ||
-                !read_value(vm, &in->args.sub.b, &b)) {
+            if (!read_value(vm, &in->x1, &a) ||
+                !read_value(vm, &in->x2, &b)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = MM_ERR_BAD_VALUE;
                 break;
             }
             uint64_t value = (a - b) & mask_bits(in->width);
-            if (!write_operand(vm, &in->args.sub.dst, value, in->width)) {
+            if (!write_operand(vm, &in->x0, value, in->width)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = vm->oom ? MM_ERR_OOM : MM_ERR_BAD_VALUE;
                 break;
@@ -772,8 +751,8 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
 
         if (in->opcode == MM_OP_BR) {
             uint64_t a, b, target;
-            if (!read_value(vm, &in->args.br.a, &a) ||
-                !read_value(vm, &in->args.br.b, &b)) {
+            if (!read_value(vm, &in->x0, &a) ||
+                !read_value(vm, &in->x1, &b)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = MM_ERR_BAD_VALUE;
                 break;
@@ -797,7 +776,7 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
 
             if (!target_code(
                     vm,
-                    take ? &in->args.br.t : &in->args.br.f,
+                    take ? &in->x2 : &in->x3,
                     &target
                 )) {
                 r.status = MM_STATUS_ERROR;
