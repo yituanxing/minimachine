@@ -1420,6 +1420,9 @@ def main() -> int:
             "populate_rootfs",
             "do_populate_rootfs",
             "unpack_to_rootfs",
+            "do_name",
+            "do_copy",
+            "do_reset",
             "panic",
         }
         print(
@@ -1457,6 +1460,8 @@ def main() -> int:
             flush=True,
         )
     checkpoint_function_hits = 0
+    initramfs_last_name = None
+    initramfs_copy_seen = False
 
     def install_sched_watch() -> None:
         nonlocal sched_watch_installed
@@ -1506,6 +1511,80 @@ def main() -> int:
         nonlocal last_initcall_enter_step, last_initcall_symbol
         nonlocal checkpoint_written, checkpoint_after_armed
         nonlocal checkpoint_function_hits
+        nonlocal initramfs_last_name, initramfs_copy_seen
+
+        if function == "do_name":
+            collected_addr = vm.program.symbol_addresses.get("collected")
+            name_len_addr = vm.program.symbol_addresses.get("name_len")
+            body_len_addr = vm.program.symbol_addresses.get("body_len")
+            mode_addr = vm.program.symbol_addresses.get("mode")
+            wfile_addr = vm.program.symbol_addresses.get("wfile")
+            collected_ptr = (
+                vm.memory.read(collected_addr, 64)
+                if collected_addr is not None else 0
+            )
+            name_len = (
+                vm.memory.read(name_len_addr, 64)
+                if name_len_addr is not None else 0
+            )
+            body_len = (
+                vm.memory.read(body_len_addr, 64)
+                if body_len_addr is not None else 0
+            )
+            mode = (
+                vm.memory.read(mode_addr, 16)
+                if mode_addr is not None else 0
+            )
+            raw = bytearray()
+            if collected_ptr:
+                for i in range(min(int(name_len or 0), 256)):
+                    b = vm.memory.read(collected_ptr + i, 8)
+                    if b == 0:
+                        break
+                    raw.append(b)
+            initramfs_last_name = raw.decode("utf-8", errors="replace")
+            initramfs_copy_seen = False
+            old_wfile = (
+                vm.memory.read(wfile_addr, 64)
+                if wfile_addr is not None else 0
+            )
+            print(
+                "BOOT_EXEC_INITRAMFS_NAME "
+                f"steps={vm.steps} name={initramfs_last_name!r} "
+                f"mode=0{mode:o} body_len={body_len} "
+                f"wfile_before=0x{old_wfile:x}",
+                flush=True,
+            )
+
+        if function == "do_copy":
+            initramfs_copy_seen = True
+            wfile_addr = vm.program.symbol_addresses.get("wfile")
+            body_len_addr = vm.program.symbol_addresses.get("body_len")
+            wfile = vm.memory.read(wfile_addr, 64) if wfile_addr is not None else 0
+            body_len = (
+                vm.memory.read(body_len_addr, 64)
+                if body_len_addr is not None else 0
+            )
+            print(
+                "BOOT_EXEC_INITRAMFS_COPY "
+                f"steps={vm.steps} name={initramfs_last_name!r} "
+                f"wfile=0x{wfile:x} body_len={body_len}",
+                flush=True,
+            )
+
+        if function == "do_reset" and initramfs_last_name is not None:
+            wfile_addr = vm.program.symbol_addresses.get("wfile")
+            wfile = vm.memory.read(wfile_addr, 64) if wfile_addr is not None else 0
+            signed_wfile = wfile - (1 << 64) if wfile & (1 << 63) else wfile
+            print(
+                "BOOT_EXEC_INITRAMFS_RESET "
+                f"steps={vm.steps} name={initramfs_last_name!r} "
+                f"copy_seen={int(initramfs_copy_seen)} "
+                f"wfile=0x{wfile:x} signed_wfile={signed_wfile}",
+                flush=True,
+            )
+            initramfs_last_name = None
+            initramfs_copy_seen = False
 
         if function == "unpack_to_rootfs":
             frame_size = vm.memory.read(vm.sp + 24, 64)
