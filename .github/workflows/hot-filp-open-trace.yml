@@ -5,6 +5,7 @@ on:
   push:
     branches: [work/native-p3-vm]
     paths:
+      - scripts/run-minimachine-linux.py
       - .github/workflows/hot-filp-open-trace.yml
 
 permissions:
