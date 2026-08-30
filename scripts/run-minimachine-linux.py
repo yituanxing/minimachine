@@ -1416,6 +1416,10 @@ def main() -> int:
             "run_init_process",
             "try_to_run_init_process",
             "kernel_execve",
+            "wait_for_initramfs",
+            "populate_rootfs",
+            "do_populate_rootfs",
+            "unpack_to_rootfs",
             "panic",
         }
         print(
@@ -1502,6 +1506,30 @@ def main() -> int:
         nonlocal last_initcall_enter_step, last_initcall_symbol
         nonlocal checkpoint_written, checkpoint_after_armed
         nonlocal checkpoint_function_hits
+
+        if function == "unpack_to_rootfs":
+            frame_size = vm.memory.read(vm.sp + 24, 64)
+            argc = vm.memory.read(vm.sp + 56, 64)
+            arg_base = vm.sp + frame_size
+            raw_args = [
+                vm.memory.read(arg_base + 8 * i, 64)
+                for i in range(min(argc, 4))
+            ]
+            ptr = raw_args[0] if raw_args else 0
+            length = raw_args[1] if len(raw_args) > 1 else 0
+            expected_ptr = vm.program.symbol_addresses.get("__initramfs_start", 0)
+            expected_size_addr = vm.program.symbol_addresses.get("__initramfs_size")
+            expected_size = (
+                vm.memory.read(expected_size_addr, 64)
+                if expected_size_addr is not None
+                else 0
+            )
+            print(
+                "BOOT_EXEC_INITRAMFS_UNPACK_ENTER "
+                f"steps={vm.steps} ptr=0x{ptr:x} len={length} "
+                f"expected_ptr=0x{expected_ptr:x} expected_len={expected_size}",
+                flush=True,
+            )
 
         if function == "panic":
             frame_size = vm.memory.read(vm.sp + 24, 64)
