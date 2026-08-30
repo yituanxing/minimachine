@@ -154,6 +154,15 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--restart-run-init-after-checkpoint",
+        action="store_true",
+        help=(
+            "after checkpoint restore/injection, discard the in-flight exec "
+            "frame and restart Linux run_init_process('/init') as the active "
+            "control path so a successful userspace handoff is preserved"
+        ),
+    )
+    p.add_argument(
         "--skip-prepare-namespace-after-inject",
         action="store_true",
         help=(
@@ -2014,6 +2023,43 @@ def main() -> int:
                 flush=True,
             )
             return 0
+
+        if args.restart_run_init_after_checkpoint:
+            if "run_init_process" not in vm.program.functions:
+                print(
+                    "BOOT_EXEC_BLOCKED stage=init-exec-restart "
+                    "error=missing-run_init_process",
+                    flush=True,
+                )
+                return 1
+            guest_path = b"/init\0"
+            path_ptr = vm.alloc_bytes(len(guest_path), align=8)
+            bulk_write = getattr(vm.memory, "bulk_write", None)
+            if bulk_write is not None:
+                bulk_write(path_ptr, guest_path)
+            else:
+                for i, byte in enumerate(guest_path):
+                    vm.memory.write(path_ptr + i, 8, byte)
+
+            linked = vm.program.functions["run_init_process"]
+            restart_stack_top = 0x0F00_0000
+            result_words = 1
+            total = linked.frame_size + 8 + result_words * 8
+            restart_sp = restart_stack_top - total
+            result_base = restart_sp + linked.frame_size + 8
+            vm.enter_function(
+                "run_init_process",
+                (path_ptr,),
+                stack_top=restart_stack_top,
+                result_count=1,
+            )
+            vm.init_exec_restart_result_base = result_base
+            print(
+                "BOOT_EXEC_INIT_EXEC_RESTART "
+                f"path=/init path_ptr=0x{path_ptr:x} "
+                f"sp=0x{vm.sp:x} steps={vm.steps}",
+                flush=True,
+            )
 
     if args.probe_kallsyms is not None:
         symbol = args.probe_kallsyms
