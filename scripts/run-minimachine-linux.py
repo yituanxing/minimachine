@@ -990,6 +990,203 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return out
         return realloc
 
+    if original == "vsnprintf":
+        def user_vsnprintf(vm, args):
+            if len(args) != 4:
+                raise VMError("vsnprintf expects buffer,size,format,va_list")
+            outbuf, size, fmt_ptr, ap = map(int, args)
+
+            def read_cstring(ptr: int, limit: int = 1 << 20) -> bytes:
+                if not ptr:
+                    return b""
+                data = bytearray()
+                bulk_strlen = getattr(vm.memory, "bulk_strlen", None)
+                if bulk_strlen is not None:
+                    length = min(int(bulk_strlen(ptr)), limit)
+                    bulk_read = getattr(vm.memory, "bulk_read", None)
+                    if bulk_read is not None:
+                        return bytes(bulk_read(ptr, length))
+                for index in range(limit):
+                    byte = vm.memory.read(ptr + index, 8)
+                    if byte == 0:
+                        break
+                    data.append(byte)
+                return bytes(data)
+
+            fmt = read_cstring(fmt_ptr, 4096).decode("latin1")
+            cursor = ap
+
+            def next_arg() -> int:
+                nonlocal cursor
+                value = vm.memory.read(cursor, 64)
+                cursor += 8
+                return int(value)
+
+            def signed_value(value: int, bits: int) -> int:
+                mask = (1 << bits) - 1
+                value &= mask
+                sign = 1 << (bits - 1)
+                return value - (1 << bits) if value & sign else value
+
+            def unsigned_value(value: int, bits: int) -> int:
+                return value & ((1 << bits) - 1)
+
+            out = bytearray()
+            index = 0
+            while index < len(fmt):
+                if fmt[index] != "%":
+                    out.append(ord(fmt[index]))
+                    index += 1
+                    continue
+
+                index += 1
+                if index < len(fmt) and fmt[index] == "%":
+                    out.append(ord("%"))
+                    index += 1
+                    continue
+
+                flags = ""
+                while index < len(fmt) and fmt[index] in "-+ #0":
+                    flags += fmt[index]
+                    index += 1
+
+                if index < len(fmt) and fmt[index] == "*":
+                    width = signed_value(next_arg(), 32)
+                    if width < 0:
+                        flags += "-"
+                        width = -width
+                    index += 1
+                else:
+                    width_start = index
+                    while index < len(fmt) and fmt[index].isdigit():
+                        index += 1
+                    width = int(fmt[width_start:index] or "0")
+
+                precision = None
+                if index < len(fmt) and fmt[index] == ".":
+                    index += 1
+                    if index < len(fmt) and fmt[index] == "*":
+                        raw_precision = signed_value(next_arg(), 32)
+                        precision = None if raw_precision < 0 else raw_precision
+                        index += 1
+                    else:
+                        precision_start = index
+                        while index < len(fmt) and fmt[index].isdigit():
+                            index += 1
+                        precision = int(fmt[precision_start:index] or "0")
+
+                length = ""
+                if index < len(fmt) and fmt[index] in "hljzt":
+                    length = fmt[index]
+                    index += 1
+                    if (
+                        length in {"h", "l"}
+                        and index < len(fmt)
+                        and fmt[index] == length
+                    ):
+                        length += fmt[index]
+                        index += 1
+
+                if index >= len(fmt):
+                    raise VMError("vsnprintf format ends after %")
+                spec = fmt[index]
+                index += 1
+                bits = 64 if length in {"l", "ll", "j", "z", "t"} else 32
+                prefix = ""
+                numeric = False
+
+                if spec in "di":
+                    value = signed_value(next_arg(), bits)
+                    sign = "-" if value < 0 else ("+" if "+" in flags else (" " if " " in flags else ""))
+                    digits = str(abs(value))
+                    if precision is not None:
+                        digits = digits.rjust(precision, "0")
+                    piece = sign + digits
+                    numeric = True
+                elif spec in "uoxX":
+                    value = unsigned_value(next_arg(), bits)
+                    if spec == "u":
+                        digits = str(value)
+                    elif spec == "o":
+                        digits = format(value, "o")
+                        if "#" in flags and (not digits.startswith("0")):
+                            prefix = "0"
+                    else:
+                        digits = format(value, "x" if spec == "x" else "X")
+                        if "#" in flags and value:
+                            prefix = "0x" if spec == "x" else "0X"
+                    if precision is not None:
+                        digits = digits.rjust(precision, "0")
+                    piece = prefix + digits
+                    numeric = True
+                elif spec == "p":
+                    value = next_arg()
+                    piece = "(nil)" if value == 0 else f"0x{value:x}"
+                elif spec == "c":
+                    piece = chr(next_arg() & 0xFF)
+                elif spec == "s":
+                    raw = read_cstring(next_arg())
+                    if precision is not None:
+                        raw = raw[:precision]
+                    piece_bytes = raw
+                    if width > len(piece_bytes):
+                        padding = b" " * (width - len(piece_bytes))
+                        piece_bytes = (
+                            piece_bytes + padding
+                            if "-" in flags
+                            else padding + piece_bytes
+                        )
+                    out.extend(piece_bytes)
+                    continue
+                else:
+                    raise VMError(
+                        f"unsupported vsnprintf conversion %{length}{spec}"
+                    )
+
+                piece_bytes = piece.encode("latin1")
+                if width > len(piece_bytes):
+                    pad_len = width - len(piece_bytes)
+                    if "-" in flags:
+                        piece_bytes += b" " * pad_len
+                    elif "0" in flags and precision is None and numeric:
+                        lead = 0
+                        if piece_bytes[:1] in {b"+", b"-", b" "}:
+                            lead = 1
+                        elif piece_bytes[:2] in {b"0x", b"0X"}:
+                            lead = 2
+                        piece_bytes = (
+                            piece_bytes[:lead]
+                            + b"0" * pad_len
+                            + piece_bytes[lead:]
+                        )
+                    else:
+                        piece_bytes = b" " * pad_len + piece_bytes
+                out.extend(piece_bytes)
+
+            payload = bytes(out)
+            if size > 0:
+                written = payload[: max(0, size - 1)]
+                bulk_write = getattr(vm.memory, "bulk_write", None)
+                if bulk_write is not None:
+                    if written:
+                        bulk_write(outbuf, written)
+                else:
+                    for offset, byte in enumerate(written):
+                        vm.memory.write(outbuf + offset, 8, byte)
+                vm.memory.write(outbuf + len(written), 8, 0)
+            else:
+                written = b""
+
+            print(
+                "BOOT_EXEC_USER_VSNPRINTF "
+                f"fmt={fmt!r} result={len(payload)} written={len(written)} "
+                f"ap=0x{ap:x}",
+                flush=True,
+            )
+            return len(payload)
+
+        return user_vsnprintf
+
     if original == "_exit":
         def user_exit(vm, args):
             if len(args) != 1:
