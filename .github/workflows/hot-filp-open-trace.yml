@@ -1,0 +1,80 @@
+name: MiniMachine Hot filp_open Trace
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/hot-filp-open-trace.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download prepare_namespace checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33261446210
+          github-token: ${{ github.token }}
+          name: minimachine-blake2s-fast-33261446210
+          path: checkpoint-source
+
+      - name: Download old P3 cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33249488447
+          github-token: ${{ github.token }}
+          name: minimachine-double-hot-33249488447
+          path: p3-cache-source
+
+      - name: Download old linked image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33245921667
+          github-token: ${{ github.token }}
+          name: minimachine-linux-boot-33245921667
+          path: replay-source
+
+      - name: Build init payload
+        run: python3 scripts/build-minimachine-initramfs.py /tmp/minimachine-initramfs.cpio --init-output /tmp/minimachine-init.bflt
+
+      - name: Prepare inputs
+        run: |
+          cp "$(find checkpoint-source -name 'blake2s-fast-next.chk.gz' -print -quit)" replay-source/llvm/hot-prepare.chk.gz
+          cp "$(find p3-cache-source -name 'linux-p3-cache.pkl.gz' -print -quit)" replay-source/llvm/linux-p3-cache.pkl.gz
+
+      - name: Trace one hot filp_open create
+        run: |
+          set +e
+          set -o pipefail
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz \
+            --checkpoint-in replay-source/llvm/hot-prepare.chk.gz \
+            --trace-hot-filp-open \
+            --inject-init /tmp/minimachine-init.bflt \
+            --max-steps 1 \
+            --progress-every 0 \
+            2>&1 | tee hot-filp-open.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo HOT_FILP_STATUS=$status
+          grep -E 'BOOT_EXEC_HOT_FILP_TRACE|BOOT_EXEC_BLOCKED stage=rootfs-inject' hot-filp-open.log || true
+          exit 0
+
+      - name: Upload trace
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-hot-filp-${{ github.run_id }}
+          path: hot-filp-open.log
+          retention-days: 7
