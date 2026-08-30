@@ -55,6 +55,15 @@ def parse_args():
     )
     p.add_argument("--entry", default="start_kernel")
     p.add_argument(
+        "--native-report-every",
+        type=int,
+        default=0,
+        help=(
+            "native VM only: return to Python every N P3 steps for a "
+            "low-overhead throughput/location sample; 0 disables"
+        ),
+    )
+    p.add_argument(
         "--native-boot-phases-only",
         action="store_true",
         help=(
@@ -1150,6 +1159,7 @@ def main() -> int:
         from src.minimachine.native_vm import NativeVM
         native_init_started = time.perf_counter()
         vm = NativeVM(program)
+        vm.native_report_every = max(0, args.native_report_every)
         print("BOOT_EXEC_BACKEND backend=native-c", flush=True)
         print(
             "BOOT_EXEC_STAGE "
