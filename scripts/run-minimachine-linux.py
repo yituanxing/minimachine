@@ -300,7 +300,8 @@ def linux_ecall(vm, args: tuple[int, ...]):
             vm.memory.write(ptr + index, 8, byte)
         print(
             "BOOT_EXEC_HOST_INPUT "
-            f"requested={size} returned={len(data)}",
+            f"requested={size} returned={len(data)} "
+            f"ptr=0x{ptr:x} data={data[:32].hex()}",
             flush=True,
         )
         return len(data)
@@ -486,6 +487,20 @@ def user_syscall(vm, args: tuple[int, ...]):
         result_count=1,
         max_extra_steps=8_000_000,
     )
+    if nr == 63 and argv:
+        user_ptr = argv[1]
+        preview_len = min(32, max(0, int(result)))
+        preview = bytes(
+            vm.memory.read(user_ptr + i, 8)
+            for i in range(preview_len)
+        )
+        print(
+            "BOOT_EXEC_USER_READ_BUFFER "
+            f"ptr=0x{user_ptr:x} result={int(result)} "
+            f"data={preview.hex()}",
+            flush=True,
+        )
+
     count = int(getattr(vm, "user_syscall_count", 0)) + 1
     vm.user_syscall_count = count
     if count <= 64:
