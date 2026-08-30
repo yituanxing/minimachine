@@ -1438,9 +1438,8 @@ def direct_runtime_callback(symbol: str):
             dst, src, size = args
             bulk = getattr(vm.memory, "bulk_copy", None)
             trace_console_copy = (
-                0 < size <= 256
-                and src < 0x1000
-                and dst >= 0x1000
+                0 < size <= (1 << 20)
+                and (src == 0x40 or dst == 0x40)
             )
             if trace_console_copy:
                 before = bytes(
