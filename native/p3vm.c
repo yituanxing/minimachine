@@ -109,6 +109,9 @@ typedef struct {
     uint64_t cached_page_no;
     MMPage *cached_page;
     int cached_page_valid;
+    uint64_t cached_block_code;
+    size_t cached_block_index;
+    int cached_block_valid;
 } MMVM;
 
 static inline uint64_t mask_bits(unsigned bits) {
@@ -448,6 +451,7 @@ int mm_vm_replace_program(MMVM *vm,
     vm->host_codes = host_codes;
     vm->host_count = host_count;
     vm->halt_code = halt_code;
+    vm->cached_block_valid = 0;
     return 1;
 }
 
@@ -582,6 +586,7 @@ void mm_vm_set_state(MMVM *vm, uint64_t block_code, uint32_t ip,
     vm->ip = ip;
     vm->sp = sp;
     vm->steps = steps;
+    vm->cached_block_valid = 0;
 }
 
 MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
@@ -590,10 +595,18 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
 
     while (vm->steps < max_steps) {
         size_t bi;
-        if (!find_block(vm, vm->block_code, &bi)) {
-            r.status = MM_STATUS_ERROR;
-            r.error = MM_ERR_BAD_BLOCK;
-            break;
+        if (vm->cached_block_valid &&
+            vm->cached_block_code == vm->block_code) {
+            bi = vm->cached_block_index;
+        } else {
+            if (!find_block(vm, vm->block_code, &bi)) {
+                r.status = MM_STATUS_ERROR;
+                r.error = MM_ERR_BAD_BLOCK;
+                break;
+            }
+            vm->cached_block_code = vm->block_code;
+            vm->cached_block_index = bi;
+            vm->cached_block_valid = 1;
         }
         const MMBlock *block = &vm->blocks[bi];
         if (vm->ip >= block->count) {
@@ -707,6 +720,9 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
             }
             vm->block_code = target;
             vm->ip = 0;
+            vm->cached_block_code = target;
+            vm->cached_block_index = target_index;
+            vm->cached_block_valid = 1;
             continue;
         }
 
