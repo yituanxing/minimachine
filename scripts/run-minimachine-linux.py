@@ -990,10 +990,24 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return out
         return realloc
 
+    if original == "_exit":
+        def user_exit(vm, args):
+            if len(args) != 1:
+                raise VMError("_exit expects status")
+            status = int(args[0]) & 0xFF
+            vm.user_exit_status = status
+            vm.halted = True
+            print(
+                "BOOT_EXEC_USER_EXIT "
+                f"status={status}",
+                flush=True,
+            )
+            return HOST_CONTROL_TRANSFER
+        return user_exit
+
     syscall_map = {
         "read": (63, 3),
         "write": (64, 3),
-        "_exit": (93, 1),
         "chdir": (49, 1),
         "close": (57, 1),
         "gettimeofday": (169, 2),
