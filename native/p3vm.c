@@ -736,7 +736,7 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
             unsigned dst_bits = in->width;
             uint64_t value = raw & mask_bits(dst_bits);
             if (in->extend != MM_EXT_NONE) {
-                unsigned src_bits = in->src_bits ? in->src_bits : in->src.width;
+                unsigned src_bits = in->src_bits ? in->src_bits : in->args.mov.src.width;
                 raw &= mask_bits(src_bits);
                 if (in->extend == MM_EXT_SEXT)
                     value = (uint64_t)sext64(raw, src_bits) & mask_bits(dst_bits);
