@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import struct
+import zlib
 
 from . import muir, p3
 
@@ -13,6 +14,7 @@ BFLT_HEADER_SIZE = 64
 BFLT_FLAG_KTRACE = 0x0010
 USER_PAYLOAD_MAGIC = b"MMP3"
 USER_PAYLOAD_VERSION = 1
+USER_PAYLOAD_ZLIB_VERSION = 2
 USER_PAYLOAD_HEADER_SIZE = 12
 BFLT_DATA_ALIGN = 0x20
 
@@ -242,12 +244,22 @@ def _align_up(value: int, align: int) -> int:
     return (value + align - 1) & ~(align - 1)
 
 
-def pack_user_payload(function: p3.Function) -> bytes:
-    body = dumps_function(function)
+def pack_user_payload(
+    function: p3.Function,
+    *,
+    compress: bool = False,
+) -> bytes:
+    raw = dumps_function(function)
+    if compress:
+        body = zlib.compress(raw, level=9)
+        version = USER_PAYLOAD_ZLIB_VERSION
+    else:
+        body = raw
+        version = USER_PAYLOAD_VERSION
     header = struct.pack(
         ">4sII",
         USER_PAYLOAD_MAGIC,
-        USER_PAYLOAD_VERSION,
+        version,
         len(body),
     )
     return header + body
@@ -261,14 +273,22 @@ def unpack_user_payload(data: bytes) -> p3.Function:
     )
     if magic != USER_PAYLOAD_MAGIC:
         raise UserImageError(f"bad MiniMachine user payload magic: {magic!r}")
-    if version != USER_PAYLOAD_VERSION:
+    if version not in {USER_PAYLOAD_VERSION, USER_PAYLOAD_ZLIB_VERSION}:
         raise UserImageError(
             f"unsupported MiniMachine user payload version: {version}"
         )
     end = USER_PAYLOAD_HEADER_SIZE + size
     if end > len(data):
         raise UserImageError("truncated MiniMachine user payload body")
-    return loads_function(data[USER_PAYLOAD_HEADER_SIZE:end])
+    body = data[USER_PAYLOAD_HEADER_SIZE:end]
+    if version == USER_PAYLOAD_ZLIB_VERSION:
+        try:
+            body = zlib.decompress(body)
+        except zlib.error as exc:
+            raise UserImageError(
+                "invalid compressed MiniMachine user payload"
+            ) from exc
+    return loads_function(body)
 
 
 def build_bflt(
@@ -276,11 +296,12 @@ def build_bflt(
     *,
     stack_size: int = 64 * 1024,
     ktrace: bool = False,
+    compress_payload: bool = False,
 ) -> bytes:
     if stack_size <= 0 or stack_size >= (1 << 28):
         raise UserImageError(f"invalid bFLT stack size: {stack_size}")
 
-    payload = pack_user_payload(function)
+    payload = pack_user_payload(function, compress=compress_payload)
     entry = BFLT_HEADER_SIZE
     text_end = _align_up(entry + len(payload), BFLT_DATA_ALIGN)
     flags = BFLT_FLAG_KTRACE if ktrace else 0
