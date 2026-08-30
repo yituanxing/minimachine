@@ -36,7 +36,7 @@ jobs:
           mkdir -p unpack
           cd unpack
           cpio -itv < ../exact/out/minimachine-initramfs.cpio | tee ../cpio-list.txt
-          cpio -idm --no-absolute-filenames < ../exact/out/minimachine-initramfs.cpio
+          cpio -idm --no-absolute-filenames init < ../exact/out/minimachine-initramfs.cpio
           test -f init
           test -x init
           stat -c 'EXACT_INIT mode=%a size=%s type=%F' init
