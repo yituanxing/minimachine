@@ -15,7 +15,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      BUSYBOX_TAG: "1_37_0"
+      BUSYBOX_VERSION: "1.37.0"
+      BUSYBOX_SHA256: "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4"
     steps:
       - uses: actions/checkout@v4
 
@@ -33,9 +34,15 @@ jobs:
       - name: Fetch pinned upstream BusyBox
         run: |
           mkdir -p build
-          git clone --depth 1 --branch "$BUSYBOX_TAG" \
-            https://github.com/mirror/busybox.git build/busybox
-          git -C build/busybox rev-parse HEAD | tee build/busybox.commit
+          tarball="busybox-${BUSYBOX_VERSION}.tar.bz2"
+          curl -fL --retry 5 --retry-delay 2 \
+            -o "build/$tarball" \
+            "https://busybox.net/downloads/$tarball"
+          echo "${BUSYBOX_SHA256}  build/$tarball" | sha256sum -c -
+          tar -xjf "build/$tarball" -C build
+          mv "build/busybox-${BUSYBOX_VERSION}" build/busybox
+          printf 'version=%s\nsha256=%s\n' \
+            "$BUSYBOX_VERSION" "$BUSYBOX_SHA256" | tee build/busybox.commit
 
       - name: Build normal static RISC-V BusyBox baseline
         working-directory: build/busybox
