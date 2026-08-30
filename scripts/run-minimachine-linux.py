@@ -445,6 +445,21 @@ def linux_ecall(vm, args: tuple[int, ...]):
         for function in functions:
             vm.program.add_function(function)
 
+        if user_image.image is not None:
+            try:
+                install_module_image(vm.program, user_image.image)
+            except (ImageError, VMError) as exc:
+                raise VMError(
+                    f"cannot install MiniMachine userspace data image: {exc}"
+                ) from exc
+            print(
+                "BOOT_EXEC_USER_IMAGE_DATA "
+                f"objects={len(user_image.image.objects)} "
+                f"bytes={user_image.image.byte_size} "
+                f"relocs={user_image.image.relocation_count}",
+                flush=True,
+            )
+
         print(
             "BOOT_EXEC_USER_HANDOFF "
             f"regs=0x{regs:x} pc=0x{pc:x} user_sp=0x{user_sp:x} "

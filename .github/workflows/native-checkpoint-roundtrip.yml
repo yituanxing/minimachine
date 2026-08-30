@@ -135,3 +135,64 @@ jobs:
           assert len(vm._extra_packed) == 1
           print("NATIVE_PROGRAM_SEGMENT_APPEND PASS")
           PY
+
+      - name: Native append-only global data
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 - <<'PY'
+          from src.minimachine import muir
+          from src.minimachine.abi import expand_function
+          from src.minimachine.lower_p3 import lower_function
+          from src.minimachine.vm import Program
+          from src.minimachine.native_vm import NativeVM
+
+          def machine(fn):
+              expanded, _ = expand_function(fn)
+              return lower_function(expanded)
+
+          base = muir.Function(
+              "base_data",
+              [muir.Block("entry", [muir.Ret(muir.Imm(1))])],
+              set(),
+              (),
+          )
+          reader = muir.Function(
+              "read_dynamic_data",
+              [
+                  muir.Block(
+                      "entry",
+                      [
+                          muir.Mov(
+                              muir.Width.I8,
+                              muir.Slot("out"),
+                              muir.Mem(
+                                  muir.Address(
+                                      muir.Symbol("dynamic_message"),
+                                      0,
+                                  ),
+                                  muir.Width.I8,
+                              ),
+                          ),
+                          muir.Ret(muir.Slot("out")),
+                      ],
+                  )
+              ],
+              {"out"},
+              (),
+          )
+
+          program = Program([machine(base)])
+          vm = NativeVM(program)
+          assert vm.run_function("base_data", ()) == (1,)
+
+          program.define_data_symbol(
+              "dynamic_message",
+              b"hello\0",
+              align=1,
+          )
+          program.add_function(machine(reader))
+          assert vm.run_function("read_dynamic_data", ()) == (ord("h"),)
+          assert vm.run_function("base_data", ()) == (1,)
+          print("NATIVE_PROGRAM_DATA_APPEND PASS")
+          PY

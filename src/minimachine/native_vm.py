@@ -356,6 +356,7 @@ class NativeVM(VM):
         self._watch_codes: tuple[int, ...] = ()
         self.native_report_every = 0
         self._load_initial_memory(program)
+        self._synced_data_end = program._next_data
 
     def __del__(self):
         handle = getattr(self, "_handle", None)
@@ -389,6 +390,39 @@ class NativeVM(VM):
             self._handle, addresses, values, len(items)
         ):
             raise VMError("cannot load native P3 initial memory")
+
+    def _sync_appended_initial_memory(self) -> int:
+        start = self._synced_data_end
+        end = self.program._next_data
+        if end <= start:
+            return 0
+
+        items = [
+            (address, value)
+            for address, value in self.program.initial_memory.bytes.items()
+            if start <= address < end
+        ]
+        if items:
+            addresses = (ctypes.c_uint64 * len(items))(
+                *(address & MASK64 for address, _ in items)
+            )
+            values = (ctypes.c_uint8 * len(items))(
+                *(value & 0xFF for _, value in items)
+            )
+            if not self._lib.mm_vm_load_bytes(
+                self._handle,
+                addresses,
+                values,
+                len(items),
+            ):
+                raise VMError("cannot sync appended native P3 data")
+        self._synced_data_end = end
+        print(
+            "BOOT_EXEC_NATIVE_DATA_APPEND "
+            f"start=0x{start:x} end=0x{end:x} bytes={len(items)}",
+            flush=True,
+        )
+        return len(items)
 
     def _resolved_value(self, value, linked, program):
         if isinstance(value, muir.Imm):
@@ -628,20 +662,7 @@ class NativeVM(VM):
             ):
                 raise VMError("cannot append native P3 program segment")
             self._extra_packed.append((insts, blocks))
-
-            for name in sorted(new_functions):
-                descriptor = self.program.symbol_addresses.get(name)
-                if descriptor is None:
-                    continue
-                for offset in range(16):
-                    self.memory.write(
-                        descriptor + offset,
-                        8,
-                        self.program.initial_memory.read(
-                            descriptor + offset,
-                            8,
-                        ),
-                    )
+            self._sync_appended_initial_memory()
 
             self._packed_block_codes = current_blocks
             self._packed_function_names = current_functions
@@ -667,6 +688,7 @@ class NativeVM(VM):
         ):
             raise VMError("cannot refresh native P3 program")
         self._extra_packed.clear()
+        self._sync_appended_initial_memory()
         self._packed_block_codes = current_blocks
         self._packed_function_names = current_functions
         self._program_shape = shape
