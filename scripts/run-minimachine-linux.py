@@ -294,6 +294,63 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return errno_address
         return errno_location
 
+    if original == "_setjmp":
+        def user_setjmp(vm, args):
+            if len(args) != 1:
+                raise VMError("_setjmp expects jmp_buf")
+            env = int(args[0])
+            expected = vm.memory.read(vm.sp + RESULT_COUNT, 64)
+            if expected != 1:
+                raise VMError(
+                    f"_setjmp caller expects {expected} results, expected 1"
+                )
+            state = (
+                vm.memory.read(vm.sp + CALLER_SP, 64),
+                vm.memory.read(vm.sp + RET_PC, 64),
+                vm.memory.read(vm.sp + RESULT_PTR, 64),
+                int(vm.heap_next),
+            )
+            table = getattr(vm, "user_setjmp_states", None)
+            if table is None:
+                table = {}
+                vm.user_setjmp_states = table
+            table[env] = state
+            print(
+                "BOOT_EXEC_USER_SETJMP "
+                f"env=0x{env:x} resume_sp=0x{state[0]:x} "
+                f"resume_pc=0x{state[1]:x} result_ptr=0x{state[2]:x}",
+                flush=True,
+            )
+            return 0
+        return user_setjmp
+
+    if original == "longjmp":
+        def user_longjmp(vm, args):
+            if len(args) != 2:
+                raise VMError("longjmp expects jmp_buf,value")
+            env, value = map(int, args)
+            table = getattr(vm, "user_setjmp_states", None)
+            state = table.get(env) if table is not None else None
+            if state is None:
+                raise VMError(
+                    f"longjmp received unknown jmp_buf 0x{env:x}"
+                )
+            resume_sp, resume_pc, result_ptr, heap_next = state
+            result = value if value != 0 else 1
+            vm.memory.write(result_ptr, 64, result)
+            vm.heap_next = heap_next
+            vm.sp = resume_sp
+            vm.halted = False
+            vm._set_code(resume_pc)
+            print(
+                "BOOT_EXEC_USER_LONGJMP "
+                f"env=0x{env:x} value={result} "
+                f"resume_sp=0x{resume_sp:x} resume_pc=0x{resume_pc:x}",
+                flush=True,
+            )
+            return HOST_CONTROL_TRANSFER
+        return user_longjmp
+
     if original == "malloc":
         def malloc(vm, args):
             if len(args) != 1:
