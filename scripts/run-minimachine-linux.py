@@ -37,7 +37,7 @@ from src.minimachine.runtime import (
     collect_runtime_surface,
     install_runtime,
 )
-from src.minimachine.user_image import UserImageError, unpack_user_payload
+from src.minimachine.user_image import UserImageError, unpack_user_image
 from src.minimachine.verify import verify_muir, verify_p3
 from src.minimachine.vm import HOST_CONTROL_TRANSFER, Program, VMError
 
@@ -404,29 +404,56 @@ def linux_ecall(vm, args: tuple[int, ...]):
             raise VMError(f"MiniMachine user payload too large: {size}")
         payload = bytes(vm.memory.read(pc + i, 8) for i in range(12 + size))
         try:
-            function = unpack_user_payload(payload)
+            user_image = unpack_user_image(payload)
         except UserImageError as exc:
             raise VMError(f"invalid MiniMachine user payload: {exc}") from exc
 
-        # User images are loaded dynamically after Linux binfmt_flat has
-        # validated and installed them.  Keep their P3 symbol namespace
-        # separate from the kernel program.
-        base_name = function.name
-        suffix = 0
-        while function.name in vm.program.functions or function.name in vm.program.symbol_addresses:
-            suffix += 1
-            function.name = f"__mm_user_{base_name}_{suffix}"
-        verify_p3(function)
-        vm.program.add_function(function)
+        functions = list(user_image.functions)
+        entry_name = user_image.entry
+
+        # Preserve the collision-safe legacy behavior for single-function
+        # probes. Multi-function programs currently require a clean user
+        # symbol namespace so internal function descriptors stay coherent.
+        if len(functions) == 1:
+            function = functions[0]
+            base_name = function.name
+            suffix = 0
+            while (
+                function.name in vm.program.functions
+                or function.name in vm.program.symbol_addresses
+            ):
+                suffix += 1
+                function.name = f"__mm_user_{base_name}_{suffix}"
+            entry_name = function.name
+        else:
+            collisions = sorted(
+                function.name
+                for function in functions
+                if (
+                    function.name in vm.program.functions
+                    or function.name in vm.program.symbol_addresses
+                )
+            )
+            if collisions:
+                raise VMError(
+                    "MiniMachine multi-function userspace symbol collision: "
+                    + ",".join(collisions[:8])
+                )
+
+        for function in functions:
+            verify_p3(function)
+        for function in functions:
+            vm.program.add_function(function)
 
         print(
             "BOOT_EXEC_USER_HANDOFF "
             f"regs=0x{regs:x} pc=0x{pc:x} user_sp=0x{user_sp:x} "
-            f"function={function.name} payload_bytes={12 + size}",
+            f"function={entry_name} functions={len(functions)} "
+            f"payload_bytes={12 + size}",
             flush=True,
         )
         vm.enter_function(
-            function.name,
+            entry_name,
             (),
             stack_top=user_sp,
             result_count=0,
@@ -435,7 +462,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
             vm.halted = True
             print(
                 "BOOT_EXEC_USER_HANDOFF_STOP "
-                f"steps={vm.steps} function={function.name}",
+                f"steps={vm.steps} function={entry_name}",
                 flush=True,
             )
         return HOST_CONTROL_TRANSFER
