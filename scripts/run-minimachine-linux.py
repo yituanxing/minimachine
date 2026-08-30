@@ -829,6 +829,19 @@ def _call_linux_function_preserving_control(
     if name not in vm.program.functions:
         raise VMError(f"rootfs injection missing Linux function: {name}")
 
+    current_addr = vm.program.symbol_addresses.get(
+        "minimachine_current_task"
+    )
+    saved_current = (
+        vm.memory.read(current_addr, 64)
+        if current_addr is not None
+        else None
+    )
+    saved_contexts = dict(getattr(vm, "linux_task_contexts", {}))
+    saved_shadow_stacks = dict(
+        getattr(vm, "linux_task_shadow_stacks", {})
+    )
+    saved_shadow_next = getattr(vm, "linux_shadow_stack_next", None)
     saved = (
         vm.sp,
         vm.current_function,
@@ -857,6 +870,21 @@ def _call_linux_function_preserving_control(
             for i in range(result_count)
         )
     finally:
+        if current_addr is not None and saved_current is not None:
+            observed_current = vm.memory.read(current_addr, 64)
+            if observed_current != saved_current:
+                print(
+                    "BOOT_EXEC_PRESERVE_CURRENT_RESTORE "
+                    f"function={name} "
+                    f"before=0x{saved_current:x} "
+                    f"after=0x{observed_current:x}",
+                    flush=True,
+                )
+                vm.memory.write(current_addr, 64, saved_current)
+        vm.linux_task_contexts = saved_contexts
+        vm.linux_task_shadow_stacks = saved_shadow_stacks
+        if saved_shadow_next is not None:
+            vm.linux_shadow_stack_next = saved_shadow_next
         (
             vm.sp,
             vm.current_function,
