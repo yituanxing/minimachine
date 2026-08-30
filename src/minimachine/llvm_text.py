@@ -49,7 +49,89 @@ def _opcode(body: str) -> str:
 
 
 def _arg_names(args: str) -> tuple[str, ...]:
-    return tuple(re.findall(r"%[-A-Za-z$._0-9]+", args))
+    """Return formal SSA names without harvesting named types in attributes.
+
+    LLVM attributes can contain named types, for example an sret or byval
+    attribute containing %struct.foo. A flat percent-token regex invents a
+    phantom argument and shifts every real ABI argument after it. Split only
+    at top-level commas and take the final top-level SSA name of each formal.
+    """
+    segments: list[str] = []
+    start = 0
+    stack: list[str] = []
+    close_to_open = {")": "(", "]": "[", "}": "{", ">": "<"}
+    in_string = False
+    escape = False
+
+    for i, ch in enumerate(args):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch in "([{<":
+            stack.append(ch)
+            continue
+        if ch in close_to_open:
+            if stack and stack[-1] == close_to_open[ch]:
+                stack.pop()
+            continue
+        if ch == "," and not stack:
+            segments.append(args[start:i].strip())
+            start = i + 1
+    segments.append(args[start:].strip())
+
+    names: list[str] = []
+    token_re = re.compile(r"%[-A-Za-z$._0-9]+")
+    for segment in segments:
+        if not segment or segment == "...":
+            continue
+        top_level: list[str] = []
+        stack = []
+        in_string = False
+        escape = False
+        i = 0
+        while i < len(segment):
+            ch = segment[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                i += 1
+                continue
+            if ch == '"':
+                in_string = True
+                i += 1
+                continue
+            if ch in "([{<":
+                stack.append(ch)
+                i += 1
+                continue
+            if ch in close_to_open:
+                if stack and stack[-1] == close_to_open[ch]:
+                    stack.pop()
+                i += 1
+                continue
+            if ch == "%" and not stack:
+                match = token_re.match(segment, i)
+                if match:
+                    top_level.append(match.group(0))
+                    i = match.end()
+                    continue
+            i += 1
+        if top_level:
+            names.append(top_level[-1])
+
+    return tuple(names)
 
 
 def parse_module(text: str) -> list[TextFunction]:
