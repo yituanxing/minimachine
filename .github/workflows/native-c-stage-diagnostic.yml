@@ -32,7 +32,7 @@ jobs:
           name: minimachine-linux-initramfs-33264250619
           path: replay-source
 
-      - name: Run to 650M with 50M native samples
+      - name: Run to panic with 50M native samples
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
         run: |
@@ -45,7 +45,8 @@ jobs:
             --native-vm \
             --native-boot-phases-only \
             --native-report-every 50000000 \
-            --max-steps 650000000 \
+            --max-steps 600000000 \
+            --stop-on-panic \
             --progress-every 0 \
             2>&1 | tee replay-source/llvm/native-c-stage-diagnostic.log
 
