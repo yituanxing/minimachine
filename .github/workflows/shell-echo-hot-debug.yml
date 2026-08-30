@@ -5,6 +5,8 @@ on:
   push:
     branches: [work/native-p3-vm]
     paths:
+      - src/minimachine/legalize.py
+      - scripts/run-minimachine-linux.py
       - .github/workflows/shell-echo-hot-debug.yml
 
 permissions:
