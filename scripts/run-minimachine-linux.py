@@ -1946,11 +1946,16 @@ def main() -> int:
     )
     try:
         if resumed_from_checkpoint:
-            resume_limit = vm.steps + args.max_steps
+            if args.max_steps <= 0 and args.native_vm:
+                resume_limit = 0
+                absolute_text = "unlimited"
+            else:
+                resume_limit = vm.steps + args.max_steps
+                absolute_text = str(resume_limit)
             print(
                 "BOOT_EXEC_CHECKPOINT_BUDGET "
                 f"saved_steps={vm.steps} additional_steps={args.max_steps} "
-                f"absolute_limit={resume_limit}",
+                f"absolute_limit={absolute_text}",
                 flush=True,
             )
             vm.run(max_steps=resume_limit)
