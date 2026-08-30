@@ -117,7 +117,7 @@ def load_checkpoint(
             # memory image from the program baseline plus that delta.
             merged = dict(vm.program.initial_memory.bytes)
             merged.update(payload["memory_delta"])
-            page_size = 4096
+            page_size = 65536
             page_map: dict[int, bytearray] = {}
             for address, value in merged.items():
                 page_no = address // page_size
@@ -155,7 +155,7 @@ def load_checkpoint(
             if hasattr(vm.memory, "restore_pages"):
                 merged = dict(vm.program.initial_memory.bytes)
                 merged.update(payload["memory_delta"])
-                page_size = 4096
+                page_size = 65536
                 page_map: dict[int, bytearray] = {}
                 for address, value in merged.items():
                     page_no = address // page_size
