@@ -267,6 +267,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
     #   service 1: write(ptr, len) to the host boot console.
     #   service 2: context_switch(prev,next,fresh_sp,start_fn,start_arg)
     #   service 3: enter_userspace(pt_regs) after a successful Linux exec.
+    #   service 4: read host input into a MiniMachine console-device buffer.
     if not args:
         raise VMError("Linux ecall requires a service number")
 
@@ -284,6 +285,25 @@ def linux_ecall(vm, args: tuple[int, ...]):
         sys.stdout.write(text)
         sys.stdout.flush()
         return None
+
+    if service == 4:
+        if len(args) != 3:
+            raise VMError(
+                "Linux input ecall expects service,ptr,len; "
+                f"got {len(args)} args"
+            )
+        _, ptr, size = args
+        if size > 1 << 20:
+            raise VMError(f"MiniMachine Linux input read too large: {size}")
+        data = sys.stdin.buffer.read(size)
+        for index, byte in enumerate(data):
+            vm.memory.write(ptr + index, 8, byte)
+        print(
+            "BOOT_EXEC_HOST_INPUT "
+            f"requested={size} returned={len(data)}",
+            flush=True,
+        )
+        return len(data)
 
     if service == 2:
         if len(args) != 6:
