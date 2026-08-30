@@ -48,13 +48,14 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          from src.minimachine.checkpoint import image_fingerprint
-          from src.minimachine.program_cache import load_program_cache
-          ll=Path("exact/llvm/linked.ll").read_text()
-          c=load_program_cache(Path("fixed-linux-p3-cache.pkl.gz"), image_sha256=image_fingerprint(ll))
-          fn=c.program.functions["build_open_how"].function
+          from src.minimachine.llvm_text import parse_module
+
+          ll = Path("exact/llvm/linked.ll").read_text()
+          functions = {fn.name: fn for fn in parse_module(ll)}
+          fn = functions["build_open_how"]
           print("FIXED_BUILD_OPEN_HOW_ARGS", fn.args)
-          assert fn.args == ("0","1","2"), fn.args
+          assert len(fn.args) == 3, fn.args
+          assert all("struct." not in arg for arg in fn.args), fn.args
           PY
 
       - name: Full native boot with fixed cache
