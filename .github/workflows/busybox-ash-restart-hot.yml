@@ -68,7 +68,7 @@ jobs:
         run: |
           set -o pipefail
           set +e
-          printf 'echo BUSYBOX_MINIMACHINE_HELLO\nexit\n' | \
+          printf 'echo BUSYBOX_MINIMACHINE_HELLO\nvalue=42\necho BUSYBOX_VAR_$value\nfalse\necho BUSYBOX_FALSE_STATUS_$?\nexit 0\n' | \
           /usr/bin/time -f 'ASH_RESTART_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
           timeout --signal=TERM 120 \
           python3 scripts/run-minimachine-linux.py console/llvm/linked.ll \
@@ -92,11 +92,17 @@ jobs:
           grep -F 'BOOT_EXEC_INIT_EXEC_RESTART path=/init' build/ash-restart-hot.log
           grep -F 'BOOT_EXEC_USER_HANDOFF ' build/ash-restart-hot.log
           grep -F 'function=__mm_user_ash_main' build/ash-restart-hot.log
+          grep -Fx 'BUSYBOX_MINIMACHINE_HELLO' build/ash-restart-hot.log
+          grep -Fx 'BUSYBOX_VAR_42' build/ash-restart-hot.log
+          grep -Fx 'BUSYBOX_FALSE_STATUS_1' build/ash-restart-hot.log
+          grep -F 'BOOT_EXEC_USER_EXIT status=0' build/ash-restart-hot.log
+          grep -F 'ASH_RESTART_HOT_STATUS=0' build/ash-restart-hot.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/ash-restart-hot.log
 
       - name: Summarize first BusyBox execution
         if: always()
         run: |
-          grep -E 'BOOT_EXEC_(INIT_EXEC_RESTART|USER_RUNTIME|USER_EXTERNAL_SURFACE|USER_EXTERNAL_DATA|USER_IMAGE_DATA|USER_ARGS|USER_HANDOFF|NATIVE_APPEND_PACK|NATIVE_APPEND|NATIVE_HOST_APPEND|NATIVE_DATA_APPEND|USER_EXTERNAL|USER_SYSCALL|HOST_INPUT|USER_READ_BUFFER|BLOCKED|HALTED)|BUSYBOX_MINIMACHINE_HELLO|ASH_RESTART_HOT_(WALL|STATUS)' \
+          grep -E 'BOOT_EXEC_(INIT_EXEC_RESTART|USER_RUNTIME|USER_EXTERNAL_SURFACE|USER_EXTERNAL_DATA|USER_IMAGE_DATA|USER_ARGS|USER_HANDOFF|NATIVE_APPEND_PACK|NATIVE_APPEND|NATIVE_HOST_APPEND|NATIVE_DATA_APPEND|USER_EXTERNAL|USER_SYSCALL|USER_EXIT|HOST_INPUT|USER_READ_BUFFER|BLOCKED|HALTED)|BUSYBOX_MINIMACHINE_HELLO|ASH_RESTART_HOT_(WALL|STATUS)' \
             build/ash-restart-hot.log | tail -320 || true
 
       - name: Upload restart trace
