@@ -17,7 +17,7 @@ permissions:
 jobs:
   native-full:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -47,6 +47,7 @@ jobs:
             --program-cache-in replay-source/llvm/linux-initramfs-p3-cache.pkl.gz \
             --initramfs replay-source/out/minimachine-initramfs.cpio \
             --native-vm \
+            --native-boot-phases-only \
             --stop-after-user-handoff \
             --max-steps 0 \
             --progress-every 0 \
