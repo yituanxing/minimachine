@@ -89,7 +89,7 @@ jobs:
             make -j2 CROSS_COMPILE=riscv64-linux-gnu- V=0
           file busybox
           printf 'echo BUSYBOX_MINIMAL_ASH_OK\nexit\n' | \
-            qemu-riscv64 ./busybox ash | tee ../ash-qemu.log
+            qemu-riscv64 ./busybox sh | tee ../ash-qemu.log
           grep -Fx 'BUSYBOX_MINIMAL_ASH_OK' ../ash-qemu.log
 
       - name: Build ash-first whole LTO carrier
