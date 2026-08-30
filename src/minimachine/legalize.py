@@ -227,6 +227,11 @@ def _fp_constant_bits(ty: str, text: str) -> int:
 
 def _fp_value(ty: str, text: str) -> muir.Value:
     raw = text.strip()
+    raw = re.sub(
+        r"^(?:(?:noundef|inreg)\s+|nofpclass\([^)]*\)\s+)+",
+        "",
+        raw,
+    )
     if re.search(r"\bpoison\b", raw):
         return muir.Arbitrary("poison")
     if re.search(r"\bundef\b", raw):

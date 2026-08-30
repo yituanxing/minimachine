@@ -286,6 +286,28 @@ def helper_callback(symbol: str):
 
         return wide_const
 
+    if symbol == "__mm_llvm_stacksave_p0":
+        def stack_save(vm: VM, args: tuple[int, ...]):
+            if args:
+                raise VMError("__mm_llvm_stacksave_p0 expects no arguments")
+            return vm.heap_next
+
+        return stack_save
+
+    if symbol == "__mm_llvm_stackrestore_p0":
+        def stack_restore(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError("__mm_llvm_stackrestore_p0 expects one pointer")
+            saved = args[0]
+            if saved > vm.heap_next or saved >= vm.stack_top:
+                raise VMError(
+                    "__mm_llvm_stackrestore_p0 received invalid saved stack"
+                )
+            vm.heap_next = saved
+            return None
+
+        return stack_restore
+
     if symbol == "__mm_llvm_va_start":
         def va_start(vm: VM, args: tuple[int, ...]):
             if len(args) != 2:
@@ -323,6 +345,23 @@ def helper_callback(symbol: str):
 
         return va_end
 
+
+    m = re.fullmatch(r"__mm_llvm_fmuladd_f(32|64)", symbol)
+    if m:
+        bits = int(m.group(1))
+
+        def fp_muladd(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError(f"{symbol} expects 3 arguments")
+            a = _fp_decode(bits, args[0])
+            b = _fp_decode(bits, args[1])
+            c = _fp_decode(bits, args[2])
+            # llvm.fmuladd permits target contraction; the reference runtime
+            # uses the non-contracted fmul+fadd semantics, which is a valid
+            # implementation of this intrinsic.
+            return _fp_encode(bits, a * b + c)
+
+        return fp_muladd
 
     m = re.fullmatch(r"__mm_(fadd|fsub|fmul|fdiv)_(32|64)", symbol)
     if m:

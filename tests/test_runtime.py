@@ -116,6 +116,46 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(result, (((-2) & ((1 << 64) - 1)),))
 
+    def test_stack_save_restore_reclaims_dynamic_alloca_cursor(self):
+        functions, _ = legalize_module(
+            """
+            declare ptr @llvm.stacksave.p0()
+            declare void @llvm.stackrestore.p0(ptr)
+
+            define i64 @stack_lifetime(i64 %n) {
+            entry:
+              %saved = call ptr @llvm.stacksave.p0()
+              %a = alloca i8, i64 %n, align 1
+              call void @llvm.stackrestore.p0(ptr %saved)
+              %b = alloca i8, i64 %n, align 1
+              %same = icmp eq ptr %a, %b
+              %r = zext i1 %same to i64
+              ret i64 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("stack_lifetime", (64,)),
+            (1,),
+        )
+
+    def test_llvm_fmuladd_f64_runtime_helper(self):
+        functions, _ = legalize_module(
+            """
+            declare double @llvm.fmuladd.f64(double, double, double)
+
+            define i32 @muladd() {
+            entry:
+              %v = call double @llvm.fmuladd.f64(double 2.000000e+00, double 3.000000e+00, double 1.000000e+00)
+              %r = fptosi double %v to i32
+              ret i32 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(program.new_vm().run_function("muladd"), (7,))
+
     def test_soft_float_helpers_execute_end_to_end(self):
         functions, stats = legalize_module(
             """
