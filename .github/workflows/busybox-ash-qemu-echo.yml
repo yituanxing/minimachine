@@ -1,0 +1,96 @@
+name: BusyBox Ash QEMU Echo Proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/busybox-ash-qemu-echo.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qemu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BUSYBOX_VERSION: "1.37.0"
+      BUSYBOX_SHA256: "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install RISC-V QEMU toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends             build-essential curl ca-certificates             gcc-riscv64-linux-gnu libc6-dev-riscv64-cross qemu-user
+          mkdir -p build
+
+      - name: Build exact ash-first BusyBox
+        run: |
+          tarball="busybox-${BUSYBOX_VERSION}.tar.bz2"
+          curl -fL --retry 5 --retry-delay 2             -o "build/$tarball"             "https://busybox.net/downloads/$tarball"
+          echo "${BUSYBOX_SHA256}  build/$tarball" | sha256sum -c -
+          tar -xjf "build/$tarball" -C build
+          mv "build/busybox-${BUSYBOX_VERSION}" build/busybox
+
+          cat > build/ash-first.fragment <<'EOF'
+          CONFIG_STATIC=y
+          CONFIG_BUSYBOX=y
+          CONFIG_ASH=y
+          CONFIG_SH_IS_ASH=y
+          CONFIG_BASH_IS_NONE=y
+          CONFIG_ASH_OPTIMIZE_FOR_SIZE=y
+          CONFIG_ASH_INTERNAL_GLOB=y
+          CONFIG_ASH_ECHO=y
+          CONFIG_ASH_PRINTF=y
+          CONFIG_ASH_TEST=y
+          CONFIG_ASH_BASH_COMPAT=n
+          CONFIG_ASH_JOB_CONTROL=n
+          CONFIG_ASH_ALIAS=n
+          CONFIG_ASH_RANDOM_SUPPORT=n
+          CONFIG_ASH_EXPAND_PRMT=n
+          CONFIG_ASH_IDLE_TIMEOUT=n
+          CONFIG_ASH_MAIL=n
+          CONFIG_ASH_HELP=n
+          CONFIG_ASH_GETOPTS=n
+          CONFIG_ASH_CMDCMD=n
+          CONFIG_FEATURE_SH_MATH=n
+          CONFIG_FEATURE_SH_EXTRA_QUIET=y
+          CONFIG_FEATURE_SH_STANDALONE=n
+          CONFIG_FEATURE_SH_NOFORK=n
+          CONFIG_FEATURE_SH_READ_FRAC=n
+          CONFIG_FEATURE_SH_HISTFILESIZE=n
+          CONFIG_FEATURE_SH_EMBEDDED_SCRIPTS=n
+          CONFIG_FEATURE_EDITING=n
+          EOF
+
+          cd build/busybox
+          KCONFIG_ALLCONFIG="$PWD/../ash-first.fragment" make allnoconfig
+          sed -ri 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/' .config
+          sed -ri 's/^CONFIG_PIE=y$/# CONFIG_PIE is not set/' .config
+          yes "" | make oldconfig >/dev/null
+          grep -E '^(CONFIG_ASH=|CONFIG_SH_IS_ASH=|CONFIG_ASH_ECHO=|CONFIG_STATIC=)' .config
+          make -j2 CROSS_COMPILE=riscv64-linux-gnu- V=0
+
+      - name: Prove ash -c echo
+        working-directory: build/busybox
+        run: |
+          qemu-riscv64 ./busybox ash -c 'echo QEMU_ASH_C_ECHO_OK'             | tee ../qemu-ash-c.log
+          grep -Fx 'QEMU_ASH_C_ECHO_OK' ../qemu-ash-c.log
+
+      - name: Prove stdin script echo
+        working-directory: build/busybox
+        run: |
+          printf 'echo QEMU_ASH_STDIN_ECHO_OK\nexit\n'             | qemu-riscv64 ./busybox ash             | tee ../qemu-ash-stdin.log
+          grep -Fx 'QEMU_ASH_STDIN_ECHO_OK' ../qemu-ash-stdin.log
+
+      - name: Upload QEMU proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: busybox-ash-qemu-echo-${{ github.run_id }}
+          path: |
+            build/qemu-ash-c.log
+            build/qemu-ash-stdin.log
+            build/busybox/.config
+          retention-days: 14
