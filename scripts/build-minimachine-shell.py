@@ -174,7 +174,7 @@ def main() -> int:
     args = parser.parse_args()
 
     fn = build_prompt_probe() if args.mode == "prompt-probe" else build_echo_shell()
-    image = build_bflt(fn, stack_size=256 * 1024)
+    image = build_bflt(fn, stack_size=256 * 1024, compress_payload=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(image)
     print(
