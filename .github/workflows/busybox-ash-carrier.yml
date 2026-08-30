@@ -77,19 +77,62 @@ jobs:
           EOF
           cd build/busybox
           KCONFIG_ALLCONFIG="$PWD/../ash-first.fragment" make allnoconfig
-          sed -ri 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/' .config
-          sed -ri 's/^CONFIG_PIE=y$/# CONFIG_PIE is not set/' .config
+
+          force_y() {
+            sym="$1"
+            if grep -q "^# ${sym} is not set$" .config; then
+              sed -ri "s/^# ${sym} is not set$/${sym}=y/" .config
+            elif grep -q "^${sym}=" .config; then
+              sed -ri "s/^${sym}=.*/${sym}=y/" .config
+            else
+              printf '%s=y\n' "$sym" >> .config
+            fi
+          }
+
+          force_n() {
+            sym="$1"
+            if grep -q "^${sym}=y$" .config; then
+              sed -ri "s/^${sym}=y$/# ${sym} is not set/" .config
+            elif ! grep -q "^# ${sym} is not set$" .config; then
+              printf '# %s is not set\n' "$sym" >> .config
+            fi
+          }
+
+          force_y CONFIG_STATIC
+          force_y CONFIG_SH_IS_ASH
+          force_y CONFIG_ASH_ECHO
+          force_y CONFIG_ASH_PRINTF
+          force_y CONFIG_ASH_TEST
+          force_y CONFIG_ASH_OPTIMIZE_FOR_SIZE
+          force_y CONFIG_ASH_INTERNAL_GLOB
+          force_y CONFIG_FEATURE_SH_EXTRA_QUIET
+          force_n CONFIG_PIE
+          force_n CONFIG_ASH_JOB_CONTROL
+          force_n CONFIG_FEATURE_SH_MATH
+          force_n CONFIG_FEATURE_EDITING
+
           yes "" | make oldconfig >/dev/null
           cp .config ../busybox-ash-first.config
-          grep -Fx 'CONFIG_STATIC=y' .config
+
+          for required in \
+            CONFIG_STATIC \
+            CONFIG_SH_IS_ASH \
+            CONFIG_ASH_ECHO \
+            CONFIG_ASH_PRINTF \
+            CONFIG_ASH_TEST
+          do
+            grep -Fx "${required}=y" .config
+          done
+          grep -Fx '# CONFIG_FEATURE_SH_MATH is not set' .config
+          grep -Fx '# CONFIG_ASH_JOB_CONTROL is not set' .config
 
       - name: Prove normal ash baseline
         working-directory: build/busybox
         run: |
           /usr/bin/time -f 'ASH_CARRIER_GCC_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
             make -j2 CROSS_COMPILE=riscv64-linux-gnu- V=0
-          qemu-riscv64 ./busybox -c 'echo BUSYBOX_MINIMAL_ASH_OK' \
-            | tee ../ash-qemu.log
+          printf 'echo BUSYBOX_MINIMAL_ASH_OK\nexit\n' | \
+            qemu-riscv64 ./busybox sh | tee ../ash-qemu.log
           grep -Fx 'BUSYBOX_MINIMAL_ASH_OK' ../ash-qemu.log
 
       - name: Build whole-LTO and MiniMachine image
