@@ -451,7 +451,7 @@ int mm_vm_replace_program(MMVM *vm,
     return 1;
 }
 
-void mm_vm_destroy(MMVM *vm) {
+static void clear_pages(MMVM *vm) {
     if (!vm) return;
     for (size_t i = 0; i < MM_BUCKETS; ++i) {
         MMPage *p = vm->pages[i];
@@ -461,7 +461,17 @@ void mm_vm_destroy(MMVM *vm) {
             free(p);
             p = n;
         }
+        vm->pages[i] = NULL;
     }
+    vm->cached_page = NULL;
+    vm->cached_page_no = 0;
+    vm->cached_page_valid = 0;
+    vm->oom = 0;
+}
+
+void mm_vm_destroy(MMVM *vm) {
+    if (!vm) return;
+    clear_pages(vm);
     free(vm->watch_codes);
     free(vm);
 }
@@ -473,6 +483,53 @@ int mm_vm_load_bytes(MMVM *vm,
     for (size_t i = 0; i < n; ++i) {
         mem_write8(vm, addrs[i], vals[i]);
         if (vm->oom) return 0;
+    }
+    return 1;
+}
+
+size_t mm_vm_mem_page_count(MMVM *vm) {
+    if (!vm) return 0;
+    size_t count = 0;
+    for (size_t i = 0; i < MM_BUCKETS; ++i) {
+        for (MMPage *p = vm->pages[i]; p; p = p->next)
+            count++;
+    }
+    return count;
+}
+
+size_t mm_vm_mem_export_pages(MMVM *vm,
+                              uint64_t *page_nos,
+                              uint8_t *data,
+                              size_t capacity_pages) {
+    if (!vm) return 0;
+    size_t out = 0;
+    for (size_t i = 0; i < MM_BUCKETS; ++i) {
+        for (MMPage *p = vm->pages[i]; p; p = p->next) {
+            if (out >= capacity_pages)
+                return out;
+            page_nos[out] = p->no;
+            memcpy(data + out * MM_PAGE_SIZE, p->data, MM_PAGE_SIZE);
+            out++;
+        }
+    }
+    return out;
+}
+
+int mm_vm_mem_restore_pages(MMVM *vm,
+                            const uint64_t *page_nos,
+                            const uint8_t *data,
+                            size_t page_count,
+                            size_t page_size) {
+    if (!vm || page_size != MM_PAGE_SIZE)
+        return 0;
+    clear_pages(vm);
+    for (size_t i = 0; i < page_count; ++i) {
+        MMPage *p = get_page(vm, page_nos[i], 1);
+        if (!p || vm->oom) {
+            clear_pages(vm);
+            return 0;
+        }
+        memcpy(p->data, data + i * MM_PAGE_SIZE, MM_PAGE_SIZE);
     }
     return 1;
 }
