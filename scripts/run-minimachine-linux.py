@@ -1434,12 +1434,41 @@ def inject_live_root_init(vm, path: Path) -> None:
                 f"kernel_write(/init) wrote {signed}, expected {len(data)}"
             )
     finally:
-        _call_linux_function_preserving_control(
-            vm,
-            "fput",
-            (file_ptr,),
-            result_count=0,
-        )
+        if "__fput_sync" in vm.program.functions:
+            _call_linux_function_preserving_control(
+                vm,
+                "__fput_sync",
+                (file_ptr,),
+                result_count=0,
+            )
+            print(
+                "BOOT_EXEC_ROOTFS_CLOSE method=__fput_sync",
+                flush=True,
+            )
+        else:
+            _call_linux_function_preserving_control(
+                vm,
+                "fput",
+                (file_ptr,),
+                result_count=0,
+            )
+            if "flush_delayed_fput" in vm.program.functions:
+                _call_linux_function_preserving_control(
+                    vm,
+                    "flush_delayed_fput",
+                    (),
+                    result_count=0,
+                )
+                print(
+                    "BOOT_EXEC_ROOTFS_CLOSE "
+                    "method=fput+flush_delayed_fput",
+                    flush=True,
+                )
+            else:
+                print(
+                    "BOOT_EXEC_ROOTFS_CLOSE method=fput-only",
+                    flush=True,
+                )
 
     access, = _call_linux_function_preserving_control(
         vm,
@@ -1889,7 +1918,8 @@ def main() -> int:
                     flush=True,
                 )
                 return 1
-            signed = result - (1 << 64) if result & (1 << 63) else result
+            raw32 = result & 0xFFFFFFFF
+            signed = raw32 - (1 << 32) if raw32 & (1 << 31) else raw32
             print(
                 "BOOT_EXEC_INIT_EXEC_PROBE "
                 f"path=/init result={signed} raw=0x{result:x} "
