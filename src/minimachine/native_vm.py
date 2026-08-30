@@ -36,6 +36,7 @@ MM_STATUS_HALT = 1
 MM_STATUS_HOST = 2
 MM_STATUS_WATCH = 3
 MM_STATUS_ERROR = 4
+_NATIVE_PAGE_SIZE = 4096
 
 
 class COperand(ctypes.Structure):
@@ -161,6 +162,23 @@ def _load_library():
         ctypes.c_void_p, ctypes.c_uint64
     ]
     lib.mm_vm_mem_strlen.restype = ctypes.c_uint64
+    lib.mm_vm_mem_page_count.argtypes = [ctypes.c_void_p]
+    lib.mm_vm_mem_page_count.restype = ctypes.c_size_t
+    lib.mm_vm_mem_export_pages.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_size_t,
+    ]
+    lib.mm_vm_mem_export_pages.restype = ctypes.c_size_t
+    lib.mm_vm_mem_restore_pages.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_size_t,
+        ctypes.c_size_t,
+    ]
+    lib.mm_vm_mem_restore_pages.restype = ctypes.c_int
     lib.mm_vm_set_watches.argtypes = [
         ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t
     ]
@@ -252,6 +270,56 @@ class NativeMemory:
                 ptr & MASK64,
             )
         )
+
+
+    def snapshot_pages(self):
+        count = int(self._lib.mm_vm_mem_page_count(self._handle))
+        page_nos = (ctypes.c_uint64 * count)()
+        raw = (ctypes.c_uint8 * (count * _NATIVE_PAGE_SIZE))()
+        written = int(
+            self._lib.mm_vm_mem_export_pages(
+                self._handle,
+                page_nos,
+                raw,
+                count,
+            )
+        )
+        if written != count:
+            raise VMError(
+                f"native checkpoint page export truncated: {written}/{count}"
+            )
+        return {
+            "page_size": _NATIVE_PAGE_SIZE,
+            "page_nos": tuple(int(page_nos[i]) for i in range(count)),
+            "data": bytes(raw),
+        }
+
+    def restore_pages(self, snapshot) -> None:
+        page_size = int(snapshot["page_size"])
+        if page_size != _NATIVE_PAGE_SIZE:
+            raise VMError(
+                f"native checkpoint page size mismatch: {page_size}"
+            )
+        page_nos_tuple = tuple(int(x) for x in snapshot["page_nos"])
+        data = bytes(snapshot["data"])
+        expected = len(page_nos_tuple) * page_size
+        if len(data) != expected:
+            raise VMError(
+                "native checkpoint page data size mismatch: "
+                f"{len(data)} != {expected}"
+            )
+        page_nos = (ctypes.c_uint64 * len(page_nos_tuple))(
+            *page_nos_tuple
+        )
+        raw = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        if not self._lib.mm_vm_mem_restore_pages(
+            self._handle,
+            page_nos,
+            raw,
+            len(page_nos_tuple),
+            page_size,
+        ):
+            raise VMError("native checkpoint page restore failed")
 
 
 class NativeVM(VM):
