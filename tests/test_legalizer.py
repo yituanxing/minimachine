@@ -166,6 +166,50 @@ class LegalizerTests(unittest.TestCase):
         self.assertIsInstance(mov.src, muir.Mem)
         self.assertEqual(mov.src.address.offset, 24)
 
+    def test_llvm_is_constant_compiletime_assert_guard_folds_only_guard(self):
+        fn, _stats = self.lower_one(
+            """
+            declare i1 @llvm.is.constant.i64(i64)
+            declare void @__compiletime_assert_1()
+
+            define i32 @f(i64 %size, ptr %dst, ptr %src) {
+            entry:
+              %c = call i1 @llvm.is.constant.i64(i64 %size)
+              br i1 %c, label %ok, label %bad
+            bad:
+              call void @__compiletime_assert_1()
+              unreachable
+            ok:
+              switch i64 %size, label %bad2 [
+                i64 1, label %one
+                i64 8, label %eight
+              ]
+            one:
+              ret i32 1
+            eight:
+              ret i32 8
+            bad2:
+              ret i32 -1
+            }
+            """
+        )
+        by_name = {b.label: b for b in fn.blocks}
+        guard_moves = [
+            inst
+            for inst in by_name["entry"].instructions
+            if isinstance(inst, muir.Mov) and inst.dst == muir.Slot("c")
+        ]
+        self.assertEqual(len(guard_moves), 1)
+        self.assertEqual(guard_moves[0].src, muir.Imm(1))
+        self.assertFalse(
+            any(
+                isinstance(inst, muir.Helper)
+                and inst.symbol.startswith("__mm_llvm_is_constant")
+                for block in fn.blocks
+                for inst in block.instructions
+            )
+        )
+
     def test_call_is_muir_pseudo_not_machine_instruction(self):
         fn, stats = self.lower_one(
             """
