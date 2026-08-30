@@ -203,6 +203,7 @@ class NativeVM(VM):
         super().__init__(program, memory, stack_top=stack_top)
         self._program_shape = self._shape(program)
         self._watch_codes: tuple[int, ...] = ()
+        self.native_report_every = 0
         self._load_initial_memory(program)
 
     def __del__(self):
@@ -485,11 +486,13 @@ class NativeVM(VM):
 
     def run(self, *, max_steps: int = 1_000_000) -> None:
         native_limit = MASK64 if max_steps <= 0 else max_steps
+        report_every = int(getattr(self, "native_report_every", 0) or 0)
+        report_started = time.perf_counter()
+        report_start_steps = self.steps
+
         while not self.halted:
             if self.steps >= native_limit:
-                raise VMError(
-                    f"step limit exceeded: {native_limit}"
-                )
+                raise VMError(f"step limit exceeded: {native_limit}")
 
             self._ensure_program_current()
             code = self._current_code()
@@ -500,33 +503,52 @@ class NativeVM(VM):
                 self.sp & MASK64,
                 self.steps,
             )
-            result = self._lib.mm_vm_run(
-                self._handle,
-                native_limit,
-            )
+            batch_limit = native_limit
+            is_report_boundary = False
+            if report_every > 0:
+                batch_limit = min(
+                    native_limit,
+                    ((self.steps // report_every) + 1) * report_every,
+                )
+                is_report_boundary = batch_limit < native_limit
+
+            result = self._lib.mm_vm_run(self._handle, batch_limit)
             self.sp = int(result.sp)
             self.steps = int(result.steps)
-            self._sync_block(
-                int(result.block_code),
-                int(result.ip),
-            )
+            self._sync_block(int(result.block_code), int(result.ip))
 
             if result.status == MM_STATUS_LIMIT:
-                raise VMError(
-                    f"step limit exceeded: {native_limit}"
-                )
+                if is_report_boundary and self.steps == batch_limit:
+                    now = time.perf_counter()
+                    delta_steps = self.steps - report_start_steps
+                    delta_s = now - report_started
+                    msteps = (
+                        delta_steps / delta_s / 1_000_000
+                        if delta_s > 0
+                        else 0.0
+                    )
+                    print(
+                        "BOOT_EXEC_NATIVE_PROGRESS "
+                        f"steps={self.steps} "
+                        f"function={self.current_function} "
+                        f"block={self.current_block} ip={self.ip} "
+                        f"chunk_steps={delta_steps} "
+                        f"chunk_s={delta_s:.3f} "
+                        f"msteps_s={msteps:.3f}",
+                        flush=True,
+                    )
+                    report_started = now
+                    report_start_steps = self.steps
+                    continue
+                raise VMError(f"step limit exceeded: {native_limit}")
             if result.status == MM_STATUS_HALT:
                 self.halted = True
                 return
             if result.status == MM_STATUS_HOST:
-                self._set_code(
-                    int(result.target_code)
-                )
+                self._set_code(int(result.target_code))
                 continue
             if result.status == MM_STATUS_WATCH:
-                self._set_code(
-                    int(result.target_code)
-                )
+                self._set_code(int(result.target_code))
                 continue
             if result.status == MM_STATUS_ERROR:
                 raise VMError(
@@ -534,6 +556,5 @@ class NativeVM(VM):
                     f"code={result.error} "
                     f"target=0x{int(result.target_code):x}"
                 )
-            raise VMError(
-                f"unknown native P3 run status: {result.status}"
-            )
+            raise VMError(f"unknown native P3 run status: {result.status}")
+
