@@ -238,6 +238,30 @@ def register_traps(program: Program, reasons: set[str]) -> None:
             program.register_service(symbol, callback(reason))
 
 
+
+def refresh_host_service_descriptors(vm) -> None:
+    """Reapply immutable host-service descriptors after checkpoint restore.
+
+    Native sparse-page checkpoints capture guest memory exactly, so a
+    checkpoint created before a newly registered host service cannot contain
+    that service's descriptor.  Program descriptors are immutable linker
+    metadata; restoring them does not alter live Linux data.
+    """
+    refreshed = 0
+    for symbol in vm.program.host_services:
+        descriptor = vm.program.symbol_addresses.get(symbol)
+        if descriptor is None:
+            continue
+        for offset in range(16):
+            byte = vm.program.initial_memory.read(descriptor + offset, 8)
+            vm.memory.write(descriptor + offset, 8, byte)
+        refreshed += 1
+    print(
+        f"BOOT_EXEC_HOST_DESCRIPTORS_REFRESHED count={refreshed}",
+        flush=True,
+    )
+
+
 def linux_ecall(vm, args: tuple[int, ...]):
     # Boot-first host ABI:
     #   service 1: write(ptr, len) to the host boot console.
@@ -1427,6 +1451,7 @@ def main() -> int:
             print(f"BOOT_EXEC_BLOCKED stage=checkpoint error={exc}")
             return 1
         vm.ecall_handler = linux_ecall
+        refresh_host_service_descriptors(vm)
         resumed_from_checkpoint = True
         if args.trace_hot_filp_open:
             install_hot_filp_trace(vm)
