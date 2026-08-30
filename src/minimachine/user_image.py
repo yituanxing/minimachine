@@ -41,6 +41,8 @@ class UserProgramImage:
     entry: str
     functions: tuple[p3.Function, ...]
     image: ModuleImage | None = None
+    entry_args: str = "none"
+    runtime_helpers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         names = tuple(fn.name for fn in self.functions)
@@ -51,6 +53,10 @@ class UserProgramImage:
         if self.entry not in names:
             raise UserImageError(
                 f"P3 user program entry is missing: {self.entry}"
+            )
+        if self.entry_args not in {"none", "linux-main"}:
+            raise UserImageError(
+                f"unsupported user entry argument mode: {self.entry_args}"
             )
 
 
@@ -399,6 +405,8 @@ def program_to_obj(program: UserProgramImage) -> dict:
             for function in program.functions
         ],
         "image": _module_image_to_obj(program.image),
+        "entry_args": program.entry_args,
+        "runtime_helpers": list(program.runtime_helpers),
     }
 
 
@@ -421,6 +429,8 @@ def program_from_obj(obj: dict) -> UserProgramImage:
         entry,
         functions,
         _module_image_from_obj(obj.get("image")),
+        obj.get("entry_args", "none"),
+        tuple(obj.get("runtime_helpers", ())),
     )
 
 

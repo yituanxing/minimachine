@@ -346,6 +346,19 @@ def helper_callback(symbol: str):
         return va_end
 
 
+    m = re.fullmatch(r"__mm_llvm_fabs_f(32|64)", symbol)
+    if m:
+        bits = int(m.group(1))
+        sign_bit = 1 << (bits - 1)
+        mask = (1 << bits) - 1
+
+        def llvm_fabs(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects 1 argument")
+            return args[0] & (mask ^ sign_bit)
+
+        return llvm_fabs
+
     m = re.fullmatch(r"__mm_llvm_fmuladd_f(32|64)", symbol)
     if m:
         bits = int(m.group(1))
