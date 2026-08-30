@@ -288,6 +288,37 @@ def refresh_host_service_descriptors(vm) -> None:
     )
 
 
+def _guest_function_name_from_descriptor(vm, descriptor: int) -> str:
+    matches = [
+        name
+        for name, address in vm.program.symbol_addresses.items()
+        if address == descriptor and name in vm.program.functions
+    ]
+    if not matches:
+        raise VMError(
+            f"guest callback descriptor 0x{descriptor:x} is not a P3 function"
+        )
+    return sorted(matches)[0]
+
+
+def _call_guest_descriptor_preserving_control(
+    vm,
+    descriptor: int,
+    args: tuple[int, ...],
+    *,
+    result_count: int = 1,
+    max_extra_steps: int = 1_000_000,
+) -> tuple[int, ...]:
+    name = _guest_function_name_from_descriptor(vm, descriptor)
+    return _call_linux_function_preserving_control(
+        vm,
+        name,
+        args,
+        result_count=result_count,
+        max_extra_steps=max_extra_steps,
+    )
+
+
 def _user_external_original(symbol: str) -> str:
     prefix = "__mm_user_ext_"
     return symbol[len(prefix):] if symbol.startswith(prefix) else symbol
@@ -386,6 +417,56 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
         if stream == 1:
             return 1
         return 0
+
+    if original == "bsearch":
+        def user_bsearch(vm, args):
+            if len(args) != 5:
+                raise VMError("bsearch expects key,base,nmemb,size,compar")
+            key, base, nmemb, size, compar = map(int, args)
+            if size <= 0:
+                return 0
+
+            lo = 0
+            hi = nmemb
+            calls = 0
+            while lo < hi:
+                mid = lo + (hi - lo) // 2
+                element = base + mid * size
+                raw, = _call_guest_descriptor_preserving_control(
+                    vm,
+                    compar,
+                    (key, element),
+                    result_count=1,
+                    max_extra_steps=500_000,
+                )
+                calls += 1
+                raw32 = raw & 0xFFFFFFFF
+                cmp_value = (
+                    raw32 - (1 << 32)
+                    if raw32 & (1 << 31)
+                    else raw32
+                )
+                if cmp_value < 0:
+                    hi = mid
+                elif cmp_value > 0:
+                    lo = mid + 1
+                else:
+                    print(
+                        "BOOT_EXEC_USER_BSEARCH "
+                        f"nmemb={nmemb} size={size} calls={calls} "
+                        f"index={mid} result=0x{element:x}",
+                        flush=True,
+                    )
+                    return element
+
+            print(
+                "BOOT_EXEC_USER_BSEARCH "
+                f"nmemb={nmemb} size={size} calls={calls} result=0x0",
+                flush=True,
+            )
+            return 0
+
+        return user_bsearch
 
     if original == "fflush":
         def user_fflush(_vm, args):
