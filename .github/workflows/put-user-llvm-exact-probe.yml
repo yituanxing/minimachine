@@ -31,10 +31,13 @@ jobs:
           from pathlib import Path
           text=Path("exact/llvm/linked.ll").read_text()
           target="@__put_user_fn.5658("
-          start=text.find(target)
+          start=-1
+          for pos,line in enumerate(text.splitlines(keepends=True)):
+              if line.startswith("define ") and target in line:
+                  start=sum(len(x) for x in text.splitlines(keepends=True)[:pos])
+                  break
           if start < 0:
-              raise SystemExit("target missing")
-          start=text.rfind("\ndefine ",0,start)+1
+              raise SystemExit("target definition missing")
           depth=0
           end=None
           for i in range(start,len(text)):
