@@ -301,6 +301,36 @@ class LegalizerTests(unittest.TestCase):
         self.assertEqual(entry[1].false_target.label, "taken")
         self.assertEqual(stats.lowered_static_branch, 1)
 
+    def test_busybox_forget_const_inline_asm_is_identity(self):
+        fn, stats = self.lower_one(
+            r"""
+            @ptr_to_globals = external global i8
+
+            define ptr @forget_const() {
+            entry:
+              %p = call ptr asm sideeffect "# forget that p points to const", "=r,0"(ptr @ptr_to_globals)
+              ret ptr %p
+            }
+            """
+        )
+        moves = [
+            inst
+            for block in fn.blocks
+            for inst in block.instructions
+            if isinstance(inst, muir.Mov)
+            and inst.dst == muir.Slot("p")
+        ]
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(moves[0].src, muir.Symbol("ptr_to_globals"))
+        self.assertEqual(stats.lowered_identity_asm, 1)
+        self.assertFalse(
+            any(
+                isinstance(inst, muir.ArchEscape)
+                for block in fn.blocks
+                for inst in block.instructions
+            )
+        )
+
     def test_ecall_preserves_ptrtoint_global_argument(self):
         fn = self._one_function(
             r"""

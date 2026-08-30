@@ -2552,13 +2552,24 @@ def legalize_function(
                             # reordering, so no runtime instruction is required.
                             stats.dropped_compiler_barriers += 1
                             continue
-                        if result is not None and template is not None and not template.strip():
-                            constraints = _inline_asm_constraints(inst.text)
-                            args = _inline_asm_args(inst.text, layout)
-                            if constraints == "=r,0" and len(args) == 1:
-                                stats.lowered_identity_asm += 1
-                                out.append(muir.Mov(muir.Width.I64, result, args[0]))
-                                continue
+                        if result is not None and template is not None:
+                            normalized_identity = _normalize_inline_asm(template)
+                            if normalized_identity in {
+                                "",
+                                "# forget that p points to const",
+                            }:
+                                constraints = _inline_asm_constraints(inst.text)
+                                args = _inline_asm_args(inst.text, layout)
+                                if constraints == "=r,0" and len(args) == 1:
+                                    stats.lowered_identity_asm += 1
+                                    out.append(
+                                        muir.Mov(
+                                            muir.Width.I64,
+                                            result,
+                                            args[0],
+                                        )
+                                    )
+                                    continue
                         if result is not None and template is not None and _normalize_inline_asm(template) == "div $0, $0, zero":
                             constraints = _inline_asm_constraints(inst.text)
                             args = _inline_asm_args(inst.text, layout)
