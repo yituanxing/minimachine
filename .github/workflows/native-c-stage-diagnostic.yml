@@ -5,8 +5,6 @@ on:
     branches: [work/native-p3-vm]
     paths:
       - scripts/run-minimachine-linux.py
-      - src/minimachine/native_vm.py
-      - native/p3vm.c
       - .github/workflows/native-c-stage-diagnostic.yml
   workflow_dispatch:
 
