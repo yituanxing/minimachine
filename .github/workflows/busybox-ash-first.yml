@@ -75,8 +75,12 @@ jobs:
           EOF
           cd build/busybox
           KCONFIG_ALLCONFIG="$PWD/../ash-first.fragment" make allnoconfig
+          sed -ri 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/' .config
+          sed -ri 's/^CONFIG_PIE=y$/# CONFIG_PIE is not set/' .config
+          yes "" | make oldconfig >/dev/null
           cp .config ../busybox-ash-first.config
-          grep -E '^(CONFIG_(STATIC|ASH|SH_IS_ASH|ASH_ECHO|ASH_JOB_CONTROL|FEATURE_SH_MATH)=|# CONFIG_(ASH_JOB_CONTROL|FEATURE_SH_MATH))' .config || true
+          grep -E '^(CONFIG_(STATIC|ASH|SH_IS_ASH|ASH_ECHO)=|# CONFIG_(ASH_JOB_CONTROL|FEATURE_SH_MATH|PIE))' .config || true
+          grep -Fx 'CONFIG_STATIC=y' .config
 
       - name: Build and prove normal RISC-V ash
         working-directory: build/busybox
