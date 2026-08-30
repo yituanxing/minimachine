@@ -2,7 +2,7 @@ name: Linux MiniMachine Initramfs Build
 
 on:
   push:
-    branches: [work/checkpoint-after-kallsyms]
+    branches: [work/checkpoint-after-kallsyms, work/native-p3-vm]
     paths:
       - linux-overlay/arch/minimachine/**
       - scripts/build-minimachine-initramfs.py
