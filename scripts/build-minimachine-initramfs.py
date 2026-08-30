@@ -99,8 +99,8 @@ def build_cpio() -> tuple[bytes, int]:
     add(
         "dev/console",
         mode=stat.S_IFCHR | 0o600,
-        rdevmajor=5,
-        rdevminor=1,
+        rdevmajor=240,
+        rdevminor=0,
     )
     add("init", mode=stat.S_IFREG | 0o755, data=init_image)
     add("TRAILER!!!", mode=0)
