@@ -160,7 +160,7 @@ jobs:
             --initramfs exact/out/minimachine-initramfs.cpio \
             --native-vm \
             --checkpoint-in hot/kernel-execve-hot.chk.gz \
-            --inject-initramfs-cpio build/busybox-ash-first.cpio \
+            --inject-init build/busybox-ash-first.bflt \
             --stop-on-panic \
             --max-steps 0 \
             --progress-every 0 \
@@ -169,7 +169,7 @@ jobs:
       - name: Summarize first real ash run
         if: always()
         run: |
-          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|ROOTFS_UNPACKED|USER_RUNTIME|USER_IMAGE_DATA|USER_ARGS|USER_HANDOFF|NATIVE_APPEND_PACK|NATIVE_APPEND|NATIVE_DATA_APPEND|NATIVE_HOST_APPEND|USER_SYSCALL|HOST_INPUT|HALTED|BLOCKED)|BUSYBOX_MINIMACHINE_HELLO|ASH_HOT_WALL' \
+          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|ROOTFS_INJECTED|ROOTFS_UNPACKED|USER_RUNTIME|USER_IMAGE_DATA|USER_ARGS|USER_HANDOFF|NATIVE_APPEND_PACK|NATIVE_APPEND|NATIVE_DATA_APPEND|NATIVE_HOST_APPEND|USER_SYSCALL|HOST_INPUT|HALTED|BLOCKED)|BUSYBOX_MINIMACHINE_HELLO|ASH_HOT_WALL' \
             build/busybox-ash-first-run.log | tail -240 || true
 
       - name: Upload ash-first evidence
