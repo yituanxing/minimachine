@@ -6,7 +6,6 @@ on:
     branches: [work/native-p3-vm]
     paths:
       - src/minimachine/llvm_text.py
-      - scripts/run-minimachine-linux.py
       - .github/workflows/hot-filp-open-trace.yml
 
 permissions:

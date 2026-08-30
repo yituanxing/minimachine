@@ -7,8 +7,6 @@ on:
     paths:
       - native/p3vm.c
       - src/minimachine/native_vm.py
-      - src/minimachine/runtime.py
-      - scripts/run-minimachine-linux.py
       - .github/workflows/busybox-ash-carrier-hot.yml
 
 permissions:

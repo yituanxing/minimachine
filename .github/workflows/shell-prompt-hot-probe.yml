@@ -6,7 +6,6 @@ on:
     branches: [work/native-p3-vm]
     paths:
       - scripts/build-minimachine-shell.py
-      - scripts/run-minimachine-linux.py
       - src/minimachine/checkpoint.py
       - .github/workflows/shell-prompt-hot-probe.yml
 

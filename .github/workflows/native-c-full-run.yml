@@ -7,8 +7,6 @@ on:
       - src/minimachine/llvm_text.py
       - native/**
       - src/minimachine/native_vm.py
-      - src/minimachine/runtime.py
-      - scripts/run-minimachine-linux.py
       - .github/workflows/native-c-full-run.yml
   workflow_dispatch:
 
