@@ -426,12 +426,36 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             if size <= 0:
                 return 0
 
+            def preview_cstring(ptr: int, limit: int = 48) -> str:
+                if not ptr:
+                    return "<null>"
+                data = bytearray()
+                for i in range(limit):
+                    byte = vm.memory.read(ptr + i, 8)
+                    if byte == 0:
+                        break
+                    data.append(byte)
+                return data.decode("utf-8", errors="backslashreplace")
+
+            comparator_name = _guest_function_name_from_descriptor(vm, compar)
+            key_text = preview_cstring(key)
             lo = 0
             hi = nmemb
             calls = 0
             while lo < hi:
                 mid = lo + (hi - lo) // 2
                 element = base + mid * size
+                element_name_ptr = vm.memory.read(element, 64)
+                raw_name = preview_cstring(element_name_ptr)
+                first = (
+                    vm.memory.read(element_name_ptr, 8)
+                    if element_name_ptr else 0
+                )
+                logical_name = (
+                    preview_cstring(element_name_ptr + 1)
+                    if 0 < first < 8
+                    else raw_name
+                )
                 raw, = _call_guest_descriptor_preserving_control(
                     vm,
                     compar,
@@ -446,6 +470,15 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     if raw32 & (1 << 31)
                     else raw32
                 )
+                print(
+                    "BOOT_EXEC_USER_BSEARCH_CMP "
+                    f"compar={comparator_name} key={key_text!r} "
+                    f"nmemb={nmemb} size={size} lo={lo} hi={hi} mid={mid} "
+                    f"element=0x{element:x} name_ptr=0x{element_name_ptr:x} "
+                    f"first=0x{first:x} name={logical_name!r} "
+                    f"raw=0x{raw:x} cmp={cmp_value}",
+                    flush=True,
+                )
                 if cmp_value < 0:
                     hi = mid
                 elif cmp_value > 0:
@@ -453,6 +486,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                 else:
                     print(
                         "BOOT_EXEC_USER_BSEARCH "
+                        f"compar={comparator_name} key={key_text!r} "
                         f"nmemb={nmemb} size={size} calls={calls} "
                         f"index={mid} result=0x{element:x}",
                         flush=True,
@@ -461,6 +495,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
             print(
                 "BOOT_EXEC_USER_BSEARCH "
+                f"compar={comparator_name} key={key_text!r} "
                 f"nmemb={nmemb} size={size} calls={calls} result=0x0",
                 flush=True,
             )
