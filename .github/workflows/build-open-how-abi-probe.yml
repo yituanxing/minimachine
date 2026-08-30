@@ -1,0 +1,65 @@
+name: MiniMachine build_open_how ABI Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/build-open-how-abi-probe.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download old linked image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33245921667
+          github-token: ${{ github.token }}
+          name: minimachine-linux-boot-33245921667
+          path: image
+      - name: Download old P3 cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33249488447
+          github-token: ${{ github.token }}
+          name: minimachine-double-hot-33249488447
+          path: cache
+      - name: Inspect LLVM and P3
+        run: |
+          cp "$(find cache -name 'linux-p3-cache.pkl.gz' -print -quit)" /tmp/cache.pkl.gz
+          python3 - <<'PY'
+          from pathlib import Path
+          from src.minimachine.checkpoint import image_fingerprint
+          from src.minimachine.program_cache import load_program_cache
+
+          text=Path("image/llvm/linked.ll").read_text()
+          lines=text.splitlines()
+          for name in ["build_open_how","file_open_name"]:
+              print("===== LLVM",name,"=====")
+              active=False
+              for line in lines:
+                  if not active and line.startswith("define ") and f"@{name}(" in line:
+                      active=True
+                  if active:
+                      print(line)
+                      if line.strip()=="}":
+                          break
+
+          cached=load_program_cache(Path("/tmp/cache.pkl.gz"), image_sha256=image_fingerprint(text))
+          for name in ["build_open_how","file_open_name"]:
+              fn=cached.program.functions[name].function
+              print("===== P3",name,"=====")
+              for block in fn.blocks:
+                  print("BLOCK",block.label)
+                  for i,inst in enumerate(block.instructions):
+                      print(i,repr(inst))
+          PY
