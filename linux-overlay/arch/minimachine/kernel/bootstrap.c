@@ -134,7 +134,6 @@ static ssize_t minimachine_console_read(struct file *file,
 }
 
 static const struct file_operations minimachine_console_fops = {
-	.owner = THIS_MODULE,
 	.read = minimachine_console_read,
 	.write = minimachine_console_write,
 	.llseek = no_llseek,
