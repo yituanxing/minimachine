@@ -360,6 +360,158 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return HOST_CONTROL_TRANSFER
         return user_longjmp
 
+    def set_errno(vm, value: int) -> None:
+        if errno_address is not None:
+            vm.memory.write(errno_address, 32, value & 0xFFFFFFFF)
+
+    def check_signal_number(vm, signum: int) -> bool:
+        if 1 <= signum <= 64:
+            return True
+        set_errno(vm, 22)
+        return False
+
+    if original in {
+        "sigfillset",
+        "sigemptyset",
+        "sigaddset",
+        "sigdelset",
+        "sigismember",
+    }:
+        def sigset_op(vm, args):
+            if original in {"sigfillset", "sigemptyset"}:
+                if len(args) != 1:
+                    raise VMError(f"{original} expects sigset_t*")
+                ptr = int(args[0])
+                fill = 0xFF if original == "sigfillset" else 0x00
+                bulk_fill = getattr(vm.memory, "bulk_fill", None)
+                if bulk_fill is not None:
+                    bulk_fill(ptr, fill, 128)
+                else:
+                    for i in range(128):
+                        vm.memory.write(ptr + i, 8, fill)
+                return 0
+
+            if len(args) != 2:
+                raise VMError(f"{original} expects sigset_t*,signum")
+            ptr, signum = map(int, args)
+            if not check_signal_number(vm, signum):
+                return -1 & ((1 << 64) - 1)
+            bit = signum - 1
+            byte_addr = ptr + (bit // 8)
+            mask = 1 << (bit % 8)
+            old = vm.memory.read(byte_addr, 8)
+            if original == "sigaddset":
+                vm.memory.write(byte_addr, 8, old | mask)
+                return 0
+            if original == "sigdelset":
+                vm.memory.write(byte_addr, 8, old & ~mask)
+                return 0
+            return 1 if old & mask else 0
+
+        return sigset_op
+
+    def call_rt_sigaction(vm, signum: int, act_ptr: int, old_ptr: int) -> int:
+        if "__se_sys_rt_sigaction" not in vm.program.functions:
+            raise VMError("Linux image is missing __se_sys_rt_sigaction")
+        kact = 0
+        kold = 0
+        if act_ptr:
+            kact = vm.alloc_bytes(24, align=8)
+            # glibc/RISC-V struct sigaction:
+            #   handler @0, 128-byte mask @8, flags @136, restorer @144.
+            # MiniMachine kernel struct sigaction:
+            #   handler @0, flags @8, kernel_sigset_t(low64) @16.
+            handler = vm.memory.read(act_ptr + 0, 64)
+            mask = vm.memory.read(act_ptr + 8, 64)
+            flags = vm.memory.read(act_ptr + 136, 32)
+            vm.memory.write(kact + 0, 64, handler)
+            vm.memory.write(kact + 8, 64, flags)
+            vm.memory.write(kact + 16, 64, mask)
+        if old_ptr:
+            kold = vm.alloc_bytes(24, align=8)
+
+        result, = _call_linux_function_preserving_control(
+            vm,
+            "__se_sys_rt_sigaction",
+            (signum, kact, kold, 8),
+            result_count=1,
+            max_extra_steps=2_000_000,
+        )
+        signed = result - (1 << 64) if result & (1 << 63) else result
+        if signed < 0:
+            set_errno(vm, -signed)
+            return result
+
+        if old_ptr:
+            handler = vm.memory.read(kold + 0, 64)
+            flags = vm.memory.read(kold + 8, 64)
+            mask = vm.memory.read(kold + 16, 64)
+            vm.memory.write(old_ptr + 0, 64, handler)
+            for i in range(128):
+                vm.memory.write(old_ptr + 8 + i, 8, 0)
+            vm.memory.write(old_ptr + 8, 64, mask)
+            vm.memory.write(old_ptr + 136, 32, flags)
+            vm.memory.write(old_ptr + 144, 64, 0)
+        return result
+
+    if original == "sigaction":
+        def user_sigaction(vm, args):
+            if len(args) != 3:
+                raise VMError("sigaction expects signum,act,oldact")
+            signum, act_ptr, old_ptr = map(int, args)
+            if not check_signal_number(vm, signum):
+                return -1 & ((1 << 64) - 1)
+            return call_rt_sigaction(vm, signum, act_ptr, old_ptr)
+        return user_sigaction
+
+    if original == "sigprocmask":
+        def user_sigprocmask(vm, args):
+            if len(args) != 3:
+                raise VMError("sigprocmask expects how,set,oldset")
+            how, set_ptr, old_ptr = map(int, args)
+            if "__se_sys_rt_sigprocmask" not in vm.program.functions:
+                raise VMError("Linux image is missing __se_sys_rt_sigprocmask")
+            result, = _call_linux_function_preserving_control(
+                vm,
+                "__se_sys_rt_sigprocmask",
+                (how, set_ptr, old_ptr, 8),
+                result_count=1,
+                max_extra_steps=2_000_000,
+            )
+            signed = result - (1 << 64) if result & (1 << 63) else result
+            if signed < 0:
+                set_errno(vm, -signed)
+                return -1 & ((1 << 64) - 1)
+            return 0
+        return user_sigprocmask
+
+    if original == "signal":
+        def user_signal(vm, args):
+            if len(args) != 2:
+                raise VMError("signal expects signum,handler")
+            signum, handler = map(int, args)
+            if not check_signal_number(vm, signum):
+                return ((1 << 64) - 1)
+            act = vm.alloc_bytes(152, align=8)
+            old = vm.alloc_bytes(152, align=8)
+            bulk_fill = getattr(vm.memory, "bulk_fill", None)
+            if bulk_fill is not None:
+                bulk_fill(act, 0, 152)
+                bulk_fill(old, 0, 152)
+            else:
+                for i in range(152):
+                    vm.memory.write(act + i, 8, 0)
+                    vm.memory.write(old + i, 8, 0)
+            vm.memory.write(act + 0, 64, handler)
+            # SA_RESTART, matching the usual libc signal() semantics.
+            vm.memory.write(act + 136, 32, 0x10000000)
+            result = call_rt_sigaction(vm, signum, act, old)
+            signed = result - (1 << 64) if result & (1 << 63) else result
+            if signed < 0:
+                return ((1 << 64) - 1)
+            return vm.memory.read(old + 0, 64)
+        return user_signal
+
     if original == "malloc":
         def malloc(vm, args):
             if len(args) != 1:
@@ -806,12 +958,12 @@ def user_syscall(vm, args: tuple[int, ...]):
         64: ("__se_sys_write", 3),
         93: ("__se_sys_exit", 1),
         94: ("__se_sys_exit_group", 1),
-        172: ("__se_sys_getpid", 0),
-        173: ("__se_sys_getppid", 0),
-        174: ("__se_sys_getuid", 0),
-        175: ("__se_sys_geteuid", 0),
-        176: ("__se_sys_getgid", 0),
-        177: ("__se_sys_getegid", 0),
+        172: ("sys_getpid", 0),
+        173: ("sys_getppid", 0),
+        174: ("sys_getuid", 0),
+        175: ("sys_geteuid", 0),
+        176: ("sys_getgid", 0),
+        177: ("sys_getegid", 0),
         221: ("__se_sys_execve", 3),
     }
 
