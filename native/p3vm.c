@@ -630,12 +630,7 @@ int mm_vm_mem_write_blob(MMVM *vm, uint64_t dst,
                          const uint8_t *data, uint64_t n) {
     if (!vm || (!data && n))
         return 0;
-    for (uint64_t i = 0; i < n; ++i) {
-        mem_write8(vm, dst + i, data[i]);
-        if (vm->oom)
-            return 0;
-    }
-    return 1;
+    return mem_write_bytes(vm, dst, data, n);
 }
 
 int mm_vm_mem_fill(MMVM *vm, uint64_t dst, uint8_t value, uint64_t n) {

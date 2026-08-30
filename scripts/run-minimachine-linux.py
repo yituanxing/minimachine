@@ -35,6 +35,7 @@ from src.minimachine.program_cache import (
 from src.minimachine.runtime import (
     accelerate_direct_runtime,
     collect_runtime_surface,
+    direct_runtime_callback,
     helper_callback,
     install_runtime,
 )
@@ -263,6 +264,187 @@ def refresh_host_service_descriptors(vm) -> None:
     )
 
 
+def _user_external_original(symbol: str) -> str:
+    prefix = "__mm_user_ext_"
+    return symbol[len(prefix):] if symbol.startswith(prefix) else symbol
+
+
+def _user_libc_callback(symbol: str, errno_address: int | None):
+    original = _user_external_original(symbol)
+
+    direct = direct_runtime_callback(original)
+    if direct is not None:
+        return direct
+
+    if original == "bcmp":
+        return direct_runtime_callback("memcmp")
+
+    if original == "__errno_location" and errno_address is not None:
+        def errno_location(_vm, args):
+            if args:
+                raise VMError("__errno_location expects no arguments")
+            return errno_address
+        return errno_location
+
+    if original == "malloc":
+        def malloc(vm, args):
+            if len(args) != 1:
+                raise VMError("malloc expects size")
+            size = int(args[0])
+            ptr = vm.alloc_bytes(size, align=16)
+            allocations = getattr(vm, "user_allocations", None)
+            if allocations is None:
+                allocations = {}
+                vm.user_allocations = allocations
+            allocations[ptr] = size
+            return ptr
+        return malloc
+
+    if original == "free":
+        def free(vm, args):
+            if len(args) != 1:
+                raise VMError("free expects pointer")
+            ptr = int(args[0])
+            allocations = getattr(vm, "user_allocations", None)
+            if allocations is not None:
+                allocations.pop(ptr, None)
+            return None
+        return free
+
+    if original == "realloc":
+        def realloc(vm, args):
+            if len(args) != 2:
+                raise VMError("realloc expects pointer,size")
+            ptr, size = map(int, args)
+            allocations = getattr(vm, "user_allocations", None)
+            if allocations is None:
+                allocations = {}
+                vm.user_allocations = allocations
+            if ptr == 0:
+                out = vm.alloc_bytes(size, align=16)
+                allocations[out] = size
+                return out
+            if size == 0:
+                allocations.pop(ptr, None)
+                return 0
+            old_size = allocations.get(ptr)
+            if old_size is None:
+                raise VMError(
+                    f"realloc received unknown userspace allocation 0x{ptr:x}"
+                )
+            out = vm.alloc_bytes(size, align=16)
+            copy_size = min(old_size, size)
+            bulk = getattr(vm.memory, "bulk_copy", None)
+            if bulk is not None:
+                bulk(out, ptr, copy_size)
+            else:
+                for i in range(copy_size):
+                    vm.memory.write(
+                        out + i,
+                        8,
+                        vm.memory.read(ptr + i, 8),
+                    )
+            allocations.pop(ptr, None)
+            allocations[out] = size
+            return out
+        return realloc
+
+    syscall_map = {
+        "read": (63, 3),
+        "write": (64, 3),
+        "_exit": (93, 1),
+        "execve": (221, 3),
+    }
+    syscall_spec = syscall_map.get(original)
+    if syscall_spec is not None:
+        nr, argc = syscall_spec
+
+        def libc_syscall(vm, args):
+            if len(args) != argc:
+                raise VMError(
+                    f"{original} expects {argc} arguments, got {len(args)}"
+                )
+            padded = tuple(args) + (0,) * (6 - len(args))
+            return user_syscall(vm, (nr, *padded))
+        return libc_syscall
+
+    def unimplemented(_vm, args):
+        preview = ",".join(f"0x{x:x}" for x in args[:8])
+        print(
+            "BOOT_EXEC_USER_EXTERNAL "
+            f"name={original} argc={len(args)} args={preview}",
+            flush=True,
+        )
+        raise VMError(
+            f"unimplemented BusyBox userspace external {original}"
+        )
+
+    return unimplemented
+
+
+def install_user_external_surface(vm, user_image, envp: int) -> None:
+    image = user_image.image
+    if image is None:
+        return
+
+    data_defaults = {
+        "environ": envp,
+        "optarg": 0,
+        "opterr": 1,
+        "optind": 1,
+        "optopt": 0,
+        "stdin": 0,
+        "stdout": 0,
+        "stderr": 0,
+    }
+
+    installed_data = 0
+    for symbol in image.external_data:
+        if symbol in vm.program.symbol_addresses:
+            continue
+        original = _user_external_original(symbol)
+        value = data_defaults.get(original, 0)
+        address = vm.program.define_data_symbol(
+            symbol,
+            int(value & ((1 << 64) - 1)).to_bytes(8, "little"),
+            align=8,
+        )
+        installed_data += 1
+        print(
+            "BOOT_EXEC_USER_EXTERNAL_DATA "
+            f"name={original} address=0x{address:x} value=0x{value:x}",
+            flush=True,
+        )
+
+    errno_symbol = "__mm_user_ext___errno_cell"
+    errno_address = vm.program.symbol_addresses.get(errno_symbol)
+    if errno_address is None:
+        errno_address = vm.program.define_data_symbol(
+            errno_symbol,
+            b"\0" * 8,
+            align=8,
+        )
+
+    installed_functions = 0
+    accelerated = 0
+    for symbol in image.external_functions:
+        if symbol in vm.program.symbol_addresses:
+            continue
+        original = _user_external_original(symbol)
+        callback = _user_libc_callback(symbol, errno_address)
+        if direct_runtime_callback(original) is not None or original == "bcmp":
+            accelerated += 1
+        vm.program.register_service(symbol, callback)
+        installed_functions += 1
+
+    print(
+        "BOOT_EXEC_USER_EXTERNAL_SURFACE "
+        f"functions={installed_functions} data={installed_data} "
+        f"portable_accel={accelerated}",
+        flush=True,
+    )
+
+
 def linux_ecall(vm, args: tuple[int, ...]):
     # Boot-first host ABI:
     #   service 1: write(ptr, len) to the host boot console.
@@ -412,6 +594,28 @@ def linux_ecall(vm, args: tuple[int, ...]):
         functions = list(user_image.functions)
         entry_name = user_image.entry
 
+        entry_argv: tuple[int, ...] = ()
+        user_envp = 0
+        if user_image.entry_args == "linux-main":
+            argc = vm.memory.read(user_sp, 64)
+            if argc > 4096:
+                raise VMError(
+                    f"MiniMachine userspace argc is unreasonable: {argc}"
+                )
+            argv = (user_sp + 8) & ((1 << 64) - 1)
+            user_envp = (argv + (argc + 1) * 8) & ((1 << 64) - 1)
+            entry_argv = (argc, argv, user_envp)
+            vm.user_envp = user_envp
+            argv0 = vm.memory.read(argv, 64) if argc else 0
+            print(
+                "BOOT_EXEC_USER_ARGS "
+                f"argc={argc} argv=0x{argv:x} envp=0x{user_envp:x} "
+                f"argv0=0x{argv0:x}",
+                flush=True,
+            )
+
+        install_user_external_surface(vm, user_image, user_envp)
+
         registered_user_helpers = 0
         for symbol in user_image.runtime_helpers:
             if symbol in vm.program.symbol_addresses:
@@ -478,24 +682,6 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 f"objects={len(user_image.image.objects)} "
                 f"bytes={user_image.image.byte_size} "
                 f"relocs={user_image.image.relocation_count}",
-                flush=True,
-            )
-
-        entry_argv: tuple[int, ...] = ()
-        if user_image.entry_args == "linux-main":
-            argc = vm.memory.read(user_sp, 64)
-            if argc > 4096:
-                raise VMError(
-                    f"MiniMachine userspace argc is unreasonable: {argc}"
-                )
-            argv = (user_sp + 8) & ((1 << 64) - 1)
-            envp = (argv + (argc + 1) * 8) & ((1 << 64) - 1)
-            entry_argv = (argc, argv, envp)
-            argv0 = vm.memory.read(argv, 64) if argc else 0
-            print(
-                "BOOT_EXEC_USER_ARGS "
-                f"argc={argc} argv=0x{argv:x} envp=0x{envp:x} "
-                f"argv0=0x{argv0:x}",
                 flush=True,
             )
 
