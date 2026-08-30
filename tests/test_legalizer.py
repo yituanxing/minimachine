@@ -385,7 +385,7 @@ class LegalizerTests(unittest.TestCase):
         )
 
     def test_ecall_preserves_ptrtoint_global_argument(self):
-        fn = self._one_function(
+        lowered, _ = self.lower_one(
             r"""
             @console_buffer = internal global [256 x i8] zeroinitializer, align 1
 
@@ -399,7 +399,6 @@ class LegalizerTests(unittest.TestCase):
             }
             """
         )
-        lowered, _ = legalize_function(fn, DataLayout(""))
         sysops = [
             inst
             for block in lowered.blocks
