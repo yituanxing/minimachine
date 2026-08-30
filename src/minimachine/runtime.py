@@ -1411,6 +1411,19 @@ _DIRECT_RUNTIME_SYMBOLS = (
     "strlen",
     "strcmp",
     "strncmp",
+    "strchr",
+    "strchrnul",
+    "memchr",
+    "strcpy",
+    "strncpy",
+    "stpncpy",
+    "strcasecmp",
+    "strncasecmp",
+    "strcspn",
+    "strpbrk",
+    "strstr",
+    "strdup",
+    "strtok_r",
     "ror32",
 )
 
@@ -1524,6 +1537,216 @@ def direct_runtime_callback(symbol: str):
                     return 0
             return 0
         return strncmp
+
+    if base == "strchr" or base == "strchrnul":
+        def strchr(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError(f"{base} expects string,char")
+            ptr, ch = args
+            ch &= 0xFF
+            i = 0
+            while True:
+                byte = vm.memory.read(ptr + i, 8)
+                if byte == ch:
+                    return ptr + i
+                if byte == 0:
+                    return ptr + i if base == "strchrnul" else 0
+                i += 1
+        return strchr
+
+    if base == "memchr":
+        def memchr(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError("memchr expects ptr,char,size")
+            ptr, ch, size = args
+            ch &= 0xFF
+            for i in range(size):
+                if vm.memory.read(ptr + i, 8) == ch:
+                    return ptr + i
+            return 0
+        return memchr
+
+    if base in {"strcpy", "strncpy", "stpncpy"}:
+        def string_copy(vm: VM, args: tuple[int, ...]):
+            if base == "strcpy":
+                if len(args) != 2:
+                    raise VMError("strcpy expects dst,src")
+                dst, src = args
+                i = 0
+                while True:
+                    byte = vm.memory.read(src + i, 8)
+                    vm.memory.write(dst + i, 8, byte)
+                    if byte == 0:
+                        return dst
+                    i += 1
+
+            if len(args) != 3:
+                raise VMError(f"{base} expects dst,src,size")
+            dst, src, size = args
+            i = 0
+            ended = False
+            while i < size:
+                byte = 0 if ended else vm.memory.read(src + i, 8)
+                vm.memory.write(dst + i, 8, byte)
+                if byte == 0:
+                    ended = True
+                    if base == "stpncpy":
+                        return dst + i
+                i += 1
+            return dst + size if base == "stpncpy" else dst
+        return string_copy
+
+    if base in {"strcasecmp", "strncasecmp"}:
+        def ci_compare(vm: VM, args: tuple[int, ...]):
+            if base == "strcasecmp":
+                if len(args) != 2:
+                    raise VMError("strcasecmp expects a,b")
+                a, b = args
+                limit = None
+            else:
+                if len(args) != 3:
+                    raise VMError("strncasecmp expects a,b,size")
+                a, b, limit = args
+
+            i = 0
+            while limit is None or i < limit:
+                av = vm.memory.read(a + i, 8)
+                bv = vm.memory.read(b + i, 8)
+                al = av + 32 if 65 <= av <= 90 else av
+                bl = bv + 32 if 65 <= bv <= 90 else bv
+                if al != bl:
+                    return (al - bl) & MASK64
+                if av == 0 or bv == 0:
+                    return 0
+                i += 1
+            return 0
+        return ci_compare
+
+    if base == "strcspn":
+        def strcspn(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("strcspn expects string,reject")
+            ptr, reject = args
+            reject_set = set()
+            j = 0
+            while True:
+                byte = vm.memory.read(reject + j, 8)
+                if byte == 0:
+                    break
+                reject_set.add(byte)
+                j += 1
+            i = 0
+            while True:
+                byte = vm.memory.read(ptr + i, 8)
+                if byte == 0 or byte in reject_set:
+                    return i
+                i += 1
+        return strcspn
+
+    if base == "strpbrk":
+        def strpbrk(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("strpbrk expects string,accept")
+            ptr, accept = args
+            accept_set = set()
+            j = 0
+            while True:
+                byte = vm.memory.read(accept + j, 8)
+                if byte == 0:
+                    break
+                accept_set.add(byte)
+                j += 1
+            i = 0
+            while True:
+                byte = vm.memory.read(ptr + i, 8)
+                if byte == 0:
+                    return 0
+                if byte in accept_set:
+                    return ptr + i
+                i += 1
+        return strpbrk
+
+    if base == "strstr":
+        def strstr(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("strstr expects haystack,needle")
+            haystack, needle = args
+            needle_len = 0
+            while vm.memory.read(needle + needle_len, 8) != 0:
+                needle_len += 1
+            if needle_len == 0:
+                return haystack
+            i = 0
+            while vm.memory.read(haystack + i, 8) != 0:
+                matched = True
+                for j in range(needle_len):
+                    if vm.memory.read(haystack + i + j, 8) != vm.memory.read(
+                        needle + j, 8
+                    ):
+                        matched = False
+                        break
+                if matched:
+                    return haystack + i
+                i += 1
+            return 0
+        return strstr
+
+    if base == "strdup":
+        def strdup(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError("strdup expects string")
+            src = args[0]
+            size = 0
+            while vm.memory.read(src + size, 8) != 0:
+                size += 1
+            size += 1
+            dst = vm.alloc_bytes(size, align=1)
+            bulk = getattr(vm.memory, "bulk_copy", None)
+            if bulk is not None:
+                bulk(dst, src, size)
+            else:
+                for i in range(size):
+                    vm.memory.write(dst + i, 8, vm.memory.read(src + i, 8))
+            return dst
+        return strdup
+
+    if base == "strtok_r":
+        def strtok_r(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError("strtok_r expects string,delim,saveptr")
+            ptr, delim, saveptr = args
+            if ptr == 0:
+                ptr = vm.memory.read(saveptr, 64)
+            delim_set = set()
+            j = 0
+            while True:
+                byte = vm.memory.read(delim + j, 8)
+                if byte == 0:
+                    break
+                delim_set.add(byte)
+                j += 1
+
+            while True:
+                byte = vm.memory.read(ptr, 8)
+                if byte == 0:
+                    vm.memory.write(saveptr, 64, ptr)
+                    return 0
+                if byte not in delim_set:
+                    break
+                ptr += 1
+
+            token = ptr
+            while True:
+                byte = vm.memory.read(ptr, 8)
+                if byte == 0:
+                    vm.memory.write(saveptr, 64, ptr)
+                    return token
+                if byte in delim_set:
+                    vm.memory.write(ptr, 8, 0)
+                    vm.memory.write(saveptr, 64, ptr + 1)
+                    return token
+                ptr += 1
+        return strtok_r
 
     if base == "ror32":
         def ror32(_vm: VM, args: tuple[int, ...]):

@@ -1076,6 +1076,77 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(vm.run_function("runtime_strncmp", (a, b, 3)), (0,))
         self.assertNotEqual(vm.run_function("runtime_strncmp", (a, b, 4)), (0,))
 
+    def test_extended_portable_string_runtime_services(self):
+        vm = Program().new_vm()
+
+        def put(address, data):
+            for i, byte in enumerate(data + b"\0"):
+                vm.memory.write(address + i, 8, byte)
+
+        a = 0xB400
+        b = 0xB500
+        c = 0xB600
+        save = 0xB700
+        put(a, b"Alpha=Beta,Gamma")
+        put(b, b"beta")
+        put(c, b"=,")
+        vm.memory.write(save, 64, 0)
+
+        strchr = direct_runtime_callback("strchr")
+        strchrnul = direct_runtime_callback("strchrnul")
+        strcasecmp = direct_runtime_callback("strcasecmp")
+        strcspn = direct_runtime_callback("strcspn")
+        strpbrk = direct_runtime_callback("strpbrk")
+        strstr = direct_runtime_callback("strstr")
+        strdup = direct_runtime_callback("strdup")
+        strtok_r = direct_runtime_callback("strtok_r")
+        self.assertIsNotNone(strchr)
+        self.assertIsNotNone(strchrnul)
+        self.assertIsNotNone(strcasecmp)
+        self.assertIsNotNone(strcspn)
+        self.assertIsNotNone(strpbrk)
+        self.assertIsNotNone(strstr)
+        self.assertIsNotNone(strdup)
+        self.assertIsNotNone(strtok_r)
+
+        assert strchr is not None
+        assert strchrnul is not None
+        assert strcasecmp is not None
+        assert strcspn is not None
+        assert strpbrk is not None
+        assert strstr is not None
+        assert strdup is not None
+        assert strtok_r is not None
+
+        self.assertEqual(strchr(vm, (a, ord("="))), a + 5)
+        self.assertEqual(strchr(vm, (a, ord("Z"))), 0)
+        self.assertEqual(strchrnul(vm, (b, ord("Z"))), b + 4)
+        put(0xB800, b"BETA")
+        self.assertEqual(strcasecmp(vm, (b, 0xB800)), 0)
+        self.assertEqual(strcspn(vm, (a, c)), 5)
+        self.assertEqual(strpbrk(vm, (a, c)), a + 5)
+        put(0xB900, b"Beta")
+        self.assertEqual(strstr(vm, (a, 0xB900)), a + 6)
+
+        dup = strdup(vm, (b,))
+        self.assertEqual(
+            bytes(vm.memory.read(dup + i, 8) for i in range(5)),
+            b"beta\0",
+        )
+
+        token1 = strtok_r(vm, (a, c, save))
+        token2 = strtok_r(vm, (0, c, save))
+        self.assertEqual(token1, a)
+        self.assertEqual(token2, a + 6)
+        self.assertEqual(
+            bytes(vm.memory.read(token1 + i, 8) for i in range(6)),
+            b"Alpha\0",
+        )
+        self.assertEqual(
+            bytes(vm.memory.read(token2 + i, 8) for i in range(5)),
+            b"Beta\0",
+        )
+
     def test_portable_memmove_runtime_handles_overlap(self):
         callback = direct_runtime_callback("memmove")
         self.assertIsNotNone(callback)
