@@ -1,0 +1,69 @@
+name: MiniMachine P3 Cache Stale Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/p3-cache-stale-probe.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frozen Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33295701837
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33295701837
+          path: exact
+
+      - name: Compare current legalizer with frozen P3 cache
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import gzip, pickle
+
+          from src.minimachine.legalize import DataLayout, _inline_asm_args
+
+          ll_path = Path("exact/llvm/linked.ll")
+          text = ll_path.read_text()
+          layout = DataLayout.from_module(text)
+          target = next(
+              line.strip()
+              for line in text.splitlines()
+              if 'asm sideeffect "ecall"' in line
+              and 'minimachine_console_buffer' in line
+          )
+          args = _inline_asm_args(target, layout)
+          print("P3_STALE_CURRENT_ECALL_LINE", target)
+          print(
+              "P3_STALE_CURRENT_ECALL_ARGS",
+              " | ".join(f"{type(x).__name__}:{x!r}" for x in args),
+          )
+
+          with gzip.open("exact/llvm/linux-initramfs-p3-cache.pkl.gz", "rb") as h:
+              payload = pickle.load(h)
+          cache = payload["cache"]
+          fn = cache.program.functions["minimachine_console_read"].function
+          print("P3_STALE_CACHE_VERSION", payload.get("version"))
+          print("P3_STALE_CACHE_FRAME", cache.program.functions["minimachine_console_read"].frame_size)
+          hits = 0
+          for block in fn.blocks:
+              rendered = "\n".join(repr(inst) for inst in block.instructions)
+              if "__mm_sys_ecall" in rendered:
+                  hits += 1
+                  print("P3_STALE_CACHE_ECALL_BLOCK", block.label)
+                  for i, inst in enumerate(block.instructions):
+                      print(f"P3_STALE_INST {i:03d} {inst!r}")
+          print("P3_STALE_CACHE_ECALL_BLOCKS", hits)
+          PY
