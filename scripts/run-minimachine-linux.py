@@ -1341,6 +1341,8 @@ def main() -> int:
             return 1
         vm.ecall_handler = linux_ecall
         resumed_from_checkpoint = True
+        if args.trace_hot_filp_open:
+            install_hot_filp_trace(vm)
         if args.probe_rootfs_after_checkpoint:
             try:
                 probe_live_rootfs(vm)
