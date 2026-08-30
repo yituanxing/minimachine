@@ -1438,13 +1438,14 @@ def direct_runtime_callback(symbol: str):
             dst, src, size = args
             bulk = getattr(vm.memory, "bulk_copy", None)
             trace_console_copy = (
-                0 < size <= (1 << 20)
-                and (src == 0x40 or dst == 0x40)
+                getattr(vm, "trace_user_read_memcpy_code", None)
+                is not None
             )
             if trace_console_copy:
+                preview_size = min(32, int(size)) if size >= 0 else 0
                 before = bytes(
                     vm.memory.read(src + i, 8)
-                    for i in range(min(32, size))
+                    for i in range(preview_size)
                 )
                 print(
                     "BOOT_EXEC_CONSOLE_MEMCPY "
@@ -1460,7 +1461,7 @@ def direct_runtime_callback(symbol: str):
             if trace_console_copy:
                 after = bytes(
                     vm.memory.read(dst + i, 8)
-                    for i in range(min(32, size))
+                    for i in range(preview_size)
                 )
                 print(
                     "BOOT_EXEC_CONSOLE_MEMCPY_RESULT "

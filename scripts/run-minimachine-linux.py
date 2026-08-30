@@ -1166,7 +1166,9 @@ def user_syscall(vm, args: tuple[int, ...]):
                 "BOOT_EXEC_USER_READ_MEMCPY_DESCRIPTOR "
                 f"descriptor=0x{descriptor:x} "
                 f"live_entry=0x{live_entry:x} "
+                f"live_frame={vm.memory.read(descriptor + 8, 64)} "
                 f"initial_entry=0x{initial_entry:x} "
+                f"initial_frame={vm.program.initial_memory.read(descriptor + 8, 64)} "
                 f"p3_entry=0x{p3_entry:x} "
                 f"host={host_symbol}",
                 flush=True,
