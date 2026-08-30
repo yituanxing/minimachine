@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
 import json
 import struct
 import zlib
 
 from . import muir, p3
+from .image import (
+    BlockExpr,
+    ImageAlias,
+    ImageObject,
+    ModuleImage,
+    Relocation,
+    SymbolExpr,
+)
 
 FORMAT = "minimachine-p3-v1"
 PROGRAM_FORMAT = "minimachine-p3-program-v1"
@@ -31,6 +40,7 @@ class UserImageError(ValueError):
 class UserProgramImage:
     entry: str
     functions: tuple[p3.Function, ...]
+    image: ModuleImage | None = None
 
     def __post_init__(self) -> None:
         names = tuple(fn.name for fn in self.functions)
@@ -258,6 +268,128 @@ def loads_function(data: bytes) -> p3.Function:
         raise UserImageError("P3 user image must be a JSON object")
     return function_from_obj(obj)
 
+def _image_target_to_obj(target: SymbolExpr | BlockExpr) -> dict:
+    if isinstance(target, SymbolExpr):
+        return {
+            "kind": "symbol",
+            "symbol": target.symbol,
+            "addend": target.addend,
+        }
+    if isinstance(target, BlockExpr):
+        return {
+            "kind": "block",
+            "function": target.function,
+            "label": target.label,
+            "addend": target.addend,
+        }
+    raise UserImageError(
+        f"unsupported image relocation target: {type(target).__name__}"
+    )
+
+
+def _image_target_from_obj(obj) -> SymbolExpr | BlockExpr:
+    kind = obj.get("kind")
+    if kind == "symbol":
+        return SymbolExpr(
+            obj["symbol"],
+            int(obj.get("addend", 0)),
+        )
+    if kind == "block":
+        return BlockExpr(
+            obj["function"],
+            obj["label"],
+            int(obj.get("addend", 0)),
+        )
+    raise UserImageError(f"unsupported image target kind: {kind!r}")
+
+
+def _module_image_to_obj(image: ModuleImage | None):
+    if image is None:
+        return None
+    return {
+        "objects": [
+            {
+                "name": obj.name,
+                "ty": obj.ty,
+                "data": base64.b64encode(obj.data).decode("ascii"),
+                "align": obj.align,
+                "section": obj.section,
+                "constant": obj.constant,
+                "relocations": [
+                    {
+                        "offset": reloc.offset,
+                        "size": reloc.size,
+                        "target": _image_target_to_obj(reloc.target),
+                    }
+                    for reloc in obj.relocations
+                ],
+            }
+            for obj in image.objects
+        ],
+        "aliases": [
+            {
+                "name": alias.name,
+                "target": _image_target_to_obj(alias.target),
+            }
+            for alias in image.aliases
+        ],
+        "external_data": list(image.external_data),
+        "external_functions": list(image.external_functions),
+        "skipped_linker_metadata": list(image.skipped_linker_metadata),
+        "undef_bytes": image.undef_bytes,
+    }
+
+
+def _module_image_from_obj(obj) -> ModuleImage | None:
+    if obj is None:
+        return None
+    if not isinstance(obj, dict):
+        raise UserImageError("P3 user program image must be an object")
+    objects = []
+    for raw in obj.get("objects", ()):
+        try:
+            data = base64.b64decode(raw["data"], validate=True)
+        except (KeyError, ValueError) as exc:
+            raise UserImageError("invalid user image object data") from exc
+        objects.append(
+            ImageObject(
+                name=raw["name"],
+                ty=raw["ty"],
+                data=data,
+                align=int(raw["align"]),
+                section=raw.get("section"),
+                constant=bool(raw.get("constant", False)),
+                relocations=tuple(
+                    Relocation(
+                        int(reloc["offset"]),
+                        int(reloc["size"]),
+                        _image_target_from_obj(reloc["target"]),
+                    )
+                    for reloc in raw.get("relocations", ())
+                ),
+            )
+        )
+    aliases = tuple(
+        ImageAlias(
+            raw["name"],
+            _image_target_from_obj(raw["target"]),
+        )
+        for raw in obj.get("aliases", ())
+    )
+    if any(not isinstance(alias.target, SymbolExpr) for alias in aliases):
+        raise UserImageError("user image alias target must be a symbol")
+    return ModuleImage(
+        objects=tuple(objects),
+        aliases=aliases,
+        external_data=tuple(obj.get("external_data", ())),
+        external_functions=tuple(obj.get("external_functions", ())),
+        skipped_linker_metadata=tuple(
+            obj.get("skipped_linker_metadata", ())
+        ),
+        undef_bytes=int(obj.get("undef_bytes", 0)),
+    )
+
+
 def program_to_obj(program: UserProgramImage) -> dict:
     return {
         "format": PROGRAM_FORMAT,
@@ -266,6 +398,7 @@ def program_to_obj(program: UserProgramImage) -> dict:
             function_to_obj(function)["function"]
             for function in program.functions
         ],
+        "image": _module_image_to_obj(program.image),
     }
 
 
@@ -284,7 +417,11 @@ def program_from_obj(obj: dict) -> UserProgramImage:
     entry = obj.get("entry")
     if not isinstance(entry, str) or not entry:
         raise UserImageError("P3 user program entry is missing")
-    return UserProgramImage(entry, functions)
+    return UserProgramImage(
+        entry,
+        functions,
+        _module_image_from_obj(obj.get("image")),
+    )
 
 
 def dumps_program(program: UserProgramImage) -> bytes:
