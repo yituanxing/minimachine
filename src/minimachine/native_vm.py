@@ -141,6 +141,26 @@ def _load_library():
         ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint, ctypes.c_uint64
     ]
     lib.mm_vm_mem_write.restype = None
+    lib.mm_vm_mem_fill.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint8, ctypes.c_uint64
+    ]
+    lib.mm_vm_mem_fill.restype = ctypes.c_int
+    lib.mm_vm_mem_copy.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64
+    ]
+    lib.mm_vm_mem_copy.restype = ctypes.c_int
+    lib.mm_vm_mem_move.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64
+    ]
+    lib.mm_vm_mem_move.restype = ctypes.c_int
+    lib.mm_vm_mem_compare.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64
+    ]
+    lib.mm_vm_mem_compare.restype = ctypes.c_int
+    lib.mm_vm_mem_strlen.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint64
+    ]
+    lib.mm_vm_mem_strlen.restype = ctypes.c_uint64
     lib.mm_vm_set_watches.argtypes = [
         ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t
     ]
@@ -177,6 +197,60 @@ class NativeMemory:
             address & MASK64,
             bits,
             value & MASK64,
+        )
+
+
+    def bulk_set(self, dst: int, value: int, size: int) -> None:
+        if size < 0:
+            raise VMError("negative native bulk memset size")
+        if not self._lib.mm_vm_mem_fill(
+            self._handle,
+            dst & MASK64,
+            value & 0xFF,
+            size,
+        ):
+            raise VMError("native bulk memset failed")
+
+    def bulk_copy(self, dst: int, src: int, size: int) -> None:
+        if size < 0:
+            raise VMError("negative native bulk memcpy size")
+        if not self._lib.mm_vm_mem_copy(
+            self._handle,
+            dst & MASK64,
+            src & MASK64,
+            size,
+        ):
+            raise VMError("native bulk memcpy failed")
+
+    def bulk_move(self, dst: int, src: int, size: int) -> None:
+        if size < 0:
+            raise VMError("negative native bulk memmove size")
+        if not self._lib.mm_vm_mem_move(
+            self._handle,
+            dst & MASK64,
+            src & MASK64,
+            size,
+        ):
+            raise VMError("native bulk memmove failed")
+
+    def bulk_compare(self, a: int, b: int, size: int) -> int:
+        if size < 0:
+            raise VMError("negative native bulk memcmp size")
+        return int(
+            self._lib.mm_vm_mem_compare(
+                self._handle,
+                a & MASK64,
+                b & MASK64,
+                size,
+            )
+        )
+
+    def bulk_strlen(self, ptr: int) -> int:
+        return int(
+            self._lib.mm_vm_mem_strlen(
+                self._handle,
+                ptr & MASK64,
+            )
         )
 
 
