@@ -53,6 +53,15 @@ jobs:
           name: minimachine-busybox-ash-carrier-33302954924
           path: ash
 
+      - name: Download current console-read P3 cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33317187138
+          github-token: ${{ github.token }}
+          name: minimachine-linux-p3-console-current-33317187138
+          path: console-refresh
+
       - name: Restart fresh init exec and run ash
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
@@ -64,7 +73,7 @@ jobs:
           timeout --signal=TERM 120 \
           python3 scripts/run-minimachine-linux.py console/llvm/linked.ll \
             --linker-contract configs/linux-6.6.143-minimachine-linker.json \
-            --program-cache-in console/llvm/linux-initramfs-p3-cache.pkl.gz \
+            --program-cache-in console-refresh/linux-initramfs-p3-cache-console-current.pkl.gz \
             --initramfs echo/mmsh-echo.cpio \
             --native-vm \
             --checkpoint-in echo/mmsh-echo-kernel-execve.chk.gz \
