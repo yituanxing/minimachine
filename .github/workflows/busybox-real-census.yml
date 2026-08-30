@@ -51,6 +51,7 @@ jobs:
           sed -ri 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/' .config
           sed -ri 's/^CONFIG_SHA1_HWACCEL=y$/# CONFIG_SHA1_HWACCEL is not set/' .config
           sed -ri 's/^CONFIG_SHA256_HWACCEL=y$/# CONFIG_SHA256_HWACCEL is not set/' .config
+          sed -ri 's/^CONFIG_TC=y$/# CONFIG_TC is not set/' .config
           make oldconfig
           cp .config ../busybox-defconfig-static.config
           /usr/bin/time -f 'BUSYBOX_GCC_BUILD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
