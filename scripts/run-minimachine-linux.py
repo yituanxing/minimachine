@@ -72,6 +72,11 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--stop-on-panic",
+        action="store_true",
+        help="stop immediately after recording the first kernel panic entry",
+    )
+    p.add_argument(
         "--stop-after-user-handoff",
         action="store_true",
         help=(
@@ -1350,6 +1355,7 @@ def main() -> int:
             "run_init_process",
             "try_to_run_init_process",
             "kernel_execve",
+            "panic",
         }
         print(
             "BOOT_EXEC_NATIVE_BOOT_PHASE_TRACE "
@@ -1460,6 +1466,8 @@ def main() -> int:
                 f"args={','.join(f'0x{x:x}' for x in raw_args)}",
                 flush=True,
             )
+            if args.stop_on_panic:
+                raise VMError("native-stop-on-panic: kernel panic entered")
 
         if function == "do_one_initcall":
             frame_size = vm.memory.read(vm.sp + 24, 64)
