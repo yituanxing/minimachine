@@ -1416,6 +1416,7 @@ _DIRECT_RUNTIME_SYMBOLS = (
     "memchr",
     "strcpy",
     "strncpy",
+    "stpcpy",
     "stpncpy",
     "strcasecmp",
     "strncasecmp",
@@ -1592,18 +1593,18 @@ def direct_runtime_callback(symbol: str):
             return 0
         return memchr
 
-    if base in {"strcpy", "strncpy", "stpncpy"}:
+    if base in {"strcpy", "stpcpy", "strncpy", "stpncpy"}:
         def string_copy(vm: VM, args: tuple[int, ...]):
-            if base == "strcpy":
+            if base in {"strcpy", "stpcpy"}:
                 if len(args) != 2:
-                    raise VMError("strcpy expects dst,src")
+                    raise VMError(f"{base} expects dst,src")
                 dst, src = args
                 i = 0
                 while True:
                     byte = vm.memory.read(src + i, 8)
                     vm.memory.write(dst + i, 8, byte)
                     if byte == 0:
-                        return dst
+                        return dst + i if base == "stpcpy" else dst
                     i += 1
 
             if len(args) != 3:
