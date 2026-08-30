@@ -1,0 +1,58 @@
+name: Native Checkpoint Round Trip
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/native-checkpoint-roundtrip.yml
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared native/p3vm.c -o build/libminimachine_p3vm.so
+      - name: Native checkpoint save restore
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from src.minimachine import muir
+          from src.minimachine.abi import expand_function
+          from src.minimachine.lower_p3 import lower_function
+          from src.minimachine.vm import Program
+          from src.minimachine.native_vm import NativeVM
+          from src.minimachine.checkpoint import save_checkpoint, load_checkpoint
+
+          fn = muir.Function(
+              "idle",
+              [muir.Block("entry", [muir.Ret(muir.Imm(0))])],
+              set(),
+              (),
+          )
+          expanded, _ = expand_function(fn)
+          program = Program([lower_function(expanded)])
+          vm = NativeVM(program)
+          vm.enter_function("idle", (), stack_top=0x0f000000, result_count=1)
+          vm.memory.write(0x12345000, 64, 0x1122334455667788)
+          vm.memory.write(0x90001008, 32, 0xaabbccdd)
+          vm.steps = 123456
+          path = Path("/tmp/native.chk.gz")
+          save_checkpoint(vm, path, image_sha256="native-roundtrip")
+
+          vm.memory.write(0x12345000, 64, 0)
+          vm.memory.write(0x90001008, 32, 0)
+          vm.steps = 1
+          load_checkpoint(vm, path, image_sha256="native-roundtrip")
+
+          assert vm.memory.read(0x12345000, 64) == 0x1122334455667788
+          assert vm.memory.read(0x90001008, 32) == 0xaabbccdd
+          assert vm.steps == 123456
+          print("NATIVE_CHECKPOINT_ROUNDTRIP PASS", path.stat().st_size)
+          PY
