@@ -2688,6 +2688,91 @@ def main() -> int:
             flush=True,
         )
 
+        if signed == 0 and args.restart_run_init_after_checkpoint:
+            current_addr = vm.program.symbol_addresses.get(
+                "minimachine_current_task"
+            )
+            if current_addr is None:
+                print(
+                    "BOOT_EXEC_BLOCKED stage=exec-return-to-user "
+                    "error=missing-minimachine_current_task",
+                    flush=True,
+                )
+                return 1
+            current = vm.memory.read(current_addr, 64)
+            if not current:
+                print(
+                    "BOOT_EXEC_BLOCKED stage=exec-return-to-user "
+                    "error=null-current-task",
+                    flush=True,
+                )
+                return 1
+            if "task_stack_page" not in vm.program.functions:
+                print(
+                    "BOOT_EXEC_BLOCKED stage=exec-return-to-user "
+                    "error=missing-task_stack_page",
+                    flush=True,
+                )
+                return 1
+            if "minimachine_enter_userspace" not in vm.program.functions:
+                print(
+                    "BOOT_EXEC_BLOCKED stage=exec-return-to-user "
+                    "error=missing-minimachine_enter_userspace",
+                    flush=True,
+                )
+                return 1
+
+            try:
+                stack_base, = _call_linux_function_preserving_control(
+                    vm,
+                    "task_stack_page",
+                    (current,),
+                    result_count=1,
+                    max_extra_steps=500_000,
+                )
+            except VMError as exc:
+                print(
+                    "BOOT_EXEC_BLOCKED stage=exec-return-to-user "
+                    f"error=task-stack-page:{exc}",
+                    flush=True,
+                )
+                return 1
+
+            # Exact MiniMachine arch contract:
+            # THREAD_SIZE=16 KiB and struct pt_regs is 12 x u64 = 96 bytes.
+            regs = (stack_base + 16384 - 96) & ((1 << 64) - 1)
+            status = vm.memory.read(regs + 80, 64)
+            print(
+                "BOOT_EXEC_INIT_RETURN_TO_USER "
+                f"current=0x{current:x} stack_base=0x{stack_base:x} "
+                f"regs=0x{regs:x} status=0x{status:x}",
+                flush=True,
+            )
+            if not (status & 1):
+                print(
+                    "BOOT_EXEC_BLOCKED stage=exec-return-to-user "
+                    f"error=pt-regs-not-user status=0x{status:x}",
+                    flush=True,
+                )
+                return 1
+
+            vm.enter_function(
+                "minimachine_enter_userspace",
+                (regs,),
+                stack_top=0x0F00_0000,
+                result_count=0,
+            )
+            try:
+                vm.run(max_steps=0 if args.native_vm else args.max_steps)
+            except VMError as exc:
+                print(
+                    "BOOT_EXEC_BLOCKED stage=userspace-after-exec "
+                    f"steps={vm.steps} function={vm.current_function} "
+                    f"block={vm.current_block} ip={vm.ip} error={exc}",
+                    flush=True,
+                )
+                return 1
+
     print(
         "BOOT_EXEC_HALTED "
         f"steps={vm.steps} function={vm.current_function} "
