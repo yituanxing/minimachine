@@ -1148,14 +1148,52 @@ def user_syscall(vm, args: tuple[int, ...]):
     }
 
     result = None
-    if "minimachine_user_syscall" in vm.program.functions:
-        result, = _call_linux_function_preserving_control(
-            vm,
-            "minimachine_user_syscall",
-            tuple(args),
-            result_count=1,
-            max_extra_steps=8_000_000,
-        )
+    read_watch_previous = None
+    if nr == 63:
+        descriptor = vm.program.symbol_addresses.get("memcpy")
+        linked_memcpy = vm.program.functions.get("memcpy")
+        p3_entry = 0
+        if linked_memcpy is not None and linked_memcpy.function.blocks:
+            p3_entry = vm.program.block_code.get(
+                ("memcpy", linked_memcpy.function.blocks[0].label),
+                0,
+            )
+        if descriptor is not None:
+            live_entry = vm.memory.read(descriptor, 64)
+            initial_entry = vm.program.initial_memory.read(descriptor, 64)
+            host_symbol = vm.program.host_code.get(live_entry, "<none>")
+            print(
+                "BOOT_EXEC_USER_READ_MEMCPY_DESCRIPTOR "
+                f"descriptor=0x{descriptor:x} "
+                f"live_entry=0x{live_entry:x} "
+                f"initial_entry=0x{initial_entry:x} "
+                f"p3_entry=0x{p3_entry:x} "
+                f"host={host_symbol}",
+                flush=True,
+            )
+        if (
+            p3_entry
+            and hasattr(vm, "set_watch_codes")
+        ):
+            read_watch_previous = tuple(
+                getattr(vm, "_watch_codes", ())
+            )
+            vm.trace_user_read_memcpy_code = p3_entry
+            vm.set_watch_codes(read_watch_previous + (p3_entry,))
+
+    try:
+        if "minimachine_user_syscall" in vm.program.functions:
+            result, = _call_linux_function_preserving_control(
+                vm,
+                "minimachine_user_syscall",
+                tuple(args),
+                result_count=1,
+                max_extra_steps=8_000_000,
+            )
+    finally:
+        if read_watch_previous is not None:
+            vm.set_watch_codes(read_watch_previous)
+            vm.trace_user_read_memcpy_code = None
 
     signed_result = (
         result - (1 << 64)
@@ -2878,7 +2916,26 @@ def main() -> int:
 
     def traced_set_code(code: int) -> None:
         function = traced_entry_codes.get(code)
+        trace_memcpy = (
+            getattr(vm, "trace_user_read_memcpy_code", None) == code
+        )
         original_set_code(code)
+        if trace_memcpy:
+            linked = vm.program.functions.get("memcpy")
+            if linked is not None:
+                frame_size = vm.memory.read(vm.sp + FRAME_SIZE, 64)
+                argc = vm.memory.read(vm.sp + ARG_COUNT, 64)
+                arg_base = vm.sp + frame_size
+                raw_args = tuple(
+                    vm.memory.read(arg_base + i * 8, 64)
+                    for i in range(min(int(argc), 6))
+                )
+                print(
+                    "BOOT_EXEC_USER_READ_MEMCPY_ENTRY "
+                    f"sp=0x{vm.sp:x} frame_size={frame_size} argc={argc} "
+                    f"args={','.join(f'0x{x:x}' for x in raw_args)}",
+                    flush=True,
+                )
         if function is not None:
             observe_function_entry(function)
 
