@@ -22,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross qemu-user
 
       - name: Download exact frozen Linux artifact
         uses: actions/download-artifact@v4
@@ -35,6 +35,7 @@ jobs:
 
       - name: Probe Linux stat wrappers and libc layout
         run: |
+          set -o pipefail
           grep -E '^define .*@(.*newfstatat|.*fstat|.*statx)' exact/llvm/linked.ll \
             | head -80 | tee build-stat-symbols.txt || true
 
