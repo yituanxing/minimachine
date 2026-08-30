@@ -23,7 +23,6 @@ _LOWERING_FINGERPRINT_FILES = (
     "p3.py",
     "verify.py",
     "image.py",
-    "runtime.py",
 )
 
 

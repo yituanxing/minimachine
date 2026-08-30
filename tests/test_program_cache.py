@@ -11,6 +11,7 @@ from src.minimachine.program_cache import (
     ProgramCacheError,
     load_program_cache,
     save_program_cache,
+    _LOWERING_FINGERPRINT_FILES,
 )
 from src.minimachine.runtime import RuntimeSurface, install_runtime
 from src.minimachine.vm import Program
@@ -76,6 +77,12 @@ class ProgramCacheTests(unittest.TestCase):
         install_runtime(restored.program, restored.surface)
         self.assertIn("__mm_llvm_va_end", restored.program.host_services)
         self.assertIn("__mm_sys_fence", restored.program.host_services)
+
+    def test_runtime_callbacks_do_not_invalidate_lowering_cache(self):
+        self.assertNotIn("runtime.py", _LOWERING_FINGERPRINT_FILES)
+        self.assertIn("legalize.py", _LOWERING_FINGERPRINT_FILES)
+        self.assertIn("abi.py", _LOWERING_FINGERPRINT_FILES)
+        self.assertIn("lower_p3.py", _LOWERING_FINGERPRINT_FILES)
 
     def test_rejects_other_linked_image(self):
         cache = self.cache()
