@@ -146,6 +146,14 @@ def parse_args():
         help="probe live Linux rootfs paths and current task after checkpoint restore",
     )
     p.add_argument(
+        "--probe-run-init-after-checkpoint",
+        action="store_true",
+        help=(
+            "after checkpoint restore/injection, call Linux "
+            "run_init_process('/init'), report the exact return code, and exit"
+        ),
+    )
+    p.add_argument(
         "--skip-prepare-namespace-after-inject",
         action="store_true",
         help=(
@@ -1849,6 +1857,46 @@ def main() -> int:
             f"function={vm.current_function} block={vm.current_block} ip={vm.ip}",
             flush=True,
         )
+
+        if args.probe_run_init_after_checkpoint:
+            if "run_init_process" not in vm.program.functions:
+                print(
+                    "BOOT_EXEC_BLOCKED stage=init-exec-probe "
+                    "error=missing-run_init_process",
+                    flush=True,
+                )
+                return 1
+            guest_path = b"/init\0"
+            path_ptr = vm.alloc_bytes(len(guest_path), align=8)
+            bulk_write = getattr(vm.memory, "bulk_write", None)
+            if bulk_write is not None:
+                bulk_write(path_ptr, guest_path)
+            else:
+                for i, byte in enumerate(guest_path):
+                    vm.memory.write(path_ptr + i, 8, byte)
+            try:
+                result, = _call_linux_function_preserving_control(
+                    vm,
+                    "run_init_process",
+                    (path_ptr,),
+                    result_count=1,
+                    max_extra_steps=20_000_000,
+                )
+            except VMError as exc:
+                print(
+                    "BOOT_EXEC_BLOCKED stage=init-exec-probe "
+                    f"error={exc}",
+                    flush=True,
+                )
+                return 1
+            signed = result - (1 << 64) if result & (1 << 63) else result
+            print(
+                "BOOT_EXEC_INIT_EXEC_PROBE "
+                f"path=/init result={signed} raw=0x{result:x} "
+                f"steps={vm.steps}",
+                flush=True,
+            )
+            return 0
 
     if args.probe_kallsyms is not None:
         symbol = args.probe_kallsyms
