@@ -16,6 +16,12 @@ from src.minimachine.layout import DataLayout
 from src.minimachine.legalize import _register_metadata, legalize_function
 from src.minimachine.llvm_text import parse_module
 from src.minimachine.lower_p3 import lower_function
+from src.minimachine.program_cache import (
+    PROGRAM_CACHE_VERSION,
+    ProgramCache,
+    lowering_fingerprint,
+    save_program_cache,
+)
 from src.minimachine.verify import verify_muir, verify_p3
 from src.minimachine.vm import LinkedFunction
 
@@ -56,8 +62,12 @@ def main() -> int:
     with gzip.open(args.cache_in, "rb") as handle:
         payload = pickle.load(handle)
     cache = payload.get("cache")
-    if cache is None:
-        raise SystemExit("cache payload is missing 'cache'")
+    if not isinstance(cache, ProgramCache):
+        raise SystemExit("cache payload is missing a ProgramCache")
+    if cache.image_sha256 != __import__(
+        "hashlib"
+    ).sha256(llvm_text.encode("utf-8")).hexdigest():
+        raise SystemExit("cache linked-image fingerprint mismatch")
     program = cache.program
     old = program.functions.get(args.function)
     if old is None:
@@ -113,9 +123,7 @@ def main() -> int:
         {block.label: block for block in current_p3.blocks},
     )
 
-    args.cache_out.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(args.cache_out, "wb", compresslevel=3) as handle:
-        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    save_program_cache(cache, args.cache_out)
 
     print(
         "P3_CACHE_FUNCTION_REFRESH "
@@ -123,7 +131,9 @@ def main() -> int:
         f"blocks={len(new_labels)} frame={old.frame_size} "
         f"old_symbol_refs={old_symbol_refs} "
         f"new_symbol_refs={new_symbol_refs} "
-        f"cache_version={payload.get('version')}"
+        f"legacy_cache_version={payload.get('version')} "
+        f"cache_version={PROGRAM_CACHE_VERSION} "
+        f"lowering_sha256={lowering_fingerprint()}"
     )
     return 0
 
