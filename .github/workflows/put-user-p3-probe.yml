@@ -47,9 +47,19 @@ jobs:
           ll=Path("exact/llvm/linked.ll").read_text()
           c=load_program_cache(Path("fixed/fixed-linux-p3-cache.pkl.gz"), image_sha256=image_fingerprint(ll))
           program=c.program
+          target="__put_user_fn.5658"
+          print("LLVM_TARGET_BEGIN", target)
+          active=False
+          for line in ll.splitlines():
+              if not active and line.startswith("define ") and f"@{target}(" in line:
+                  active=True
+              if active:
+                  print(line)
+                  if line.strip()=="}":
+                      break
+          print("LLVM_TARGET_END", target)
           names=[n for n in program.functions if n.startswith("__put_user_fn")]
           print("PUT_USER_FUNCTIONS", names)
-          target="__put_user_fn.5658"
           fn=program.functions[target].function
           print("TARGET", target, "blocks", len(fn.blocks), "frame_slots", len(fn.frame_slots))
 
