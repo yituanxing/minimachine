@@ -418,6 +418,12 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
         "read": (63, 3),
         "write": (64, 3),
         "_exit": (93, 1),
+        "getpid": (172, 0),
+        "getppid": (173, 0),
+        "getuid": (174, 0),
+        "geteuid": (175, 0),
+        "getgid": (176, 0),
+        "getegid": (177, 0),
         "execve": (221, 3),
     }
     syscall_spec = syscall_map.get(original)
