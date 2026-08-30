@@ -391,10 +391,7 @@ class LegalizerTests(unittest.TestCase):
 
             define i64 @probe(i64 %count) {
             entry:
-              %got = call i64 asm sideeffect "ecall", "=r,r,r,r,~{memory}"(
-                  i64 4,
-                  i64 ptrtoint (ptr @console_buffer to i64),
-                  i64 %count)
+              %got = call i64 asm sideeffect "ecall", "=r,r,r,r,~{memory}"(i64 4, i64 ptrtoint (ptr @console_buffer to i64), i64 %count)
               ret i64 %got
             }
             """
