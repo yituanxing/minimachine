@@ -1,0 +1,38 @@
+name: LLVM Argument Parser Regression
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/llvm_text.py
+      - tests/test_llvm_text.py
+      - .github/workflows/llvm-arg-parser-regression.yml
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run parser regression
+        run: python3 -m pytest -q tests/test_llvm_text.py
+      - name: Verify exact build_open_how formal count
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: exact
+      - name: Check exact LLVM parse
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from src.minimachine.llvm_text import parse_module
+          text=Path("exact/llvm/linked.ll").read_text()
+          functions={fn.name:fn for fn in parse_module(text)}
+          fn=functions["build_open_how"]
+          print("BUILD_OPEN_HOW_ARGS", fn.args)
+          assert fn.args == ("%0","%1","%2"), fn.args
+          PY
