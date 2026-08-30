@@ -374,6 +374,67 @@ def _fusable_icmp_results(
     return fused
 
 
+def _compiletime_is_constant_guards(
+    fn: TextFunction,
+    uses: Counter[str],
+) -> dict[str, int]:
+    """Fold llvm.is.constant only when it guards a pure compile-time assert.
+
+    Linux uses __builtin_constant_p in helpers such as __put_user_fn to make
+    invalid source usages fail at build time, then separately keeps a runtime
+    switch that validates the actual width.  The textual LLVM can retain the
+    llvm.is.constant query after the optimization stage that would normally
+    discharge it.  MiniMachine cannot reconstruct compiler provenance at
+    runtime, so only this structurally compile-time-only guard is folded.
+    """
+
+    blocks = {block.label: block for block in fn.blocks}
+
+    def is_compiletime_assert_block(label: str) -> bool:
+        block = blocks.get(label)
+        if block is None:
+            return False
+        has_assert = any(
+            inst.opcode == "call" and "@__compiletime_assert_" in inst.text
+            for inst in block.instructions
+        )
+        has_unreachable = any(
+            inst.opcode == "unreachable" for inst in block.instructions
+        )
+        return has_assert and has_unreachable
+
+    forced: dict[str, int] = {}
+    for block in fn.blocks:
+        instructions = block.instructions
+        for index, inst in enumerate(instructions[:-1]):
+            if (
+                inst.opcode != "call"
+                or inst.result is None
+                or "llvm.is.constant." not in inst.text
+                or uses[inst.result] != 1
+            ):
+                continue
+            branch = instructions[index + 1]
+            if branch.opcode != "br":
+                continue
+            m = re.fullmatch(
+                rf"br\s+i1\s+{re.escape(inst.result)}\s*,\s*"
+                r"label\s+%([-A-Za-z$._0-9]+)\s*,\s*"
+                r"label\s+%([-A-Za-z$._0-9]+)",
+                re.sub(r"\s+", " ", branch.text.strip()),
+            )
+            if not m:
+                continue
+            true_label, false_label = m.groups()
+            true_assert = is_compiletime_assert_block(true_label)
+            false_assert = is_compiletime_assert_block(false_label)
+            if false_assert and not true_assert:
+                forced[inst.result] = 1
+            elif true_assert and not false_assert:
+                forced[inst.result] = 0
+    return forced
+
+
 def _split_top_commas(text: str) -> list[str]:
     parts = []
     start = 0
@@ -1699,6 +1760,7 @@ def legalize_function(
     load_store_address_uses = _load_store_address_uses(fn)
     defs = _result_defs(fn)
     fusable_icmps = _fusable_icmp_results(fn, uses, defs)
+    compiletime_is_constant_guards = _compiletime_is_constant_guards(fn, uses)
     frame_slots = {arg[1:] for arg in fn.args}
     aliases: dict[str, muir.Address] = {}
     aggregate_results: dict[str, tuple[tuple[muir.Slot, muir.Width], ...]] = {}
@@ -2428,6 +2490,25 @@ def legalize_function(
 
                 if op == "call":
                     kind, symbol, args, callee_slot = _parse_call(inst, layout)
+
+                    if (
+                        kind == "direct"
+                        and symbol is not None
+                        and symbol.startswith("llvm.is.constant.")
+                        and inst.result in compiletime_is_constant_guards
+                    ):
+                        if result is None:
+                            raise ValueError("llvm.is.constant guard has no result")
+                        out.append(
+                            muir.Mov(
+                                muir.Width.I8,
+                                result,
+                                muir.Imm(
+                                    compiletime_is_constant_guards[inst.result]
+                                ),
+                            )
+                        )
+                        continue
 
                     if (
                         kind == "direct"
