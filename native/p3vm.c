@@ -94,6 +94,12 @@ typedef struct {
     size_t inst_count;
     const MMBlock *blocks;
     size_t block_count;
+} MMSegment;
+
+typedef struct {
+    MMSegment *segments;
+    size_t segment_count;
+    size_t segment_capacity;
     const uint64_t *host_codes;
     size_t host_count;
     uint64_t *watch_codes;
@@ -110,6 +116,7 @@ typedef struct {
     MMPage *cached_page;
     int cached_page_valid;
     uint64_t cached_block_code;
+    size_t cached_segment_index;
     size_t cached_block_index;
     int cached_block_valid;
 } MMVM;
@@ -328,14 +335,29 @@ static uint64_t mem_strlen_bytes(MMVM *vm, uint64_t addr) {
     }
 }
 
-static int find_block(MMVM *vm, uint64_t code, size_t *idx) {
-    size_t lo = 0, hi = vm->block_count;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        uint64_t c = vm->blocks[mid].code;
-        if (c == code) { *idx = mid; return 1; }
-        if (c < code) lo = mid + 1;
-        else hi = mid;
+static int find_block(MMVM *vm, uint64_t code,
+                      size_t *segment_index, size_t *idx) {
+    for (size_t si = 0; si < vm->segment_count; ++si) {
+        const MMSegment *segment = &vm->segments[si];
+        if (!segment->block_count)
+            continue;
+        uint64_t first_code = segment->blocks[0].code;
+        uint64_t last_code = segment->blocks[segment->block_count - 1].code;
+        if (code < first_code || code > last_code)
+            continue;
+
+        size_t lo = 0, hi = segment->block_count;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            uint64_t c = segment->blocks[mid].code;
+            if (c == code) {
+                *segment_index = si;
+                *idx = mid;
+                return 1;
+            }
+            if (c < code) lo = mid + 1;
+            else hi = mid;
+        }
     }
     return 0;
 }
@@ -429,10 +451,17 @@ MMVM *mm_vm_create(const MMInst *insts, size_t inst_count,
                    uint64_t halt_code) {
     MMVM *vm = (MMVM *)calloc(1, sizeof(*vm));
     if (!vm) return NULL;
-    vm->insts = insts;
-    vm->inst_count = inst_count;
-    vm->blocks = blocks;
-    vm->block_count = block_count;
+    vm->segments = (MMSegment *)calloc(1, sizeof(*vm->segments));
+    if (!vm->segments) {
+        free(vm);
+        return NULL;
+    }
+    vm->segment_capacity = 1;
+    vm->segment_count = 1;
+    vm->segments[0].insts = insts;
+    vm->segments[0].inst_count = inst_count;
+    vm->segments[0].blocks = blocks;
+    vm->segments[0].block_count = block_count;
     vm->host_codes = host_codes;
     vm->host_count = host_count;
     vm->halt_code = halt_code;
@@ -444,13 +473,40 @@ int mm_vm_replace_program(MMVM *vm,
                           const MMBlock *blocks, size_t block_count,
                           const uint64_t *host_codes, size_t host_count,
                           uint64_t halt_code) {
-    vm->insts = insts;
-    vm->inst_count = inst_count;
-    vm->blocks = blocks;
-    vm->block_count = block_count;
+    if (!vm || !vm->segments)
+        return 0;
+    vm->segments[0].insts = insts;
+    vm->segments[0].inst_count = inst_count;
+    vm->segments[0].blocks = blocks;
+    vm->segments[0].block_count = block_count;
+    vm->segment_count = 1;
     vm->host_codes = host_codes;
     vm->host_count = host_count;
     vm->halt_code = halt_code;
+    vm->cached_block_valid = 0;
+    return 1;
+}
+
+int mm_vm_add_segment(MMVM *vm,
+                      const MMInst *insts, size_t inst_count,
+                      const MMBlock *blocks, size_t block_count) {
+    if (!vm || !blocks || !block_count)
+        return 0;
+    if (vm->segment_count == vm->segment_capacity) {
+        size_t next_capacity = vm->segment_capacity ? vm->segment_capacity * 2 : 2;
+        MMSegment *next = (MMSegment *)realloc(
+            vm->segments, next_capacity * sizeof(*next)
+        );
+        if (!next)
+            return 0;
+        vm->segments = next;
+        vm->segment_capacity = next_capacity;
+    }
+    MMSegment *segment = &vm->segments[vm->segment_count++];
+    segment->insts = insts;
+    segment->inst_count = inst_count;
+    segment->blocks = blocks;
+    segment->block_count = block_count;
     vm->cached_block_valid = 0;
     return 1;
 }
@@ -477,6 +533,7 @@ void mm_vm_destroy(MMVM *vm) {
     if (!vm) return;
     clear_pages(vm);
     free(vm->watch_codes);
+    free(vm->segments);
     free(vm);
 }
 
@@ -594,28 +651,31 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
     r.status = MM_STATUS_LIMIT;
 
     while (vm->steps < max_steps) {
-        size_t bi;
+        size_t si, bi;
         if (vm->cached_block_valid &&
             vm->cached_block_code == vm->block_code) {
+            si = vm->cached_segment_index;
             bi = vm->cached_block_index;
         } else {
-            if (!find_block(vm, vm->block_code, &bi)) {
+            if (!find_block(vm, vm->block_code, &si, &bi)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = MM_ERR_BAD_BLOCK;
                 break;
             }
             vm->cached_block_code = vm->block_code;
+            vm->cached_segment_index = si;
             vm->cached_block_index = bi;
             vm->cached_block_valid = 1;
         }
-        const MMBlock *block = &vm->blocks[bi];
+        const MMSegment *segment = &vm->segments[si];
+        const MMBlock *block = &segment->blocks[bi];
         if (vm->ip >= block->count) {
             r.status = MM_STATUS_ERROR;
             r.error = MM_ERR_FALLOFF;
             break;
         }
 
-        const MMInst *in = &vm->insts[block->first + vm->ip];
+        const MMInst *in = &segment->insts[block->first + vm->ip];
         vm->steps++;
 
         if (in->opcode == MM_OP_MOV) {
@@ -711,8 +771,8 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
                 break;
             }
 
-            size_t target_index;
-            if (!find_block(vm, target, &target_index)) {
+            size_t target_segment, target_index;
+            if (!find_block(vm, target, &target_segment, &target_index)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = MM_ERR_BAD_TARGET;
                 r.target_code = target;
@@ -721,6 +781,7 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
             vm->block_code = target;
             vm->ip = 0;
             vm->cached_block_code = target;
+            vm->cached_segment_index = target_segment;
             vm->cached_block_index = target_index;
             vm->cached_block_valid = 1;
             continue;

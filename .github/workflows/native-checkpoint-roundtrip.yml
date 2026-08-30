@@ -79,3 +79,59 @@ jobs:
           assert vm.steps == 123456
           print("NATIVE_CHECKPOINT_ROUNDTRIP PASS", path.stat().st_size)
           PY
+
+      - name: Native append-only program segment
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 - <<'PY'
+          from src.minimachine import muir
+          from src.minimachine.abi import expand_function
+          from src.minimachine.lower_p3 import lower_function
+          from src.minimachine.vm import Program
+          from src.minimachine.native_vm import NativeVM
+
+          def machine(fn):
+              expanded, _ = expand_function(fn)
+              return lower_function(expanded)
+
+          base = muir.Function(
+              "base",
+              [muir.Block("entry", [muir.Ret(muir.Imm(1))])],
+              set(),
+              (),
+          )
+          dynamic = muir.Function(
+              "dynamic",
+              [
+                  muir.Block(
+                      "entry",
+                      [
+                          muir.Br(
+                              muir.Width.I64,
+                              muir.Cond.EQ,
+                              muir.Slot("x"),
+                              muir.Imm(0),
+                              muir.Target(label="zero"),
+                              muir.Target(label="nonzero"),
+                          )
+                      ],
+                  ),
+                  muir.Block("zero", [muir.Ret(muir.Imm(7))]),
+                  muir.Block("nonzero", [muir.Ret(muir.Imm(9))]),
+              ],
+              {"x"},
+              ("x",),
+          )
+
+          program = Program([machine(base)])
+          vm = NativeVM(program)
+          assert vm.run_function("base", ()) == (1,)
+
+          program.add_function(machine(dynamic))
+          assert vm.run_function("dynamic", (0,)) == (7,)
+          assert vm.run_function("dynamic", (1,)) == (9,)
+          assert vm.run_function("base", ()) == (1,)
+          assert len(vm._extra_packed) == 1
+          print("NATIVE_PROGRAM_SEGMENT_APPEND PASS")
+          PY

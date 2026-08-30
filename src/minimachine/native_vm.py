@@ -127,6 +127,12 @@ def _load_library():
         ctypes.c_uint64,
     ]
     lib.mm_vm_replace_program.restype = ctypes.c_int
+    lib.mm_vm_add_segment.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(CInst), ctypes.c_size_t,
+        ctypes.POINTER(CBlock), ctypes.c_size_t,
+    ]
+    lib.mm_vm_add_segment.restype = ctypes.c_int
     lib.mm_vm_load_bytes.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_uint64),
@@ -328,6 +334,7 @@ class NativeVM(VM):
     def __init__(self, program, *, stack_top: int = DEFAULT_STACK_TOP):
         self._lib = _load_library()
         self._packed = None
+        self._extra_packed = []
         insts, blocks, hosts = self._pack_program(program)
         handle = self._lib.mm_vm_create(
             insts,
@@ -344,6 +351,8 @@ class NativeVM(VM):
         memory = NativeMemory(self._lib, handle)
         super().__init__(program, memory, stack_top=stack_top)
         self._program_shape = self._shape(program)
+        self._packed_block_codes = set(program.code_block)
+        self._packed_function_names = set(program.functions)
         self._watch_codes: tuple[int, ...] = ()
         self.native_report_every = 0
         self._load_initial_memory(program)
@@ -474,12 +483,22 @@ class NativeVM(VM):
             return out
         raise VMError(f"invalid native branch target: {target!r}")
 
-    def _pack_program(self, program):
+    def _pack_program(
+        self,
+        program,
+        ordered_blocks=None,
+        *,
+        retain=True,
+        log_label="BOOT_EXEC_NATIVE_PACK",
+    ):
         started = time.perf_counter()
         host_by_symbol = {
             symbol: code for code, symbol in program.host_code.items()
         }
-        ordered_blocks = sorted(program.code_block.items())
+        if ordered_blocks is None:
+            ordered_blocks = sorted(program.code_block.items())
+        else:
+            ordered_blocks = list(ordered_blocks)
         total_insts = 0
         for _, (function_name, block_name) in ordered_blocks:
             linked = program.functions[function_name]
@@ -559,10 +578,11 @@ class NativeVM(VM):
 
         host_codes = sorted(program.host_code)
         host_array = (ctypes.c_uint64 * len(host_codes))(*host_codes)
-        self._packed = (inst_array, block_array, host_array)
+        if retain:
+            self._packed = (inst_array, block_array, host_array)
         elapsed = time.perf_counter() - started
         print(
-            "BOOT_EXEC_NATIVE_PACK "
+            f"{log_label} "
             f"seconds={elapsed:.3f} insts={total_insts} "
             f"blocks={len(ordered_blocks)} hosts={len(host_codes)} "
             f"inst_bytes={ctypes.sizeof(CInst) * total_insts} "
@@ -575,6 +595,65 @@ class NativeVM(VM):
         shape = self._shape(self.program)
         if shape == self._program_shape:
             return
+
+        current_blocks = set(self.program.code_block)
+        current_functions = set(self.program.functions)
+        new_block_codes = sorted(current_blocks - self._packed_block_codes)
+        new_functions = current_functions - self._packed_function_names
+        append_only = (
+            shape[2] == self._program_shape[2]
+            and self._packed_block_codes.issubset(current_blocks)
+            and self._packed_function_names.issubset(current_functions)
+            and bool(new_block_codes)
+            and bool(new_functions)
+        )
+
+        if append_only:
+            ordered_blocks = [
+                (code, self.program.code_block[code])
+                for code in new_block_codes
+            ]
+            insts, blocks, _hosts = self._pack_program(
+                self.program,
+                ordered_blocks,
+                retain=False,
+                log_label="BOOT_EXEC_NATIVE_APPEND_PACK",
+            )
+            if not self._lib.mm_vm_add_segment(
+                self._handle,
+                insts,
+                len(insts),
+                blocks,
+                len(blocks),
+            ):
+                raise VMError("cannot append native P3 program segment")
+            self._extra_packed.append((insts, blocks))
+
+            for name in sorted(new_functions):
+                descriptor = self.program.symbol_addresses.get(name)
+                if descriptor is None:
+                    continue
+                for offset in range(16):
+                    self.memory.write(
+                        descriptor + offset,
+                        8,
+                        self.program.initial_memory.read(
+                            descriptor + offset,
+                            8,
+                        ),
+                    )
+
+            self._packed_block_codes = current_blocks
+            self._packed_function_names = current_functions
+            self._program_shape = shape
+            print(
+                "BOOT_EXEC_NATIVE_APPEND "
+                f"functions={len(new_functions)} "
+                f"blocks={len(new_block_codes)}",
+                flush=True,
+            )
+            return
+
         insts, blocks, hosts = self._pack_program(self.program)
         if not self._lib.mm_vm_replace_program(
             self._handle,
@@ -587,6 +666,9 @@ class NativeVM(VM):
             self.program.halt_code,
         ):
             raise VMError("cannot refresh native P3 program")
+        self._extra_packed.clear()
+        self._packed_block_codes = current_blocks
+        self._packed_function_names = current_functions
         self._program_shape = shape
         self.set_watch_codes(self._watch_codes)
 
