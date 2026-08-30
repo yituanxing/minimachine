@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import struct
 import zlib
@@ -7,6 +8,7 @@ import zlib
 from . import muir, p3
 
 FORMAT = "minimachine-p3-v1"
+PROGRAM_FORMAT = "minimachine-p3-program-v1"
 
 BFLT_MAGIC = b"bFLT"
 BFLT_VERSION = 4
@@ -15,12 +17,31 @@ BFLT_FLAG_KTRACE = 0x0010
 USER_PAYLOAD_MAGIC = b"MMP3"
 USER_PAYLOAD_VERSION = 1
 USER_PAYLOAD_ZLIB_VERSION = 2
+USER_PROGRAM_PAYLOAD_VERSION = 3
+USER_PROGRAM_PAYLOAD_ZLIB_VERSION = 4
 USER_PAYLOAD_HEADER_SIZE = 12
 BFLT_DATA_ALIGN = 0x20
 
 
 class UserImageError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class UserProgramImage:
+    entry: str
+    functions: tuple[p3.Function, ...]
+
+    def __post_init__(self) -> None:
+        names = tuple(fn.name for fn in self.functions)
+        if not names:
+            raise UserImageError("P3 user program has no functions")
+        if len(set(names)) != len(names):
+            raise UserImageError("P3 user program has duplicate function names")
+        if self.entry not in names:
+            raise UserImageError(
+                f"P3 user program entry is missing: {self.entry}"
+            )
 
 
 def _width(bits: int) -> muir.Width:
@@ -237,6 +258,53 @@ def loads_function(data: bytes) -> p3.Function:
         raise UserImageError("P3 user image must be a JSON object")
     return function_from_obj(obj)
 
+def program_to_obj(program: UserProgramImage) -> dict:
+    return {
+        "format": PROGRAM_FORMAT,
+        "entry": program.entry,
+        "functions": [
+            function_to_obj(function)["function"]
+            for function in program.functions
+        ],
+    }
+
+
+def program_from_obj(obj: dict) -> UserProgramImage:
+    if obj.get("format") != PROGRAM_FORMAT:
+        raise UserImageError(
+            f"unsupported user program format: {obj.get('format')!r}"
+        )
+    raw_functions = obj.get("functions")
+    if not isinstance(raw_functions, list):
+        raise UserImageError("P3 user program functions must be a list")
+    functions = tuple(
+        function_from_obj({"format": FORMAT, "function": fn})
+        for fn in raw_functions
+    )
+    entry = obj.get("entry")
+    if not isinstance(entry, str) or not entry:
+        raise UserImageError("P3 user program entry is missing")
+    return UserProgramImage(entry, functions)
+
+
+def dumps_program(program: UserProgramImage) -> bytes:
+    return json.dumps(
+        program_to_obj(program),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def loads_program(data: bytes) -> UserProgramImage:
+    try:
+        obj = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UserImageError("invalid P3 user program JSON") from exc
+    if not isinstance(obj, dict):
+        raise UserImageError("P3 user program must be a JSON object")
+    return program_from_obj(obj)
+
+
 
 def _align_up(value: int, align: int) -> int:
     if align <= 0 or (align & (align - 1)):
@@ -265,6 +333,65 @@ def pack_user_payload(
     return header + body
 
 
+def pack_user_program(
+    program: UserProgramImage,
+    *,
+    compress: bool = False,
+) -> bytes:
+    raw = dumps_program(program)
+    if compress:
+        body = zlib.compress(raw, level=9)
+        version = USER_PROGRAM_PAYLOAD_ZLIB_VERSION
+    else:
+        body = raw
+        version = USER_PROGRAM_PAYLOAD_VERSION
+    header = struct.pack(
+        ">4sII",
+        USER_PAYLOAD_MAGIC,
+        version,
+        len(body),
+    )
+    return header + body
+
+
+def unpack_user_image(data: bytes) -> UserProgramImage:
+    if len(data) < USER_PAYLOAD_HEADER_SIZE:
+        raise UserImageError("truncated MiniMachine user payload")
+    magic, version, size = struct.unpack(
+        ">4sII", data[:USER_PAYLOAD_HEADER_SIZE]
+    )
+    if magic != USER_PAYLOAD_MAGIC:
+        raise UserImageError(f"bad MiniMachine user payload magic: {magic!r}")
+    supported = {
+        USER_PAYLOAD_VERSION,
+        USER_PAYLOAD_ZLIB_VERSION,
+        USER_PROGRAM_PAYLOAD_VERSION,
+        USER_PROGRAM_PAYLOAD_ZLIB_VERSION,
+    }
+    if version not in supported:
+        raise UserImageError(
+            f"unsupported MiniMachine user payload version: {version}"
+        )
+    end = USER_PAYLOAD_HEADER_SIZE + size
+    if end > len(data):
+        raise UserImageError("truncated MiniMachine user payload body")
+    body = data[USER_PAYLOAD_HEADER_SIZE:end]
+    if version in {
+        USER_PAYLOAD_ZLIB_VERSION,
+        USER_PROGRAM_PAYLOAD_ZLIB_VERSION,
+    }:
+        try:
+            body = zlib.decompress(body)
+        except zlib.error as exc:
+            raise UserImageError(
+                "invalid compressed MiniMachine user payload"
+            ) from exc
+    if version in {USER_PAYLOAD_VERSION, USER_PAYLOAD_ZLIB_VERSION}:
+        function = loads_function(body)
+        return UserProgramImage(function.name, (function,))
+    return loads_program(body)
+
+
 def unpack_user_payload(data: bytes) -> p3.Function:
     if len(data) < USER_PAYLOAD_HEADER_SIZE:
         raise UserImageError("truncated MiniMachine user payload")
@@ -291,17 +418,15 @@ def unpack_user_payload(data: bytes) -> p3.Function:
     return loads_function(body)
 
 
-def build_bflt(
-    function: p3.Function,
+def _wrap_bflt_payload(
+    payload: bytes,
     *,
-    stack_size: int = 64 * 1024,
-    ktrace: bool = False,
-    compress_payload: bool = False,
+    stack_size: int,
+    ktrace: bool,
 ) -> bytes:
     if stack_size <= 0 or stack_size >= (1 << 28):
         raise UserImageError(f"invalid bFLT stack size: {stack_size}")
 
-    payload = pack_user_payload(function, compress=compress_payload)
     entry = BFLT_HEADER_SIZE
     text_end = _align_up(entry + len(payload), BFLT_DATA_ALIGN)
     flags = BFLT_FLAG_KTRACE if ktrace else 0
@@ -331,6 +456,36 @@ def build_bflt(
     image = header + payload
     image += b"\0" * (text_end - len(image))
     return image
+
+
+def build_bflt_program(
+    program: UserProgramImage,
+    *,
+    stack_size: int = 64 * 1024,
+    ktrace: bool = False,
+    compress_payload: bool = False,
+) -> bytes:
+    payload = pack_user_program(program, compress=compress_payload)
+    return _wrap_bflt_payload(
+        payload,
+        stack_size=stack_size,
+        ktrace=ktrace,
+    )
+
+
+def build_bflt(
+    function: p3.Function,
+    *,
+    stack_size: int = 64 * 1024,
+    ktrace: bool = False,
+    compress_payload: bool = False,
+) -> bytes:
+    payload = pack_user_payload(function, compress=compress_payload)
+    return _wrap_bflt_payload(
+        payload,
+        stack_size=stack_size,
+        ktrace=ktrace,
+    )
 
 
 def extract_bflt_payload(image: bytes) -> p3.Function:
