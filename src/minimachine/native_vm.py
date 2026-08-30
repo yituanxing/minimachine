@@ -59,10 +59,12 @@ class CInst(ctypes.Structure):
         ("extend", ctypes.c_uint8),
         ("src_bits", ctypes.c_uint8),
         ("_pad", ctypes.c_uint8 * 3),
-        ("x0", COperand),
-        ("x1", COperand),
-        ("x2", COperand),
-        ("x3", COperand),
+        ("dst", COperand),
+        ("src", COperand),
+        ("a", COperand),
+        ("b", COperand),
+        ("t", COperand),
+        ("f", COperand),
     ]
 
 
@@ -591,14 +593,14 @@ class NativeVM(VM):
                         "trunc": MM_EXT_TRUNC,
                     }[inst.extend]
                     out.src_bits = inst.src_bits or 0
-                    out.x0 = self._operand(inst.dst, linked, program)
-                    out.x1 = self._operand(inst.src, linked, program)
+                    out.dst = self._operand(inst.dst, linked, program)
+                    out.src = self._operand(inst.src, linked, program)
                 elif isinstance(inst, p3.Sub):
                     out.opcode = MM_OP_SUB
                     out.width = inst.width.value
-                    out.x0 = self._operand(inst.dst, linked, program)
-                    out.x1 = self._operand(inst.a, linked, program)
-                    out.x2 = self._operand(inst.b, linked, program)
+                    out.dst = self._operand(inst.dst, linked, program)
+                    out.a = self._operand(inst.a, linked, program)
+                    out.b = self._operand(inst.b, linked, program)
                 elif isinstance(inst, p3.Br):
                     out.opcode = MM_OP_BR
                     out.width = inst.width.value
@@ -607,16 +609,16 @@ class NativeVM(VM):
                         muir.Cond.ULT: MM_COND_ULT,
                         muir.Cond.SLT: MM_COND_SLT,
                     }[inst.cond]
-                    out.x0 = self._operand(inst.a, linked, program)
-                    out.x1 = self._operand(inst.b, linked, program)
-                    out.x2 = self._target(
+                    out.a = self._operand(inst.a, linked, program)
+                    out.b = self._operand(inst.b, linked, program)
+                    out.t = self._target(
                         inst.true_target,
                         function_name,
                         linked,
                         program,
                         host_by_symbol,
                     )
-                    out.x3 = self._target(
+                    out.f = self._target(
                         inst.false_target,
                         function_name,
                         linked,
