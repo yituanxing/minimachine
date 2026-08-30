@@ -81,8 +81,9 @@ def build_init_image() -> bytes:
     return build_bflt(init_fn, stack_size=256 * 1024)
 
 
-def build_cpio() -> tuple[bytes, int]:
-    init_image = build_init_image()
+def build_cpio(init_image: bytes | None = None) -> tuple[bytes, int]:
+    if init_image is None:
+        init_image = build_init_image()
     out = bytearray()
     ino = 1
 
@@ -117,10 +118,20 @@ def main() -> int:
         type=Path,
         help="also write the raw executable /init bFLT image",
     )
+    parser.add_argument(
+        "--init-image",
+        type=Path,
+        help="use this prebuilt bFLT executable as /init",
+    )
     args = parser.parse_args()
 
-    init_image = build_init_image()
-    archive, init_size = build_cpio()
+    if args.init_image is not None:
+        init_image = args.init_image.read_bytes()
+        if not init_image:
+            raise SystemExit("empty --init-image")
+    else:
+        init_image = build_init_image()
+    archive, init_size = build_cpio(init_image)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(archive)
     if args.init_output is not None:
