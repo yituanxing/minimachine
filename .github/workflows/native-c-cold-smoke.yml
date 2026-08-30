@@ -6,6 +6,7 @@ on:
     paths:
       - native/**
       - src/minimachine/native_vm.py
+      - src/minimachine/runtime.py
       - scripts/run-minimachine-linux.py
       - .github/workflows/native-c-cold-smoke.yml
   workflow_dispatch:
