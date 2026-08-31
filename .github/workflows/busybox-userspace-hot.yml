@@ -181,6 +181,7 @@ jobs:
       - name: Resume multicall BusyBox from proven cold checkpoint
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
         run: |
           set -o pipefail
           set +e
