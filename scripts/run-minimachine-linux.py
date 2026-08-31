@@ -1637,6 +1637,33 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 flush=True,
             )
 
+        # Dynamic P3 userspace descriptors/data are machine representation
+        # for this exec image.  Do not append them after the kernel Program data:
+        # Linux owns the RAM immediately following the linked image and may
+        # already have slab/page state there.  Place the dynamic P3 segment in
+        # the task's own post-payload/pre-stack gap instead.
+        user_payload_end = (pc + 12 + size + 15) & ~15
+        kernel_program_data_end = vm.program._next_data
+        if user_payload_end < kernel_program_data_end:
+            raise VMError(
+                "MiniMachine userspace P3 data arena overlaps kernel Program "
+                f"data: user_base=0x{user_payload_end:x} "
+                f"kernel_end=0x{kernel_program_data_end:x}"
+            )
+        if user_payload_end >= user_sp:
+            raise VMError(
+                "MiniMachine userspace P3 data arena has no stack gap: "
+                f"user_base=0x{user_payload_end:x} user_sp=0x{user_sp:x}"
+            )
+        vm.program._next_data = user_payload_end
+        print(
+            "BOOT_EXEC_USER_DATA_ARENA "
+            f"kernel_end=0x{kernel_program_data_end:x} "
+            f"base=0x{user_payload_end:x} limit=0x{user_sp:x} "
+            f"capacity={user_sp - user_payload_end}",
+            flush=True,
+        )
+
         install_user_external_surface(vm, user_image, user_envp)
         trace_user_external_descriptor(vm, "getcwd", "external-surface")
 
@@ -1724,6 +1751,18 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 flush=True,
             )
         trace_user_external_descriptor(vm, "getcwd", "module-image")
+        if vm.program._next_data >= user_sp:
+            raise VMError(
+                "MiniMachine userspace P3 data arena exhausted: "
+                f"end=0x{vm.program._next_data:x} user_sp=0x{user_sp:x}"
+            )
+        print(
+            "BOOT_EXEC_USER_DATA_ARENA_USED "
+            f"base=0x{user_payload_end:x} end=0x{vm.program._next_data:x} "
+            f"bytes={vm.program._next_data - user_payload_end} "
+            f"remaining={user_sp - vm.program._next_data}",
+            flush=True,
+        )
 
         print(
             "BOOT_EXEC_USER_HANDOFF "
