@@ -35,6 +35,7 @@ jobs:
 
       - name: Build full current-lowering P3 cache
         run: |
+          mkdir -p build
           test -s exact/out/minimachine-initramfs.cpio
           set +e
           python3 scripts/run-minimachine-linux.py \
