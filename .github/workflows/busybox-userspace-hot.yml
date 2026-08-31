@@ -144,11 +144,11 @@ jobs:
         run: |
           cat > build/init.sh <<'SH'
           #!/bin/sh
-          echo BUSYBOX_MULTICALL_HOT64_OK
+          echo BUSYBOX_MULTICALL_COLD_OK
           value=42
-          echo BUSYBOX_MULTICALL_HOT64_VAR_$value
+          echo BUSYBOX_MULTICALL_VAR_$value
           false
-          echo BUSYBOX_MULTICALL_HOT64_FALSE_STATUS_$?
+          echo BUSYBOX_MULTICALL_FALSE_STATUS_$?
           exit 0
           SH
           chmod +x build/init.sh
@@ -186,9 +186,9 @@ jobs:
           grep -F 'BOOT_EXEC_USER_HANDOFF ' build/multicall-hot64.log
           grep -F 'function=__mm_user_main functions=3043' build/multicall-hot64.log
           grep -F 'BOOT_EXEC_USER_MALLOPT ' build/multicall-hot64.log
-          grep -Fx 'BUSYBOX_MULTICALL_HOT64_OK' build/multicall-hot64.log
-          grep -Fx 'BUSYBOX_MULTICALL_HOT64_VAR_42' build/multicall-hot64.log
-          grep -Fx 'BUSYBOX_MULTICALL_HOT64_FALSE_STATUS_1' build/multicall-hot64.log
+          grep -Fx 'BUSYBOX_MULTICALL_COLD_OK' build/multicall-hot64.log
+          grep -Fx 'BUSYBOX_MULTICALL_VAR_42' build/multicall-hot64.log
+          grep -Fx 'BUSYBOX_MULTICALL_FALSE_STATUS_1' build/multicall-hot64.log
           grep -F 'BOOT_EXEC_USER_EXIT status=0' build/multicall-hot64.log
           grep -F 'BUSYBOX_MULTICALL_HOT64_STATUS=0' build/multicall-hot64.log
           ! grep -F 'BOOT_EXEC_BLOCKED ' build/multicall-hot64.log
