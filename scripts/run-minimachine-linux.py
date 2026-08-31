@@ -760,6 +760,27 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_strerror
 
+    if original in {"open", "open64"}:
+        def user_open(vm, args):
+            if len(args) not in {2, 3}:
+                raise VMError(f"{original} expects path,flags[,mode]")
+            path, flags = map(int, args[:2])
+            mode = int(args[2]) if len(args) == 3 else 0
+            raw = user_syscall(
+                vm,
+                (
+                    56,  # openat
+                    (-100) & ((1 << 64) - 1),  # AT_FDCWD
+                    path,
+                    flags,
+                    mode,
+                    0,
+                    0,
+                ),
+            )
+            return libc_linux_result(vm, raw)
+        return user_open
+
     if original == "getcwd":
         def user_getcwd(vm, args):
             if len(args) != 2:
@@ -1803,6 +1824,7 @@ def user_syscall(vm, args: tuple[int, ...]):
     fallback = {
         17: ("__se_sys_getcwd", 2),
         49: ("__se_sys_chdir", 1),
+        56: ("__se_sys_openat", 4),
         57: ("__se_sys_close", 1),
         63: ("__se_sys_read", 3),
         64: ("__se_sys_write", 3),
