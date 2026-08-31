@@ -125,6 +125,13 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--inject-init-path",
+        default="/init",
+        help=(
+            "guest path written by --inject-init; defaults to /init"
+        ),
+    )
+    p.add_argument(
         "--inject-initramfs-cpio",
         type=Path,
         help=(
@@ -2361,15 +2368,24 @@ def install_hot_filp_trace(vm) -> None:
     )
 
 
-def inject_live_root_init(vm, path: Path) -> None:
+def inject_live_root_init(
+    vm,
+    path: Path,
+    *,
+    guest_path_text: str = "/init",
+) -> None:
     try:
         data = path.read_bytes()
     except OSError as exc:
-        raise VMError(f"cannot read injected /init image: {exc}") from exc
+        raise VMError(
+            f"cannot read injected rootfs image for {guest_path_text}: {exc}"
+        ) from exc
     if not data:
-        raise VMError("injected /init image is empty")
+        raise VMError(f"injected rootfs image for {guest_path_text} is empty")
+    if not guest_path_text.startswith("/"):
+        raise VMError("--inject-init-path must be absolute")
 
-    guest_path = b"/init\0"
+    guest_path = guest_path_text.encode("utf-8") + b"\0"
     path_ptr = vm.alloc_bytes(len(guest_path), align=8)
     for i, byte in enumerate(guest_path):
         vm.memory.write(path_ptr + i, 8, byte)
@@ -2405,12 +2421,12 @@ def inject_live_root_init(vm, path: Path) -> None:
     )
     print(
         "BOOT_EXEC_ROOTFS_OPEN "
-        f"path=/init file=0x{file_ptr:x} bytes={len(data)}",
+        f"path={guest_path_text} file=0x{file_ptr:x} bytes={len(data)}",
         flush=True,
     )
     if file_ptr >= (1 << 64) - 4095:
         signed = file_ptr - (1 << 64)
-        raise VMError(f"filp_open(/init) failed: {signed}")
+        raise VMError(f"filp_open({guest_path_text}) failed: {signed}")
 
     try:
         written, = _call_linux_function_preserving_control(
@@ -2426,7 +2442,7 @@ def inject_live_root_init(vm, path: Path) -> None:
         if written != len(data):
             signed = written - (1 << 64) if written & (1 << 63) else written
             raise VMError(
-                f"kernel_write(/init) wrote {signed}, expected {len(data)}"
+                f"kernel_write({guest_path_text}) wrote {signed}, expected {len(data)}"
             )
     finally:
         if "__fput_sync" in vm.program.functions:
@@ -2473,11 +2489,13 @@ def inject_live_root_init(vm, path: Path) -> None:
     )
     if access != 0:
         signed = access - (1 << 64) if access & (1 << 63) else access
-        raise VMError(f"init_eaccess(/init) after injection failed: {signed}")
+        raise VMError(
+            f"init_eaccess({guest_path_text}) after injection failed: {signed}"
+        )
 
     print(
         "BOOT_EXEC_ROOTFS_INJECTED "
-        f"path=/init bytes={len(data)} mode=0755",
+        f"path={guest_path_text} bytes={len(data)} mode=0755",
         flush=True,
     )
 
@@ -2863,7 +2881,11 @@ def main() -> int:
                 return 1
         elif args.inject_init is not None:
             try:
-                inject_live_root_init(vm, args.inject_init)
+                inject_live_root_init(
+                    vm,
+                    args.inject_init,
+                    guest_path_text=args.inject_init_path,
+                )
                 if args.skip_prepare_namespace_after_inject:
                     skip_prepare_namespace_after_hot_init(vm)
             except VMError as exc:
