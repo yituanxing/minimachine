@@ -40,6 +40,20 @@ jobs:
           grep -F 'P3_CACHE_FUNCTION_REFRESH function=minimachine_console_read' build/refresh.log
           grep -F 'new_symbol_refs=2' build/refresh.log
 
+      - name: Build full current-lowering P3 cache
+        run: |
+          test -s exact/out/minimachine-initramfs.cpio
+          python3 scripts/run-minimachine-linux.py \
+            exact/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --initramfs exact/out/minimachine-initramfs.cpio \
+            --program-cache-out build/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --probe-kallsyms start_kernel \
+            --max-steps 1 \
+            2>&1 | tee build/full-refresh.log
+          grep -F 'BOOT_EXEC_KALLSYMS_PROBE' build/full-refresh.log
+          test -s build/linux-initramfs-p3-cache-full-current.pkl.gz
+
       - name: Upload refreshed cache
         uses: actions/upload-artifact@v4
         with:
@@ -47,4 +61,6 @@ jobs:
           path: |
             build/linux-initramfs-p3-cache-console-current.pkl.gz
             build/refresh.log
+            build/linux-initramfs-p3-cache-full-current.pkl.gz
+            build/full-refresh.log
           retention-days: 14
