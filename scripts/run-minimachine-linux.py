@@ -1808,6 +1808,56 @@ def linux_ecall(vm, args: tuple[int, ...]):
             vm.program.add_function(function)
         trace_user_external_descriptor(vm, "getcwd", "functions-added")
 
+        parser_needles = (
+            "cmdloop",
+            "parsecmd",
+            "readtoken",
+            "xxreadtoken",
+            "pgetc",
+            "preadbuffer",
+            "pungetc",
+        )
+        parser_codes = {}
+        for parser_name, linked_parser in vm.program.functions.items():
+            lowered_name = parser_name.lower()
+            if not any(needle in lowered_name for needle in parser_needles):
+                continue
+            if not linked_parser.function.blocks:
+                continue
+            entry_block = linked_parser.function.blocks[0].label
+            entry_code = vm.program.block_code.get((parser_name, entry_block))
+            if entry_code is not None:
+                parser_codes[entry_code] = parser_name
+        if parser_codes:
+            vm.trace_user_parser_codes = parser_codes
+            existing_watches = tuple(getattr(vm, "_watch_codes", ()))
+            vm.set_watch_codes(existing_watches + tuple(parser_codes))
+            parser_items = ",".join(
+                f"{name}@0x{code:x}"
+                for code, name in sorted(parser_codes.items(), key=lambda item: item[1])
+            )
+            print(
+                "BOOT_EXEC_USER_PARSER_WATCHES "
+                f"count={len(parser_codes)} functions={parser_items}",
+                flush=True,
+            )
+            xxreadtoken_watch = next(
+                (
+                    code
+                    for code, name in parser_codes.items()
+                    if "xxreadtoken" in name.lower()
+                ),
+                None,
+            )
+            if xxreadtoken_watch is not None:
+                vm.trace_single_step_watch_code = xxreadtoken_watch
+                vm.trace_single_step_count = 800
+                print(
+                    "BOOT_EXEC_USER_XXREADTOKEN_SINGLE_STEP "
+                    f"code=0x{xxreadtoken_watch:x} count=800",
+                    flush=True,
+                )
+
         setpwd_watch = vm.program.block_code.get(
             ("__mm_user_setpwd", "25")
         )
@@ -3803,10 +3853,56 @@ def main() -> int:
 
     def traced_set_code(code: int) -> None:
         function = traced_entry_codes.get(code)
+        parser_function = getattr(
+            vm, "trace_user_parser_codes", {}
+        ).get(code)
         trace_memcpy = (
             getattr(vm, "trace_user_read_memcpy_code", None) == code
         )
         original_set_code(code)
+        if parser_function is not None:
+            parsefile_symbol = vm.program.symbol_addresses.get(
+                "__mm_user_g_parsefile"
+            )
+            parsefile = (
+                vm.memory.read(parsefile_symbol, 64)
+                if parsefile_symbol is not None
+                else 0
+            )
+            if parsefile:
+                next_ptr = vm.memory.read(parsefile + 24, 64)
+                buf_ptr = vm.memory.read(parsefile + 32, 64)
+                left_line = vm.memory.read(parsefile + 16, 32)
+                left_buffer = vm.memory.read(parsefile + 20, 32)
+                lastc0 = vm.memory.read(parsefile + 120, 32)
+                lastc1 = vm.memory.read(parsefile + 124, 32)
+                unget = vm.memory.read(parsefile + 128, 32)
+            else:
+                next_ptr = buf_ptr = 0
+                left_line = left_buffer = lastc0 = lastc1 = unget = -1
+            try:
+                frame_size = vm.memory.read(vm.sp + FRAME_SIZE, 64)
+                argc = vm.memory.read(vm.sp + ARG_COUNT, 64)
+                arg_base = vm.sp + frame_size
+                raw_args = tuple(
+                    vm.memory.read(arg_base + i * 8, 64)
+                    for i in range(min(int(argc), 6))
+                )
+            except Exception:
+                frame_size = argc = -1
+                raw_args = ()
+            print(
+                "BOOT_EXEC_USER_PARSER_ENTRY "
+                f"function={parser_function} code=0x{code:x} "
+                f"sp=0x{vm.sp:x} frame_size={frame_size} argc={argc} "
+                f"args={','.join(f'0x{x:x}' for x in raw_args)} "
+                f"parsefile=0x{parsefile:x} left_line={left_line} "
+                f"left_buffer={left_buffer} next=0x{next_ptr:x} "
+                f"buf=0x{buf_ptr:x} "
+                f"consumed={next_ptr - buf_ptr if next_ptr and buf_ptr else -1} "
+                f"lastc0={lastc0} lastc1={lastc1} unget={unget}",
+                flush=True,
+            )
         if trace_memcpy:
             linked = vm.program.functions.get("memcpy")
             if linked is not None:
