@@ -1392,6 +1392,12 @@ def install_user_external_surface(vm, user_image, envp: int) -> None:
             int(value & ((1 << 64) - 1)).to_bytes(8, "little"),
             align=8,
         )
+        for offset in range(8):
+            vm.memory.write(
+                address + offset,
+                8,
+                vm.program.initial_memory.read(address + offset, 8),
+            )
         installed_data += 1
         print(
             "BOOT_EXEC_USER_EXTERNAL_DATA "
@@ -1407,6 +1413,12 @@ def install_user_external_surface(vm, user_image, envp: int) -> None:
             b"\0" * 8,
             align=8,
         )
+        for offset in range(8):
+            vm.memory.write(
+                errno_address + offset,
+                8,
+                vm.program.initial_memory.read(errno_address + offset, 8),
+            )
 
     installed_functions = 0
     accelerated = 0
@@ -1418,12 +1430,19 @@ def install_user_external_surface(vm, user_image, envp: int) -> None:
         if direct_runtime_callback(original) is not None or original == "bcmp":
             accelerated += 1
         vm.program.register_service(symbol, callback)
+        descriptor = vm.program.symbol_addresses[symbol]
+        for offset in range(16):
+            vm.memory.write(
+                descriptor + offset,
+                8,
+                vm.program.initial_memory.read(descriptor + offset, 8),
+            )
         installed_functions += 1
 
     print(
         "BOOT_EXEC_USER_EXTERNAL_SURFACE "
         f"functions={installed_functions} data={installed_data} "
-        f"portable_accel={accelerated}",
+        f"portable_accel={accelerated} live_descriptors={installed_functions}",
         flush=True,
     )
 
