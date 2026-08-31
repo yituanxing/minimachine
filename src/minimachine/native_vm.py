@@ -948,8 +948,29 @@ class NativeVM(VM):
                                     f"dst={native_inst.dst.kind}/"
                                     f"{native_inst.dst.value}"
                                 )
-                        backing_inst = " backing=" + (
-                            ";".join(matches) if matches else "missing"
+                        linked_runtime = self.program.functions.get(
+                            self.current_function
+                        )
+                        p3_inst = None
+                        if linked_runtime is not None:
+                            runtime_block = linked_runtime.block_map.get(
+                                self.current_block
+                            )
+                            if (
+                                runtime_block is not None
+                                and self.ip < len(runtime_block.instructions)
+                            ):
+                                p3_inst = runtime_block.instructions[self.ip]
+                        p3_width = getattr(
+                            getattr(p3_inst, "width", None), "value", None
+                        )
+                        backing_inst = (
+                            " p3_width="
+                            + str(p3_width)
+                            + " p3_type="
+                            + (type(p3_inst).__name__ if p3_inst is not None else "missing")
+                            + " backing="
+                            + (";".join(matches) if matches else "missing")
                         )
                     parser_slots = ""
                     if self.current_function == "__mm_user_xxreadtoken":
