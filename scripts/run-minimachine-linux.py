@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 import re
@@ -1695,6 +1697,47 @@ def linux_ecall(vm, args: tuple[int, ...]):
         if size > 16 * 1024 * 1024:
             raise VMError(f"MiniMachine user payload too large: {size}")
         payload = bytes(vm.memory.read(pc + i, 8) for i in range(12 + size))
+        reference_path = os.environ.get("MINIMACHINE_USER_IMAGE_REFERENCE")
+        if reference_path:
+            reference_blob = Path(reference_path).read_bytes()
+            if len(reference_blob) < 64:
+                raise VMError(
+                    "MiniMachine userspace reference image is truncated: "
+                    f"path={reference_path} bytes={len(reference_blob)}"
+                )
+            reference_data_start = int.from_bytes(
+                reference_blob[12:16], "big"
+            )
+            reference_payload = reference_blob[64:reference_data_start]
+            guest_hash = hashlib.sha256(payload).hexdigest()
+            reference_hash = hashlib.sha256(reference_payload).hexdigest()
+            mismatch = next(
+                (
+                    index
+                    for index, (guest_byte, reference_byte) in enumerate(
+                        zip(payload, reference_payload)
+                    )
+                    if guest_byte != reference_byte
+                ),
+                None,
+            )
+            if mismatch is None and len(payload) != len(reference_payload):
+                mismatch = min(len(payload), len(reference_payload))
+            if mismatch is None:
+                guest_window = reference_window = "-"
+            else:
+                start = max(0, mismatch - 16)
+                end = mismatch + 17
+                guest_window = payload[start:end].hex()
+                reference_window = reference_payload[start:end].hex()
+            print(
+                "BOOT_EXEC_USER_PAYLOAD_REFERENCE "
+                f"guest_bytes={len(payload)} reference_bytes={len(reference_payload)} "
+                f"guest_sha256={guest_hash} reference_sha256={reference_hash} "
+                f"mismatch={mismatch if mismatch is not None else -1} "
+                f"guest_window={guest_window} reference_window={reference_window}",
+                flush=True,
+            )
         try:
             user_image = unpack_user_image(payload)
         except UserImageError as exc:
