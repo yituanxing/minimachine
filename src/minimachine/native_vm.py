@@ -838,6 +838,11 @@ class NativeVM(VM):
             )
             batch_limit = native_limit
             is_report_boundary = False
+            trace_remaining = int(
+                getattr(self, "_single_step_trace_remaining", 0) or 0
+            )
+            if trace_remaining > 0:
+                batch_limit = min(native_limit, self.steps + 1)
             if report_every > 0:
                 batch_limit = min(
                     native_limit,
@@ -851,6 +856,33 @@ class NativeVM(VM):
             self._sync_block(int(result.block_code), int(result.ip))
 
             if result.status == MM_STATUS_LIMIT:
+                trace_remaining = int(
+                    getattr(self, "_single_step_trace_remaining", 0) or 0
+                )
+                if trace_remaining > 0 and self.steps == batch_limit:
+                    descriptor = self.program.symbol_addresses.get(
+                        "__mm_user_ext_getcwd"
+                    )
+                    desc_entry = (
+                        self.memory.read(descriptor, 64)
+                        if descriptor is not None
+                        else 0
+                    )
+                    frame16 = self.memory.read(self.sp + 16, 64)
+                    frame24 = self.memory.read(self.sp + 24, 64)
+                    print(
+                        "BOOT_EXEC_NATIVE_SINGLE_STEP "
+                        f"remaining={trace_remaining} steps={self.steps} "
+                        f"function={self.current_function} "
+                        f"block={self.current_block} ip={self.ip} "
+                        f"sp=0x{self.sp:x} "
+                        f"descriptor=0x{descriptor or 0:x} "
+                        f"desc_entry=0x{desc_entry:x} "
+                        f"sp16=0x{frame16:x} sp24=0x{frame24:x}",
+                        flush=True,
+                    )
+                    self._single_step_trace_remaining = trace_remaining - 1
+                    continue
                 if is_report_boundary and self.steps == batch_limit:
                     now = time.perf_counter()
                     delta_steps = self.steps - report_start_steps
@@ -881,7 +913,32 @@ class NativeVM(VM):
                 self._set_code(int(result.target_code))
                 continue
             if result.status == MM_STATUS_WATCH:
-                self._set_code(int(result.target_code))
+                target_code = int(result.target_code)
+                self._set_code(target_code)
+                trace_watch = int(
+                    getattr(self, "trace_single_step_watch_code", 0) or 0
+                )
+                if trace_watch and target_code == trace_watch:
+                    self._single_step_trace_remaining = int(
+                        getattr(self, "trace_single_step_count", 18) or 18
+                    )
+                    descriptor = self.program.symbol_addresses.get(
+                        "__mm_user_ext_getcwd"
+                    )
+                    print(
+                        "BOOT_EXEC_NATIVE_SINGLE_STEP_ARMED "
+                        f"code=0x{target_code:x} "
+                        f"function={self.current_function} "
+                        f"block={self.current_block} "
+                        f"sp=0x{self.sp:x} "
+                        f"descriptor=0x{descriptor or 0:x} "
+                        f"desc_entry=0x{self.memory.read(descriptor, 64) if descriptor is not None else 0:x}",
+                        flush=True,
+                    )
+                    self.set_watch_codes(
+                        code for code in self._watch_codes
+                        if code != trace_watch
+                    )
                 continue
             if result.status == MM_STATUS_ERROR:
                 raise VMError(
