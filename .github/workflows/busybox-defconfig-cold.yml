@@ -28,9 +28,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33346013400
+          run-id: 33348074309
           github-token: ${{ github.token }}
-          name: minimachine-linux-initramfs-33346013400
+          name: minimachine-linux-initramfs-33348074309
           path: linux
 
       - name: Download full defconfig BusyBox bundle
