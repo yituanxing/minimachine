@@ -1581,6 +1581,23 @@ def direct_runtime_callback(symbol: str):
                 i += 1
         return strchr
 
+    if base == "strrchr":
+        def strrchr(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("strrchr expects string,char")
+            ptr, ch = args
+            ch &= 0xFF
+            last = 0
+            i = 0
+            while True:
+                byte = vm.memory.read(ptr + i, 8)
+                if byte == ch:
+                    last = ptr + i
+                if byte == 0:
+                    return last
+                i += 1
+        return strrchr
+
     if base == "memchr":
         def memchr(vm: VM, args: tuple[int, ...]):
             if len(args) != 3:
