@@ -1,0 +1,200 @@
+name: MiniMachine BusyBox Userspace Hot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - scripts/run-minimachine-linux.py
+      - .github/workflows/busybox-userspace-hot.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  defconfig-hot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download current 64 MiB Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33348074309
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33348074309
+          path: linux
+
+      - name: Download full defconfig BusyBox bundle
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33313986393
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-bundle-33313986393
+          path: defconfig
+
+      - name: Download defconfig kernel_execve checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33348461525
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-defconfig-cold-33348461525
+          path: defcold
+
+      - name: Rebuild exact defconfig initramfs
+        run: |
+          python3 scripts/build-minimachine-initramfs.py \
+            build/busybox-defconfig.cpio \
+            --init-image defconfig/busybox-ash.bflt
+          test -s defcold/busybox-defconfig-kernel-execve.chk.gz
+
+      - name: Resume defconfig BusyBox from proven cold checkpoint
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          set +e
+          printf 'echo BUSYBOX_DEFCFG_HOT64_OK\nvalue=42\necho BUSYBOX_DEFCFG_HOT64_VAR_$value\nfalse\necho BUSYBOX_DEFCFG_HOT64_FALSE_STATUS_$?\nexit 0\n' | \
+          /usr/bin/time -f 'BUSYBOX_DEFCFG_HOT64_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 300 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in linux/llvm/linux-initramfs-p3-cache.pkl.gz \
+            --initramfs build/busybox-defconfig.cpio \
+            --native-vm \
+            --checkpoint-in defcold/busybox-defconfig-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/defconfig-hot64.log
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "BUSYBOX_DEFCFG_HOT64_STATUS=$status" | tee -a build/defconfig-hot64.log
+
+      - name: Assert defconfig hot shell
+        run: |
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/defconfig-hot64.log
+          grep -F 'BOOT_EXEC_USER_HANDOFF ' build/defconfig-hot64.log
+          grep -F 'function=__mm_user_ash_main functions=3043' build/defconfig-hot64.log
+          grep -F 'BOOT_EXEC_USER_SYSCALL_FALLBACK nr=160 target=__se_sys_newuname' build/defconfig-hot64.log
+          grep -Fx 'BUSYBOX_DEFCFG_HOT64_OK' build/defconfig-hot64.log
+          grep -Fx 'BUSYBOX_DEFCFG_HOT64_VAR_42' build/defconfig-hot64.log
+          grep -Fx 'BUSYBOX_DEFCFG_HOT64_FALSE_STATUS_1' build/defconfig-hot64.log
+          grep -F 'BOOT_EXEC_USER_EXIT status=0' build/defconfig-hot64.log
+          grep -F 'BUSYBOX_DEFCFG_HOT64_STATUS=0' build/defconfig-hot64.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/defconfig-hot64.log
+
+      - name: Summarize defconfig hot
+        if: always()
+        run: |
+          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_MALLOPT|USER_EXIT|BLOCKED|HALTED)|BUSYBOX_DEFCFG_HOT64_' \
+            build/defconfig-hot64.log | tail -320 || true
+
+  multicall-hot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download current 64 MiB Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33348074309
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33348074309
+          path: linux
+
+      - name: Download BusyBox multicall image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33347461389
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-multicall-33347461389
+          path: busybox
+
+      - name: Download multicall kernel_execve checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33348464715
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-multicall-cold-33348464715
+          path: multicold
+
+      - name: Rebuild exact multicall rootfs
+        run: |
+          cat > build/init.sh <<'SH'
+          #!/bin/sh
+          echo BUSYBOX_MULTICALL_HOT64_OK
+          value=42
+          echo BUSYBOX_MULTICALL_HOT64_VAR_$value
+          false
+          echo BUSYBOX_MULTICALL_HOT64_FALSE_STATUS_$?
+          exit 0
+          SH
+          chmod +x build/init.sh
+          python3 scripts/build-minimachine-busybox-rootfs.py \
+            build/busybox-multicall.cpio \
+            --busybox-image busybox/busybox-multicall.bflt \
+            --init-script-file build/init.sh
+          test -s multicold/busybox-multicall-kernel-execve.chk.gz
+
+      - name: Resume multicall BusyBox from proven cold checkpoint
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          set +e
+          /usr/bin/time -f 'BUSYBOX_MULTICALL_HOT64_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 300 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in linux/llvm/linux-initramfs-p3-cache.pkl.gz \
+            --initramfs build/busybox-multicall.cpio \
+            --native-vm \
+            --checkpoint-in multicold/busybox-multicall-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/multicall-hot64.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "BUSYBOX_MULTICALL_HOT64_STATUS=$status" | tee -a build/multicall-hot64.log
+
+      - name: Assert multicall hot shell
+        run: |
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/multicall-hot64.log
+          grep -F 'BOOT_EXEC_USER_HANDOFF ' build/multicall-hot64.log
+          grep -F 'function=__mm_user_main functions=3043' build/multicall-hot64.log
+          grep -F 'BOOT_EXEC_USER_MALLOPT ' build/multicall-hot64.log
+          grep -Fx 'BUSYBOX_MULTICALL_HOT64_OK' build/multicall-hot64.log
+          grep -Fx 'BUSYBOX_MULTICALL_HOT64_VAR_42' build/multicall-hot64.log
+          grep -Fx 'BUSYBOX_MULTICALL_HOT64_FALSE_STATUS_1' build/multicall-hot64.log
+          grep -F 'BOOT_EXEC_USER_EXIT status=0' build/multicall-hot64.log
+          grep -F 'BUSYBOX_MULTICALL_HOT64_STATUS=0' build/multicall-hot64.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/multicall-hot64.log
+
+      - name: Summarize multicall hot
+        if: always()
+        run: |
+          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_MALLOPT|USER_EXIT|BLOCKED|HALTED)|BUSYBOX_MULTICALL_HOT64_' \
+            build/multicall-hot64.log | tail -360 || true
