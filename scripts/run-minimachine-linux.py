@@ -760,6 +760,19 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_strerror
 
+    if original in {"fcntl", "fcntl64"}:
+        def user_fcntl(vm, args):
+            if len(args) not in {2, 3}:
+                raise VMError(f"{original} expects fd,cmd[,arg]")
+            fd, cmd = map(int, args[:2])
+            arg = int(args[2]) if len(args) == 3 else 0
+            raw = user_syscall(
+                vm,
+                (25, fd, cmd, arg, 0, 0, 0),
+            )
+            return libc_linux_result(vm, raw)
+        return user_fcntl
+
     if original in {"open", "open64"}:
         def user_open(vm, args):
             if len(args) not in {2, 3}:
@@ -1823,6 +1836,7 @@ def user_syscall(vm, args: tuple[int, ...]):
     nr, *argv = args
     fallback = {
         17: ("__se_sys_getcwd", 2),
+        25: ("__se_sys_fcntl", 3),
         49: ("__se_sys_chdir", 1),
         56: ("__se_sys_openat", 4),
         57: ("__se_sys_close", 1),
