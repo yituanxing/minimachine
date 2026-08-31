@@ -724,10 +724,44 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
                 else
                     value = raw & mask_bits(dst_bits);
             }
+            int trace_xxreadtoken_move =
+                in->src.kind == MM_V_SLOT &&
+                in->dst.kind == MM_V_SLOT &&
+                in->src.value == 112 &&
+                in->dst.value == 248 &&
+                (raw == UINT64_C(0x18acbea) || (raw & UINT64_C(0xff)) == UINT64_C(0xea));
+            if (trace_xxreadtoken_move) {
+                fprintf(
+                    stderr,
+                    "BOOT_EXEC_NATIVE_MOV64_DIAG_BEFORE "
+                    "sp=0x%llx width=%u raw=0x%llx value=0x%llx "
+                    "src_off=%llu dst_off=%llu src_mem=0x%llx dst_mem=0x%llx\n",
+                    (unsigned long long)vm->sp,
+                    dst_bits,
+                    (unsigned long long)raw,
+                    (unsigned long long)value,
+                    (unsigned long long)in->src.value,
+                    (unsigned long long)in->dst.value,
+                    (unsigned long long)mem_read(vm, vm->sp + in->src.value, 64),
+                    (unsigned long long)mem_read(vm, vm->sp + in->dst.value, 64)
+                );
+                fflush(stderr);
+            }
             if (!write_operand(vm, &in->dst, value, dst_bits)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = vm->oom ? MM_ERR_OOM : MM_ERR_BAD_VALUE;
                 break;
+            }
+            if (trace_xxreadtoken_move) {
+                fprintf(
+                    stderr,
+                    "BOOT_EXEC_NATIVE_MOV64_DIAG_AFTER "
+                    "sp=0x%llx width=%u dst_mem=0x%llx\n",
+                    (unsigned long long)vm->sp,
+                    dst_bits,
+                    (unsigned long long)mem_read(vm, vm->sp + in->dst.value, 64)
+                );
+                fflush(stderr);
             }
             vm->ip++;
             continue;
