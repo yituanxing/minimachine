@@ -927,6 +927,23 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return vm.memory.read(old + 0, 64)
         return user_signal
 
+    if original == "mallopt":
+        def user_mallopt(_vm, args):
+            if len(args) != 2:
+                raise VMError("mallopt expects parameter,value")
+            parameter, value = map(int, args)
+            print(
+                "BOOT_EXEC_USER_MALLOPT "
+                f"parameter={parameter if parameter < (1 << 63) else parameter - (1 << 64)} "
+                f"value={value if value < (1 << 63) else value - (1 << 64)}",
+                flush=True,
+            )
+            # BusyBox uses mallopt only to tune the host libc allocator.
+            # MiniMachine provides its own userspace allocation arena, so
+            # accepting the hint is the correct semantic equivalent.
+            return 1
+        return user_mallopt
+
     if original == "malloc":
         def malloc(vm, args):
             if len(args) != 1:
@@ -1242,6 +1259,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
         "chdir": (49, 1),
         "close": (57, 1),
         "gettimeofday": (169, 2),
+        "uname": (160, 1),
         "umask": (166, 1),
         "times": (153, 1),
         "getpid": (172, 0),
@@ -1627,6 +1645,7 @@ def user_syscall(vm, args: tuple[int, ...]):
         93: ("__se_sys_exit", 1),
         94: ("__se_sys_exit_group", 1),
         153: ("__se_sys_times", 1),
+        160: ("__se_sys_newuname", 1),
         166: ("__se_sys_umask", 1),
         169: ("__se_sys_gettimeofday", 2),
         172: ("sys_getpid", 0),
