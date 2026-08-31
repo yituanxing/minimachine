@@ -38,9 +38,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33398077900
+          run-id: 33399276976
           github-token: ${{ github.token }}
-          name: minimachine-linux-p3-console-current-33398077900
+          name: minimachine-linux-p3-console-current-33399276976
           path: current-cache
 
       - name: Download full defconfig BusyBox bundle
@@ -135,9 +135,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33398077900
+          run-id: 33399276976
           github-token: ${{ github.token }}
-          name: minimachine-linux-p3-console-current-33398077900
+          name: minimachine-linux-p3-console-current-33399276976
           path: current-cache
 
       - name: Download BusyBox multicall image
