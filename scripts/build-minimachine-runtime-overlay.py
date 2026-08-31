@@ -42,20 +42,29 @@ def main() -> int:
     )
     p.add_argument("output", type=Path)
     p.add_argument("--init-script", type=Path, required=True)
+    p.add_argument(
+        "--path",
+        default="init",
+        help="archive path for the injected script; defaults to init",
+    )
     args = p.parse_args()
 
+    archive_path = args.path.lstrip("/")
+    if not archive_path or ".." in archive_path.split("/"):
+        raise SystemExit("invalid --path")
     script = args.init_script.read_bytes()
     if not script.startswith(b"#!"):
         raise SystemExit("runtime init script must start with a shebang")
 
     out = bytearray()
-    _entry(out, "init", mode=stat.S_IFREG | 0o755, data=script, ino=1)
+    _entry(out, archive_path, mode=stat.S_IFREG | 0o755, data=script, ino=1)
     _entry(out, "TRAILER!!!", mode=0, data=b"", ino=2)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(out)
     print(
         "MMRT_OVERLAY_READY "
-        f"path={args.output} bytes={len(out)} init_bytes={len(script)} entries=2",
+        f"path={args.output} bytes={len(out)} script={archive_path} "
+        f"init_bytes={len(script)} entries=2",
         flush=True,
     )
     return 0
