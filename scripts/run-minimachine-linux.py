@@ -2309,7 +2309,9 @@ def _call_linux_function_preserving_control(
                     f"s{slot}=0x{value:x}"
                     for slot, value in sorted(values.items(), key=lambda item: int(item[0]))
                 )
-                + f" cache=0x{cache_ptr:x} cache_ctor=0x{ctor_now:x}",
+                + f" cache=0x{cache_ptr:x} cache_ctor=0x{ctor_now:x} "
+                + f"ctor_code={vm.program.code_block.get(ctor_now)!r} "
+                + f"ctor_descriptor={next((hex(address) for symbol, address in vm.program.symbol_addresses.items() if symbol in vm.program.functions and vm.program.block_code.get((symbol, vm.program.functions[symbol].function.blocks[0].label)) == ctor_now), None)}",
                 flush=True,
             )
         raise
