@@ -50,6 +50,7 @@ def build_rootfs(
     busybox: bytes,
     *,
     applets: tuple[str, ...],
+    init_script: bytes,
 ) -> tuple[bytes, int]:
     out = bytearray()
     ino = 1
@@ -74,7 +75,8 @@ def build_rootfs(
     # Let Linux binfmt_script resolve the first userspace image through
     # /bin/sh. This keeps /init tiny and proves the normal BusyBox multicall
     # dispatch instead of hard-wiring ash_main as the executable entry.
-    init_script = b"#!/bin/sh\nexec /bin/sh\n"
+    if not init_script.startswith(b"#!"):
+        raise ValueError("init script must start with a shebang")
     add("init", mode=stat.S_IFREG | 0o755, data=init_script)
     add("bin/busybox", mode=stat.S_IFREG | 0o755, data=busybox)
 
@@ -105,13 +107,27 @@ def main() -> int:
         default="ls,cat,echo,uname,pwd,mkdir,rm,rmdir,touch,head,tail,wc,true,false",
         help="comma-separated /bin applet symlinks",
     )
+    p.add_argument(
+        "--init-script-file",
+        type=Path,
+        help="script installed as /init; defaults to a minimal /bin/sh exit script",
+    )
     args = p.parse_args()
 
     busybox = args.busybox_image.read_bytes()
     if not busybox:
         raise SystemExit("empty --busybox-image")
     applets = tuple(x.strip() for x in args.applets.split(",") if x.strip())
-    archive, entries = build_rootfs(busybox, applets=applets)
+    init_script = (
+        args.init_script_file.read_bytes()
+        if args.init_script_file is not None
+        else b"#!/bin/sh\nexit 0\n"
+    )
+    archive, entries = build_rootfs(
+        busybox,
+        applets=applets,
+        init_script=init_script,
+    )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(archive)
