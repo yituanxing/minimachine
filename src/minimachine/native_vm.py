@@ -912,6 +912,45 @@ class NativeVM(VM):
                     except Exception:
                         parsefile = 0
                         left_line = left_buffer = lastc0 = lastc1 = unget = -1
+                    backing_inst = ""
+                    if (
+                        self.current_function == "__mm_user_xxreadtoken"
+                        and self.current_block == "19"
+                        and self.ip == 3
+                    ):
+                        code = self.program.block_code.get(
+                            (self.current_function, self.current_block)
+                        )
+                        matches = []
+                        packed_segments = []
+                        if self._packed is not None:
+                            packed_segments.append(
+                                ("base", self._packed[0], self._packed[1])
+                            )
+                        packed_segments.extend(
+                            (f"extra{index}", pair[0], pair[1])
+                            for index, pair in enumerate(self._extra_packed)
+                        )
+                        for label, insts, blocks in packed_segments:
+                            for native_block in blocks:
+                                if native_block.code != code:
+                                    continue
+                                native_inst = insts[
+                                    native_block.first + self.ip
+                                ]
+                                matches.append(
+                                    f"{label}:first={native_block.first}:"
+                                    f"count={native_block.count}:"
+                                    f"opcode={native_inst.opcode}:"
+                                    f"width={native_inst.width}:"
+                                    f"src={native_inst.src.kind}/"
+                                    f"{native_inst.src.value}:"
+                                    f"dst={native_inst.dst.kind}/"
+                                    f"{native_inst.dst.value}"
+                                )
+                        backing_inst = " backing=" + (
+                            ";".join(matches) if matches else "missing"
+                        )
                     parser_slots = ""
                     if self.current_function == "__mm_user_xxreadtoken":
                         linked = self.program.functions.get(self.current_function)
@@ -943,7 +982,7 @@ class NativeVM(VM):
                         f"parsefile=0x{parsefile:x} left_line={left_line} "
                         f"left_buffer={left_buffer} lastc0={lastc0} "
                         f"lastc1={lastc1} unget={unget}"
-                        f"{parser_slots}",
+                        f"{parser_slots}{backing_inst}",
                         flush=True,
                     )
                     self._single_step_trace_remaining = trace_remaining - 1
