@@ -96,6 +96,34 @@ jobs:
                   for name in ("17","21","22","37","38","39","40","41","42","46")
               )
           )
+
+          target_index = block.first + 3
+          candidates = []
+          for native_block in blocks:
+              for ip in range(native_block.count):
+                  index = native_block.first + ip
+                  inst = insts[index]
+                  if (
+                      inst.opcode == 1
+                      and inst.src.kind == 2
+                      and inst.src.value == 112
+                      and inst.dst.kind == 2
+                      and inst.dst.value == 248
+                  ):
+                      candidates.append(
+                          (index, native_block.code, ip, inst.width)
+                      )
+          print(
+              "PARSER_NATIVE_TARGET_INDEX "
+              f"index={target_index} code=0x{code:x}"
+          )
+          print(
+              "PARSER_NATIVE_MOVE_CANDIDATES "
+              + ";".join(
+                  f"index={index},code=0x{block_code:x},ip={ip},width={width}"
+                  for index, block_code, ip, width in candidates
+              )
+          )
           PY
 
       - name: Dump xxreadtoken P3 and data objects
