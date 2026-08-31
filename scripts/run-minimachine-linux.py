@@ -2006,6 +2006,28 @@ def user_syscall(vm, args: tuple[int, ...]):
             f"data={preview.hex()}",
             flush=True,
         )
+        evalskip_symbol = vm.program.symbol_addresses.get(
+            "__mm_user_evalskip"
+        )
+        misc_symbol = vm.program.symbol_addresses.get(
+            "__mm_user_ash_ptr_to_globals_misc"
+        )
+        evalskip = (
+            vm.memory.read(evalskip_symbol, 32)
+            if evalskip_symbol is not None else -1
+        )
+        misc = (
+            vm.memory.read(misc_symbol, 64)
+            if misc_symbol is not None else 0
+        )
+        print(
+            "BOOT_EXEC_USER_ASH_CONTROL_READ "
+            f"evalskip={evalskip} "
+            f"nflag={vm.memory.read(misc + 98, 8) if misc else -1} "
+            f"sflag={vm.memory.read(misc + 99, 8) if misc else -1} "
+            f"misc=0x{misc:x}",
+            flush=True,
+        )
 
     count = int(getattr(vm, "user_syscall_count", 0)) + 1
     vm.user_syscall_count = count
