@@ -124,6 +124,34 @@ class LegalizerTests(unittest.TestCase):
         )
         self.assertEqual(stats.phi_edge_moves, 1)
 
+    def test_pointer_phi_ignores_nested_i8_gep_type(self):
+        fn, stats = self.lower_one(
+            """
+            @chars = internal constant [7 x i8] c"\\0A()&|;\\00"
+
+            define ptr @f(i1 %c, ptr %p) {
+            entry:
+              br i1 %c, label %left, label %right
+            left:
+              br label %merge
+            right:
+              br label %merge
+            merge:
+              %x = phi ptr [ %p, %left ], [ getelementptr inbounds ([7 x i8], ptr @chars, i64 0, i64 6), %right ]
+              ret ptr %x
+            }
+            """
+        )
+        moves = [
+            inst
+            for block in fn.blocks
+            for inst in block.instructions
+            if isinstance(inst, muir.Mov) and inst.dst == muir.Slot("x")
+        ]
+        self.assertEqual(len(moves), 2)
+        self.assertTrue(all(inst.width is muir.Width.I64 for inst in moves))
+        self.assertEqual(stats.phi_edge_moves, 2)
+
     def test_phi_becomes_edge_moves(self):
         fn, stats = self.lower_one(
             """

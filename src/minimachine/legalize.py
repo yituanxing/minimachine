@@ -621,8 +621,16 @@ def _const_scalar_value(text: str, layout: DataLayout) -> muir.Value:
 
 
 def _parse_phi(inst: TextInst, layout: DataLayout):
-    width = _first_width(inst.text, default_pointer=True)
-    fp_match = re.match(r"phi\s+(half|float|double)\b", inst.text.strip())
+    phi_text = inst.text.strip()
+    # The PHI result type is the leading type after "phi".  Do not infer it
+    # by scanning the entire instruction: pointer PHIs may contain typed
+    # constant-expression GEPs such as "[7 x i8]", and treating that nested
+    # i8 as the PHI width truncates the pointer on predecessor edge copies.
+    if re.match(r"phi\s+ptr(?:\s+addrspace\(\d+\))?\b", phi_text):
+        width = muir.Width.I64
+    else:
+        width = _first_width(inst.text, default_pointer=True)
+    fp_match = re.match(r"phi\s+(half|float|double)\b", phi_text)
     fp_ty = fp_match.group(1) if fp_match else None
     incoming=[]
     text=inst.text
