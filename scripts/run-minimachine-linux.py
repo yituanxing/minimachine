@@ -1841,20 +1841,20 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 f"count={len(parser_codes)} functions={parser_items}",
                 flush=True,
             )
-            xxreadtoken_watch = next(
+            pgetc_watch = next(
                 (
                     code
                     for code, name in parser_codes.items()
-                    if "xxreadtoken" in name.lower()
+                    if name == "__mm_user_pgetc"
                 ),
                 None,
             )
-            if xxreadtoken_watch is not None:
-                vm.trace_single_step_watch_code = xxreadtoken_watch
-                vm.trace_single_step_count = 800
+            if pgetc_watch is not None:
+                vm.trace_user_pgetc_watch_code = pgetc_watch
+                vm.trace_user_pgetc_unget_armed = False
                 print(
-                    "BOOT_EXEC_USER_XXREADTOKEN_SINGLE_STEP "
-                    f"code=0x{xxreadtoken_watch:x} count=800",
+                    "BOOT_EXEC_USER_PGETC_UNGET_WATCH "
+                    f"code=0x{pgetc_watch:x}",
                     flush=True,
                 )
 
@@ -1862,7 +1862,10 @@ def linux_ecall(vm, args: tuple[int, ...]):
             ("__mm_user_setpwd", "25")
         )
         if setpwd_watch is not None and hasattr(vm, "set_watch_codes"):
-            if not getattr(vm, "trace_single_step_watch_code", 0):
+            if (
+                not getattr(vm, "trace_user_parser_codes", None)
+                and not getattr(vm, "trace_single_step_watch_code", 0)
+            ):
                 vm.trace_single_step_watch_code = setpwd_watch
                 vm.trace_single_step_count = 400
             existing_watches = tuple(getattr(vm, "_watch_codes", ()))
@@ -3904,6 +3907,22 @@ def main() -> int:
                 f"lastc0={lastc0} lastc1={lastc1} unget={unget}",
                 flush=True,
             )
+            if (
+                parser_function == "__mm_user_pgetc"
+                and unget > 0
+                and left_buffer > 0
+                and not getattr(vm, "trace_user_pgetc_unget_armed", False)
+            ):
+                vm.trace_user_pgetc_unget_armed = True
+                vm.trace_single_step_watch_code = code
+                vm.trace_single_step_count = 240
+                print(
+                    "BOOT_EXEC_USER_PGETC_UNGET_SINGLE_STEP "
+                    f"code=0x{code:x} count=240 "
+                    f"left_buffer={left_buffer} lastc0={lastc0} "
+                    f"lastc1={lastc1} unget={unget}",
+                    flush=True,
+                )
         if trace_memcpy:
             linked = vm.program.functions.get("memcpy")
             if linked is not None:
