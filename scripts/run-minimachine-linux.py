@@ -2263,6 +2263,32 @@ def _call_linux_function_preserving_control(
             vm.memory.read(result_base + i * 8, 64)
             for i in range(result_count)
         )
+    except VMError as exc:
+        current_inst = None
+        linked_now = vm.program.functions.get(vm.current_function)
+        if (
+            linked_now is not None
+            and vm.current_block is not None
+            and 0 <= vm.ip
+        ):
+            block_now = next(
+                (
+                    block
+                    for block in linked_now.function.blocks
+                    if block.label == vm.current_block
+                ),
+                None,
+            )
+            if block_now is not None and vm.ip < len(block_now.instructions):
+                current_inst = block_now.instructions[vm.ip]
+        print(
+            "BOOT_EXEC_PRESERVED_CALL_ERROR "
+            f"target={name} function={vm.current_function} "
+            f"block={vm.current_block} ip={vm.ip} sp=0x{vm.sp:x} "
+            f"inst={current_inst!r} error={exc}",
+            flush=True,
+        )
+        raise
     finally:
         if current_addr is not None and saved_current is not None:
             observed_current = vm.memory.read(current_addr, 64)
