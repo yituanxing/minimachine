@@ -1,0 +1,78 @@
+name: MiniMachine Linux Getcwd Inspect
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/linux-getcwd-inspect.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download qualified 64 MiB Linux cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33348074309
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33348074309
+          path: linux
+
+      - name: Inspect getcwd P3 call surface
+        run: |
+          python3 - <<'PY'
+          import gzip, pickle, re
+          from pathlib import Path
+
+          with gzip.open("linux/llvm/linux-initramfs-p3-cache.pkl.gz", "rb") as h:
+              payload = pickle.load(h)
+          cache = payload["cache"]
+          program = cache.program
+          targets = [
+              "__se_sys_getcwd",
+              "__do_sys_getcwd",
+              "get_fs_root_and_pwd_rcu",
+              "prepend_path",
+              "__getname",
+              "__putname",
+              "copy_to_user",
+              "_copy_to_user",
+          ]
+          print(f"GETCWD_CACHE functions={len(program.functions)}")
+          seen_symbols = set()
+          for name in targets:
+              linked = program.functions.get(name)
+              print(f"GETCWD_FUNCTION name={name} found={int(linked is not None)}")
+              if linked is None:
+                  continue
+              for bi, block in enumerate(linked.function.blocks):
+                  print(
+                      f"GETCWD_BLOCK function={name} index={bi} "
+                      f"label={block.label} instructions={len(block.instructions)}"
+                  )
+                  for ii, inst in enumerate(block.instructions):
+                      r = repr(inst)
+                      for sym in re.findall(r"Symbol\(name='([^']+)'\)", r):
+                          seen_symbols.add(sym)
+                      print(
+                          f"GETCWD_INST function={name} block={bi} ip={ii} repr={r}"
+                      )
+
+          for sym in sorted(seen_symbols):
+              addr = program.symbol_addresses.get(sym)
+              linked = program.functions.get(sym)
+              print(
+                  f"GETCWD_SYMBOL name={sym} "
+                  f"addr={f'0x{addr:x}' if addr is not None else '-'} "
+                  f"function={int(linked is not None)}"
+              )
+          PY
