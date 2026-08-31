@@ -1695,6 +1695,20 @@ def linux_ecall(vm, args: tuple[int, ...]):
             vm.program.add_function(function)
         trace_user_external_descriptor(vm, "getcwd", "functions-added")
 
+        setpwd_watch = vm.program.block_code.get(
+            ("__mm_user_setpwd", "25")
+        )
+        if setpwd_watch is not None and hasattr(vm, "set_watch_codes"):
+            vm.trace_single_step_watch_code = setpwd_watch
+            vm.trace_single_step_count = 18
+            existing_watches = tuple(getattr(vm, "_watch_codes", ()))
+            vm.set_watch_codes(existing_watches + (setpwd_watch,))
+            print(
+                "BOOT_EXEC_USER_SETPWD_WATCH "
+                f"code=0x{setpwd_watch:x} count=18",
+                flush=True,
+            )
+
         if user_image.image is not None:
             try:
                 install_module_image(vm.program, user_image.image)
