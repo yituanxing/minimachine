@@ -33,7 +33,13 @@
 #include <asm/sections.h>
 #include <asm/unistd.h>
 
-#define MINIMACHINE_BOOT_RAM_SIZE (32UL * 1024 * 1024)
+/*
+ * Keep enough NOMMU RAM for a normal static BusyBox image to coexist with
+ * its initramfs file during exec.  The defconfig carrier is ~9 MiB and the
+ * flat loader needs a second text/stack allocation before the old file pages
+ * can be reclaimed.
+ */
+#define MINIMACHINE_BOOT_RAM_SIZE (64UL * 1024 * 1024)
 
 extern char _end[];
 
