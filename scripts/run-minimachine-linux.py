@@ -1365,6 +1365,27 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
     return unimplemented
 
 
+def trace_user_external_descriptor(vm, original: str, stage: str) -> None:
+    symbol = f"__mm_user_ext_{original}"
+    descriptor = vm.program.symbol_addresses.get(symbol)
+    if descriptor is None:
+        print(
+            "BOOT_EXEC_USER_DESCRIPTOR "
+            f"stage={stage} name={original} descriptor=missing",
+            flush=True,
+        )
+        return
+    print(
+        "BOOT_EXEC_USER_DESCRIPTOR "
+        f"stage={stage} name={original} descriptor=0x{descriptor:x} "
+        f"initial_entry=0x{vm.program.initial_memory.read(descriptor, 64):x} "
+        f"initial_frame={vm.program.initial_memory.read(descriptor + 8, 64)} "
+        f"live_entry=0x{vm.memory.read(descriptor, 64):x} "
+        f"live_frame={vm.memory.read(descriptor + 8, 64)}",
+        flush=True,
+    )
+
+
 def install_user_external_surface(vm, user_image, envp: int) -> None:
     image = user_image.image
     if image is None:
@@ -1617,6 +1638,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
             )
 
         install_user_external_surface(vm, user_image, user_envp)
+        trace_user_external_descriptor(vm, "getcwd", "external-surface")
 
         registered_user_helpers = 0
         for symbol in user_image.runtime_helpers:
@@ -1671,6 +1693,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
             verify_p3(function)
         for function in functions:
             vm.program.add_function(function)
+        trace_user_external_descriptor(vm, "getcwd", "functions-added")
 
         if user_image.image is not None:
             try:
@@ -1686,6 +1709,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 f"relocs={user_image.image.relocation_count}",
                 flush=True,
             )
+        trace_user_external_descriptor(vm, "getcwd", "module-image")
 
         print(
             "BOOT_EXEC_USER_HANDOFF "
