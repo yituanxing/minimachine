@@ -46,9 +46,14 @@ jobs:
           llvm-dis-18 carrier/whole-lto/busybox_unstripped.0.4.opt.bc -o build-busybox.ll
           python3 - <<'PY'
           from pathlib import Path
+          import re
           text = Path("build-busybox.ll").read_text()
-          start = text.index("define internal fastcc i32 @xxreadtoken(")
-          end = text.index("\n}", start) + 2
+          match = re.search(r"^define\\b[^\\n]*@xxreadtoken\\([^\\n]*\\)\\s*[^\\{]*\\{", text, re.M)
+          if match is None:
+              candidates = [line for line in text.splitlines() if "@xxreadtoken" in line][:20]
+              raise SystemExit("xxreadtoken definition not found: " + repr(candidates))
+          start = match.start()
+          end = text.index("\n}", match.end()) + 2
           print("PARSER_LLVM_BEGIN")
           print(text[start:end])
           print("PARSER_LLVM_END")
