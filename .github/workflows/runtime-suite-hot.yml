@@ -6,6 +6,7 @@ on:
     branches: [work/native-p3-vm]
     paths:
       - src/minimachine/runtime.py
+      - src/minimachine/native_vm.py
       - scripts/run-minimachine-linux.py
       - scripts/minimachine-runtime-suite.py
       - scripts/build-minimachine-runtime-overlay.py
