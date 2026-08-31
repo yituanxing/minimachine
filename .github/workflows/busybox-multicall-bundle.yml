@@ -5,6 +5,8 @@ on:
   push:
     branches: [work/native-p3-vm]
     paths:
+      - src/minimachine/legalize.py
+      - tests/test_legalizer.py
       - src/minimachine/user_image.py
       - src/minimachine/user_bundle.py
       - scripts/build-minimachine-busybox.py
