@@ -6,6 +6,7 @@ on:
     branches: [work/native-p3-vm]
     paths:
       - scripts/run-minimachine-linux.py
+      - src/minimachine/native_vm.py
       - .github/workflows/busybox-userspace-hot.yml
 
 permissions:
