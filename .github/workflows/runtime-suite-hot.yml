@@ -55,9 +55,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33347461389
+          run-id: 33396890631
           github-token: ${{ github.token }}
-          name: minimachine-busybox-multicall-33347461389
+          name: minimachine-busybox-multicall-33396890631
           path: busybox
 
       - name: Download qualified multicall kernel_execve checkpoint
