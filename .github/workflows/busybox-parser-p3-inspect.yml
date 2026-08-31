@@ -46,16 +46,18 @@ jobs:
           llvm-dis-18 carrier/whole-lto/busybox_unstripped.0.4.opt.bc -o build-busybox.ll
           python3 - <<'PY'
           from pathlib import Path
-          import re
           text = Path("build-busybox.ll").read_text()
-          match = re.search(r"^define\\b[^\\n]*@xxreadtoken\\([^\\n]*\\)\\s*[^\\{]*\\{", text, re.M)
-          if match is None:
-              candidates = [line for line in text.splitlines() if "@xxreadtoken" in line][:20]
-              raise SystemExit("xxreadtoken definition not found: " + repr(candidates))
-          start = match.start()
-          end = text.index("\n}", match.end()) + 2
+          lines = text.splitlines()
+          start_line = next(
+              i for i, line in enumerate(lines)
+              if line.startswith("define ") and "@xxreadtoken(" in line
+          )
+          end_line = next(
+              i for i in range(start_line + 1, len(lines))
+              if lines[i] == "}"
+          )
           print("PARSER_LLVM_BEGIN")
-          print(text[start:end])
+          print("\n".join(lines[start_line:end_line + 1]))
           print("PARSER_LLVM_END")
           PY
 
