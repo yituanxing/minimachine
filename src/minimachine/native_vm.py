@@ -452,6 +452,21 @@ class NativeVM(VM):
         )
         return len(items)
 
+    def _trace_user_descriptor_after_sync(self, stage: str) -> None:
+        symbol = "__mm_user_ext_getcwd"
+        descriptor = self.program.symbol_addresses.get(symbol)
+        if descriptor is None:
+            return
+        print(
+            "BOOT_EXEC_NATIVE_USER_DESCRIPTOR "
+            f"stage={stage} descriptor=0x{descriptor:x} "
+            f"initial_entry=0x{self.program.initial_memory.read(descriptor, 64):x} "
+            f"live_entry=0x{self.memory.read(descriptor, 64):x} "
+            f"initial_frame={self.program.initial_memory.read(descriptor + 8, 64)} "
+            f"live_frame={self.memory.read(descriptor + 8, 64)}",
+            flush=True,
+        )
+
     def _resolved_value(self, value, linked, program):
         if isinstance(value, muir.Imm):
             return MM_V_IMM, value.value & MASK64
@@ -682,6 +697,7 @@ class NativeVM(VM):
                 raise VMError("cannot append native P3 host service table")
             self._host_packed = host_array
             self._sync_appended_initial_memory()
+            self._trace_user_descriptor_after_sync("host-append")
             self._packed_host_codes = current_hosts
             self._program_shape = shape
             print(
@@ -728,6 +744,7 @@ class NativeVM(VM):
                     raise VMError("cannot append native P3 host service table")
                 self._host_packed = hosts
             self._sync_appended_initial_memory()
+            self._trace_user_descriptor_after_sync("segment-append")
 
             self._packed_block_codes = current_blocks
             self._packed_function_names = current_functions
@@ -757,6 +774,7 @@ class NativeVM(VM):
         self._extra_packed.clear()
         self._host_packed = None
         self._sync_appended_initial_memory()
+        self._trace_user_descriptor_after_sync("program-replace")
         self._packed_block_codes = current_blocks
         self._packed_function_names = current_functions
         self._packed_host_codes = current_hosts
