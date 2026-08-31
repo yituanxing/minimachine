@@ -59,6 +59,43 @@ jobs:
           print("PARSER_LLVM_END")
           PY
 
+      - name: Inspect packed native xxreadtoken instruction
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared native/p3vm.c -o build/libminimachine_p3vm.so
+          MINIMACHINE_NATIVE_LIB=${{ github.workspace }}/build/libminimachine_p3vm.so python3 - <<'PY'
+          from pathlib import Path
+          from src.minimachine.native_vm import NativeVM
+          from src.minimachine.user_image import BFLT_HEADER_SIZE, unpack_user_image
+          from src.minimachine.vm import Program
+
+          blob = Path("busybox/busybox-multicall.bflt").read_bytes()
+          data_start = int.from_bytes(blob[12:16], "big")
+          image = unpack_user_image(blob[BFLT_HEADER_SIZE:data_start])
+          program = Program(image.functions)
+          vm = NativeVM(program)
+
+          code = program.block_code[("__mm_user_xxreadtoken", "19")]
+          insts, blocks, _hosts = vm._packed
+          block = next(b for b in blocks if b.code == code)
+          for ip in range(block.count):
+              inst = insts[block.first + ip]
+              print(
+                  "PARSER_NATIVE_PACK "
+                  f"block=19 ip={ip} opcode={inst.opcode} width={inst.width} "
+                  f"src_kind={inst.src.kind} src_value={inst.src.value} "
+                  f"dst_kind={inst.dst.kind} dst_value={inst.dst.value}"
+              )
+          linked = program.functions["__mm_user_xxreadtoken"]
+          print(
+              "PARSER_NATIVE_SLOTS "
+              + ",".join(
+                  f"{name}:{linked.slot_offsets[name]}"
+                  for name in ("17","21","22","37","38","39","40","41","42","46")
+              )
+          )
+          PY
+
       - name: Dump xxreadtoken P3 and data objects
         run: |
           python3 - <<'PY'
