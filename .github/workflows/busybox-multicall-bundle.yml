@@ -1,0 +1,84 @@
+name: MiniMachine BusyBox Multicall Bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/user_image.py
+      - src/minimachine/user_bundle.py
+      - scripts/build-minimachine-busybox.py
+      - .github/workflows/busybox-multicall-bundle.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  multicall:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CARRIER_RUN: "33300177445"
+      CARRIER_NAME: "minimachine-busybox-bitcode-33300177445"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-18
+
+      - name: Download frozen whole-LTO carrier
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/carrier
+          gh run download "$CARRIER_RUN" \
+            --repo "${{ github.repository }}" \
+            --name "$CARRIER_NAME" \
+            --dir build/carrier
+          llvm-dis-18 \
+            build/carrier/whole-lto/busybox_unstripped.0.4.opt.bc \
+            -o build/busybox-whole.ll
+
+      - name: Build BusyBox multicall image
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'BUSYBOX_MULTICALL_BUNDLE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 scripts/build-minimachine-busybox.py \
+              build/busybox-whole.ll \
+              build/busybox-multicall.bflt \
+              --entry main \
+              --entry-args linux-main \
+              --stack-size 0x80000 \
+              --report build/busybox-multicall.json \
+              2>&1 | tee build/busybox-multicall.log
+          grep -F 'BUSYBOX_BUNDLE entry=__mm_user_main ' build/busybox-multicall.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path("build/busybox-multicall.json").read_text())
+          print(
+              "BUSYBOX_MULTICALL_GATE "
+              f"entry={r['entry_namespaced']} "
+              f"functions={r['functions']} "
+              f"payload={r['compressed_payload_bytes']} "
+              f"under16m={int(r['payload_under_16m'])}"
+          )
+          assert r["entry_namespaced"] == "__mm_user_main"
+          assert r["functions"] >= 3000
+          assert r["payload_under_16m"]
+          PY
+
+      - name: Upload BusyBox multicall image
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-multicall-${{ github.run_id }}
+          path: |
+            build/busybox-multicall.bflt
+            build/busybox-multicall.json
+            build/busybox-multicall.log
+          if-no-files-found: warn
+          retention-days: 14
