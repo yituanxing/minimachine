@@ -171,6 +171,42 @@ def verify_log(path: Path, profile: str) -> None:
     print(f"MMRT_SUITE_VERIFIED profile={profile} cases={len(cases)} log={path}")
 
 
+def summarize_log(path: Path, profile: str) -> None:
+    cases = PROFILES[profile]
+    text = path.read_text(errors="replace").replace("\r", "")
+    passed = 0
+    for case in cases:
+        if f"MMRT_CASE_PASS id={case.case_id}" in text:
+            passed += 1
+        else:
+            break
+    next_case = cases[passed].case_id if passed < len(cases) else "-"
+    started = [
+        case.case_id
+        for case in cases
+        if f"MMRT_CASE_START id={case.case_id} level={case.level}" in text
+    ]
+    blocked = [
+        line
+        for line in text.splitlines()
+        if line.startswith("BOOT_EXEC_BLOCKED ")
+    ]
+    failed = [
+        line
+        for line in text.splitlines()
+        if line.startswith("MMRT_CASE_FAIL ")
+    ]
+    print(
+        "MMRT_FRONTIER "
+        f"profile={profile} passed={passed}/{len(cases)} "
+        f"next={next_case} started={','.join(started) if started else '-'}"
+    )
+    if failed:
+        print(f"MMRT_FRONTIER_CASE_FAIL {failed[-1]}")
+    if blocked:
+        print(f"MMRT_FRONTIER_BLOCKED {blocked[-1]}")
+
+
 def list_cases(profile: str) -> None:
     for case in PROFILES[profile]:
         print(
@@ -183,7 +219,10 @@ def main() -> int:
     p = argparse.ArgumentParser(
         description="MiniMachine cumulative BusyBox/Linux runtime suite."
     )
-    p.add_argument("action", choices=("write-init", "verify-log", "list"))
+    p.add_argument(
+        "action",
+        choices=("write-init", "verify-log", "frontier-log", "list"),
+    )
     p.add_argument("path", nargs="?", type=Path)
     p.add_argument("--profile", choices=tuple(PROFILES), default="core")
     args = p.parse_args()
@@ -195,8 +234,10 @@ def main() -> int:
         p.error(f"{args.action} requires PATH")
     if args.action == "write-init":
         write_init(args.path, args.profile)
-    else:
+    elif args.action == "verify-log":
         verify_log(args.path, args.profile)
+    else:
+        summarize_log(args.path, args.profile)
     return 0
 
 
