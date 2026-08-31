@@ -6,6 +6,10 @@ from types import SimpleNamespace
 import sys
 import unittest
 
+from src.minimachine import muir
+from src.minimachine.abi import expand_function
+from src.minimachine.lower_p3 import lower_function
+from src.minimachine.native_vm import NativeVM
 from src.minimachine.vm import Program
 
 
@@ -46,6 +50,45 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         environ = program.symbol_addresses["__mm_user_ext_environ"]
         self.assertEqual(vm.memory.read(environ, 64), 0x12345678)
 
+
+    def test_native_vm_can_call_service_registered_after_vm_creation(self):
+        program = Program()
+        vm = NativeVM(program)
+
+        program.register_service("__mm_user_ext_probe", lambda _vm, _args: 77)
+        result = muir.Slot("result")
+        fn = muir.Function(
+            "__mm_user_probe_caller",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Call(
+                            muir.Callee(symbol="__mm_user_ext_probe"),
+                            (),
+                            result,
+                        ),
+                        muir.Ret(result),
+                    ],
+                )
+            ],
+            {"result"},
+        )
+        expanded, _ = expand_function(fn)
+        program.add_function(lower_function(expanded))
+
+        descriptor = program.symbol_addresses["__mm_user_ext_probe"]
+        self.assertNotEqual(program.initial_memory.read(descriptor, 64), 0)
+        self.assertEqual(vm.memory.read(descriptor, 64), 0)
+
+        self.assertEqual(
+            vm.run_function("__mm_user_probe_caller", result_count=1),
+            (77,),
+        )
+        self.assertEqual(
+            vm.memory.read(descriptor, 64),
+            program.initial_memory.read(descriptor, 64),
+        )
 
 if __name__ == "__main__":
     unittest.main()
