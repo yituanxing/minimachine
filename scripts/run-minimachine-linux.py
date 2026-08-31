@@ -2303,6 +2303,23 @@ def _call_linux_function_preserving_control(
                 vm.memory.read(cache_ptr + 64, 64)
                 if cache_ptr else 0
             )
+            ctor_block = vm.program.code_block.get(ctor_now)
+            ctor_name = ctor_block[0] if ctor_block is not None else None
+            ctor_descriptor = (
+                vm.program.symbol_addresses.get(ctor_name, 0)
+                if ctor_name is not None else 0
+            )
+            print(
+                "BOOT_EXEC_SETUP_OBJECT_CTOR "
+                f"value=0x{ctor_now:x} "
+                f"code_block={ctor_block!r} "
+                f"code_mem_entry=0x{vm.memory.read(ctor_now, 64):x} "
+                f"code_mem_frame=0x{vm.memory.read(ctor_now + 8, 64):x} "
+                f"descriptor=0x{ctor_descriptor:x} "
+                f"descriptor_entry=0x{vm.memory.read(ctor_descriptor, 64):x} "
+                f"descriptor_frame=0x{vm.memory.read(ctor_descriptor + 8, 64):x}",
+                flush=True,
+            )
             print(
                 "BOOT_EXEC_SETUP_OBJECT_STATE "
                 + " ".join(
