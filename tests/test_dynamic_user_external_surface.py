@@ -51,6 +51,43 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(vm.memory.read(environ, 64), 0x12345678)
 
 
+    def _mov64_function(self, name: str):
+        src = muir.Slot("src")
+        dst = muir.Slot("dst")
+        fn = muir.Function(
+            name,
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Mov(muir.Width.I64, dst, src),
+                        muir.Ret(dst),
+                    ],
+                )
+            ],
+            {"src", "dst"},
+            ("src",),
+        )
+        expanded, _ = expand_function(fn)
+        return lower_function(expanded)
+
+    def test_native_vm_preserves_i64_slot_move_in_initial_program(self):
+        program = Program((self._mov64_function("mov64_initial"),))
+        vm = NativeVM(program)
+        self.assertEqual(
+            vm.run_function("mov64_initial", (0x18ACBEA,), result_count=1),
+            (0x18ACBEA,),
+        )
+
+    def test_native_vm_preserves_i64_slot_move_in_appended_segment(self):
+        program = Program()
+        vm = NativeVM(program)
+        program.add_function(self._mov64_function("mov64_appended"))
+        self.assertEqual(
+            vm.run_function("mov64_appended", (0x18ACBEA,), result_count=1),
+            (0x18ACBEA,),
+        )
+
     def test_native_vm_can_call_service_registered_after_vm_creation(self):
         program = Program()
         vm = NativeVM(program)
