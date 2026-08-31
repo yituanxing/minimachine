@@ -2288,6 +2288,30 @@ def _call_linux_function_preserving_control(
             f"inst={current_inst!r} error={exc}",
             flush=True,
         )
+        if vm.current_function == "setup_object" and linked_now is not None:
+            interesting = (
+                "0", "1", "3", "4", "10", "12", "13", "14", "15",
+                "17", "18", "21", "22", "23", "25", "26",
+            )
+            values = {}
+            for slot_name in interesting:
+                off = linked_now.slot_offsets.get(slot_name)
+                if off is not None:
+                    values[slot_name] = vm.memory.read(vm.sp + off, 64)
+            cache_ptr = values.get("23") or values.get("10") or 0
+            ctor_now = (
+                vm.memory.read(cache_ptr + 64, 64)
+                if cache_ptr else 0
+            )
+            print(
+                "BOOT_EXEC_SETUP_OBJECT_STATE "
+                + " ".join(
+                    f"s{slot}=0x{value:x}"
+                    for slot, value in sorted(values.items(), key=lambda item: int(item[0]))
+                )
+                + f" cache=0x{cache_ptr:x} cache_ctor=0x{ctor_now:x}",
+                flush=True,
+            )
         raise
     finally:
         if current_addr is not None and saved_current is not None:
