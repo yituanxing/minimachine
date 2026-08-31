@@ -1345,6 +1345,36 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                 raise VMError("_exit expects status")
             status = int(args[0]) & 0xFF
             vm.user_exit_status = status
+            parsefile_symbol = vm.program.symbol_addresses.get(
+                "__mm_user_g_parsefile"
+            )
+            if parsefile_symbol is not None:
+                parsefile = vm.memory.read(parsefile_symbol, 64)
+                if parsefile:
+                    next_ptr = vm.memory.read(parsefile + 24, 64)
+                    buf_ptr = vm.memory.read(parsefile + 32, 64)
+                    preview = bytearray()
+                    if next_ptr:
+                        for index in range(48):
+                            byte = vm.memory.read(next_ptr + index, 8)
+                            if byte == 0:
+                                break
+                            preview.append(byte)
+                    print(
+                        "BOOT_EXEC_USER_PARSEFILE_EXIT "
+                        f"parsefile=0x{parsefile:x} "
+                        f"linno={vm.memory.read(parsefile + 8, 32)} "
+                        f"fd={vm.memory.read(parsefile + 12, 32)} "
+                        f"left_line={vm.memory.read(parsefile + 16, 32)} "
+                        f"left_buffer={vm.memory.read(parsefile + 20, 32)} "
+                        f"next=0x{next_ptr:x} buf=0x{buf_ptr:x} "
+                        f"consumed={next_ptr - buf_ptr if next_ptr and buf_ptr else -1} "
+                        f"lastc0={vm.memory.read(parsefile + 120, 32)} "
+                        f"lastc1={vm.memory.read(parsefile + 124, 32)} "
+                        f"unget={vm.memory.read(parsefile + 128, 32)} "
+                        f"preview={bytes(preview)!r}",
+                        flush=True,
+                    )
             vm.halted = True
             print(
                 "BOOT_EXEC_USER_EXIT "
