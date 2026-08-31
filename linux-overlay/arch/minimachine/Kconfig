@@ -28,6 +28,15 @@ config NR_CPUS
 	int
 	default 1
 
+config ARCH_FORCE_MAX_ORDER
+	int
+	default 13
+	help
+	  MiniMachine is NOMMU, so executable mappings may need physically
+	  contiguous private copies.  A normal static BusyBox P3 carrier is
+	  about 9 MiB and therefore needs an allocation order large enough
+	  for a 16 MiB contiguous mapping.
+
 config GENERIC_HWEIGHT
 	def_bool y
 
