@@ -121,9 +121,9 @@ def write_init(path: Path, profile: str) -> None:
                 "  rc=$?",
                 (
                     "  printf 'MMRT_CASE_FAIL id=%s status=%s\\n' "
-                    f"{case.case_id} "$rc""
+                    f'{case.case_id} "$rc"'
                 ),
-                "  exit "$rc"",
+                '  exit "$rc"',
                 "fi",
             ]
         )
