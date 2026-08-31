@@ -959,6 +959,58 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return 1
         return user_mallopt
 
+    if original == "getcwd":
+        def user_getcwd(vm, args):
+            if len(args) != 2:
+                raise VMError("getcwd expects buffer,size")
+            buf, size = map(int, args)
+            allocated = False
+            capacity = size
+
+            if buf == 0:
+                # GNU/POSIX extension used by BusyBox ash: getcwd(NULL, 0)
+                # asks libc to allocate a sufficiently large result buffer.
+                capacity = size if size else 4096
+                buf = vm.alloc_bytes(capacity, align=16)
+                allocations = getattr(vm, "user_allocations", None)
+                if allocations is None:
+                    allocations = {}
+                    vm.user_allocations = allocations
+                allocations[buf] = capacity
+                allocated = True
+            elif size == 0:
+                set_errno(vm, 22)
+                return 0
+
+            raw = user_syscall(
+                vm,
+                (17, buf, capacity, 0, 0, 0, 0),
+            )
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                set_errno(vm, -signed)
+                if allocated:
+                    allocations = getattr(vm, "user_allocations", None)
+                    if allocations is not None:
+                        allocations.pop(buf, None)
+                return 0
+
+            preview = bytearray()
+            for index in range(min(capacity, 512)):
+                byte = vm.memory.read(buf + index, 8)
+                if byte == 0:
+                    break
+                preview.append(byte)
+            print(
+                "BOOT_EXEC_USER_GETCWD "
+                f"ptr=0x{buf:x} size={capacity} "
+                f"result={preview.decode('utf-8', errors='replace')!r}",
+                flush=True,
+            )
+            return buf
+
+        return user_getcwd
+
     if original == "malloc":
         def malloc(vm, args):
             if len(args) != 1:
@@ -1653,6 +1705,7 @@ def user_syscall(vm, args: tuple[int, ...]):
 
     nr, *argv = args
     fallback = {
+        17: ("__se_sys_getcwd", 2),
         49: ("__se_sys_chdir", 1),
         57: ("__se_sys_close", 1),
         63: ("__se_sys_read", 3),
