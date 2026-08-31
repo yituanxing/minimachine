@@ -912,6 +912,22 @@ class NativeVM(VM):
                     except Exception:
                         parsefile = 0
                         left_line = left_buffer = lastc0 = lastc1 = unget = -1
+                    parser_slots = ""
+                    if self.current_function == "__mm_user_xxreadtoken":
+                        linked = self.program.functions.get(self.current_function)
+                        if linked is not None:
+                            slot_parts = []
+                            for slot_name in ("16", "17", "21", "22", "37", "38", "39", "40", "41", "42", "46"):
+                                offset = linked.slot_offsets.get(slot_name)
+                                if offset is None:
+                                    continue
+                                try:
+                                    value = self.memory.read(self.sp + offset, 64)
+                                except Exception:
+                                    continue
+                                slot_parts.append(f"{slot_name}=0x{value:x}")
+                            if slot_parts:
+                                parser_slots = " slots=" + ",".join(slot_parts)
                     print(
                         "BOOT_EXEC_NATIVE_SINGLE_STEP "
                         f"remaining={trace_remaining} steps={self.steps} "
@@ -926,7 +942,8 @@ class NativeVM(VM):
                         f"result_value=0x{result_value:x} "
                         f"parsefile=0x{parsefile:x} left_line={left_line} "
                         f"left_buffer={left_buffer} lastc0={lastc0} "
-                        f"lastc1={lastc1} unget={unget}",
+                        f"lastc1={lastc1} unget={unget}"
+                        f"{parser_slots}",
                         flush=True,
                     )
                     self._single_step_trace_remaining = trace_remaining - 1
