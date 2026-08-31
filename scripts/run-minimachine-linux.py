@@ -163,6 +163,14 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--restart-init-path",
+        default="/init",
+        help=(
+            "path passed to run_init_process when "
+            "--restart-run-init-after-checkpoint is used; defaults to /init"
+        ),
+    )
+    p.add_argument(
         "--skip-prepare-namespace-after-inject",
         action="store_true",
         help=(
@@ -2923,7 +2931,15 @@ def main() -> int:
                     flush=True,
                 )
                 return 1
-            guest_path = b"/init\0"
+            restart_path = args.restart_init_path
+            if not restart_path.startswith("/"):
+                print(
+                    "BOOT_EXEC_BLOCKED stage=init-exec-restart "
+                    "error=--restart-init-path-must-be-absolute",
+                    flush=True,
+                )
+                return 1
+            guest_path = restart_path.encode("utf-8") + b"\0"
             path_ptr = vm.alloc_bytes(len(guest_path), align=8)
             bulk_write = getattr(vm.memory, "bulk_write", None)
             if bulk_write is not None:
@@ -2947,7 +2963,7 @@ def main() -> int:
             vm.init_exec_restart_result_base = result_base
             print(
                 "BOOT_EXEC_INIT_EXEC_RESTART "
-                f"path=/init path_ptr=0x{path_ptr:x} "
+                f"path={restart_path} path_ptr=0x{path_ptr:x} "
                 f"sp=0x{vm.sp:x} steps={vm.steps}",
                 flush=True,
             )
