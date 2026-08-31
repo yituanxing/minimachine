@@ -1375,6 +1375,28 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                         f"preview={bytes(preview)!r}",
                         flush=True,
                     )
+            evalskip_symbol = vm.program.symbol_addresses.get(
+                "__mm_user_evalskip"
+            )
+            misc_symbol = vm.program.symbol_addresses.get(
+                "__mm_user_ash_ptr_to_globals_misc"
+            )
+            evalskip = (
+                vm.memory.read(evalskip_symbol, 8)
+                if evalskip_symbol is not None else -1
+            )
+            misc = (
+                vm.memory.read(misc_symbol, 64)
+                if misc_symbol is not None else 0
+            )
+            nflag = vm.memory.read(misc + 98, 8) if misc else -1
+            sflag = vm.memory.read(misc + 99, 8) if misc else -1
+            print(
+                "BOOT_EXEC_USER_ASH_CONTROL_EXIT "
+                f"evalskip={evalskip} nflag={nflag} sflag={sflag} "
+                f"misc=0x{misc:x}",
+                flush=True,
+            )
             vm.halted = True
             print(
                 "BOOT_EXEC_USER_EXIT "
