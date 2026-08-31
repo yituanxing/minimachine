@@ -1094,6 +1094,7 @@ class RuntimeTests(unittest.TestCase):
 
         strchr = direct_runtime_callback("strchr")
         strchrnul = direct_runtime_callback("strchrnul")
+        strrchr = direct_runtime_callback("strrchr")
         strcasecmp = direct_runtime_callback("strcasecmp")
         strcspn = direct_runtime_callback("strcspn")
         strpbrk = direct_runtime_callback("strpbrk")
@@ -1102,6 +1103,7 @@ class RuntimeTests(unittest.TestCase):
         strtok_r = direct_runtime_callback("strtok_r")
         self.assertIsNotNone(strchr)
         self.assertIsNotNone(strchrnul)
+        self.assertIsNotNone(strrchr)
         self.assertIsNotNone(strcasecmp)
         self.assertIsNotNone(strcspn)
         self.assertIsNotNone(strpbrk)
@@ -1111,6 +1113,7 @@ class RuntimeTests(unittest.TestCase):
 
         assert strchr is not None
         assert strchrnul is not None
+        assert strrchr is not None
         assert strcasecmp is not None
         assert strcspn is not None
         assert strpbrk is not None
@@ -1121,6 +1124,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(strchr(vm, (a, ord("="))), a + 5)
         self.assertEqual(strchr(vm, (a, ord("Z"))), 0)
         self.assertEqual(strchrnul(vm, (b, ord("Z"))), b + 4)
+        self.assertEqual(strrchr(vm, (a, ord("a"))), a + 15)
+        self.assertEqual(strrchr(vm, (a, ord("Z"))), 0)
+        self.assertEqual(strrchr(vm, (a, 0)), a + len(b"Alpha=Beta,Gamma"))
         put(0xB800, b"BETA")
         self.assertEqual(strcasecmp(vm, (b, 0xB800)), 0)
         self.assertEqual(strcspn(vm, (a, c)), 5)
