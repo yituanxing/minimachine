@@ -1036,6 +1036,42 @@ class RuntimeTests(unittest.TestCase):
         )
 
 
+    def test_xxreadtoken_newline_table_lookup_preserves_pointer(self):
+        llvm = r"""
+            @chars = internal constant [7 x i8] c"\0A()&|;\00", align 1
+            @tokens = internal constant [10 x i8] c"\01\09\0A\05\08\04\00\06\07\0B", align 1
+            declare ptr @memchr(ptr, i32, i64)
+
+            define signext i32 @token_lookup(i32 %c) {
+            entry:
+              %p = call ptr @memchr(ptr @chars, i32 %c, i64 7)
+              %p32 = ptrtoint ptr %p to i32
+              %idx32 = sub i32 %p32, ptrtoint (ptr @chars to i32)
+              %wide = icmp sgt i32 %idx32, 2
+              br i1 %wide, label %other, label %single
+
+            other:
+              br label %join
+
+            single:
+              br label %join
+
+            join:
+              %q = phi ptr [ getelementptr inbounds ([7 x i8], ptr @chars, i64 0, i64 6), %other ], [ %p, %single ]
+              %q64 = ptrtoint ptr %q to i64
+              %idx64 = sub i64 %q64, ptrtoint (ptr @chars to i64)
+              %addr = getelementptr inbounds [10 x i8], ptr @tokens, i64 0, i64 %idx64
+              %byte = load i8, ptr %addr, align 1
+              %result = zext i8 %byte to i32
+              ret i32 %result
+            }
+        """
+        functions, _ = legalize_module(llvm)
+        program = executable(functions)
+        install_module_image(program, parse_module_image(llvm))
+
+        self.assertEqual(program.new_vm().run_function("token_lookup", (10,)), (1,))
+
     def test_portable_string_runtime_services_execute(self):
         functions, _ = legalize_module(
             """
