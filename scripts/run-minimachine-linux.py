@@ -1746,6 +1746,38 @@ def linux_ecall(vm, args: tuple[int, ...]):
         functions = list(user_image.functions)
         entry_name = user_image.entry
 
+        decoded_xxreadtoken = next(
+            (
+                function
+                for function in functions
+                if function.name == "__mm_user_xxreadtoken"
+            ),
+            None,
+        )
+        if decoded_xxreadtoken is not None:
+            decoded_block19 = next(
+                (
+                    block
+                    for block in decoded_xxreadtoken.blocks
+                    if block.label == "19"
+                ),
+                None,
+            )
+            if (
+                decoded_block19 is not None
+                and len(decoded_block19.instructions) > 3
+            ):
+                decoded_inst = decoded_block19.instructions[3]
+                decoded_width = getattr(
+                    getattr(decoded_inst, "width", None), "value", None
+                )
+                print(
+                    "BOOT_EXEC_USER_P3_DECODE "
+                    f"function=__mm_user_xxreadtoken block=19 ip=3 "
+                    f"type={type(decoded_inst).__name__} width={decoded_width}",
+                    flush=True,
+                )
+
         entry_argv: tuple[int, ...] = ()
         user_envp = 0
         if user_image.entry_args == "linux-main":
