@@ -2371,6 +2371,15 @@ def inject_live_root_init(vm, path: Path) -> None:
         "filp_open",
         (path_ptr, open_flags, 0o755),
         result_count=1,
+        max_extra_steps=max(
+            16_000_000,
+            len(data) * 2,
+        ),
+    )
+    print(
+        "BOOT_EXEC_ROOTFS_OPEN "
+        f"path=/init file=0x{file_ptr:x} bytes={len(data)}",
+        flush=True,
     )
     if file_ptr >= (1 << 64) - 4095:
         signed = file_ptr - (1 << 64)
