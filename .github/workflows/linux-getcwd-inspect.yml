@@ -48,6 +48,9 @@ jobs:
               "_copy_to_user",
               "setup_object",
               "kmem_cache_alloc",
+              "kmem_cache_alloc_node",
+              "setup_object",
+              "kmem_cache_alloc",
           ]
           print(f"GETCWD_CACHE functions={len(program.functions)}")
           seen_symbols = set()
