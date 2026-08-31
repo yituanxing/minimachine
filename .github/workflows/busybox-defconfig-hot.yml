@@ -5,6 +5,7 @@ on:
   push:
     branches: [work/native-p3-vm]
     paths:
+      - scripts/run-minimachine-linux.py
       - .github/workflows/busybox-defconfig-hot.yml
 
 permissions:
@@ -109,6 +110,7 @@ jobs:
       - name: Assert full defconfig BusyBox shell
         run: |
           grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/busybox-defconfig-hot.log
+          grep -F 'BOOT_EXEC_ROOTFS_OPEN path=/init' build/busybox-defconfig-hot.log
           grep -F 'BOOT_EXEC_ROOTFS_INJECTED path=/init' build/busybox-defconfig-hot.log
           grep -F 'BOOT_EXEC_USER_HANDOFF ' build/busybox-defconfig-hot.log
           grep -F 'function=__mm_user_ash_main functions=3043' build/busybox-defconfig-hot.log
@@ -122,7 +124,7 @@ jobs:
       - name: Summarize defconfig execution
         if: always()
         run: |
-          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|ROOTFS_INJECTED|INIT_EXEC_RESTART|USER_RUNTIME|USER_EXTERNAL_SURFACE|USER_EXTERNAL_DATA|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_VSNPRINTF|USER_ATOI|USER_EXIT|BLOCKED|HALTED)|BUSYBOX_DEFCFG_' \
+          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|ROOTFS_OPEN|ROOTFS_INJECTED|INIT_EXEC_RESTART|USER_RUNTIME|USER_EXTERNAL_SURFACE|USER_EXTERNAL_DATA|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_VSNPRINTF|USER_ATOI|USER_EXIT|BLOCKED|HALTED)|BUSYBOX_DEFCFG_' \
             build/busybox-defconfig-hot.log | tail -420 || true
 
       - name: Upload defconfig trace
