@@ -1,0 +1,121 @@
+name: MiniMachine BusyBox Defconfig Cold
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/busybox-defconfig-cold.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  defconfig-cold:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download 64 MiB Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33346013400
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33346013400
+          path: linux
+
+      - name: Download full defconfig BusyBox bundle
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33313986393
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-bundle-33313986393
+          path: defconfig
+
+      - name: Build full defconfig BusyBox initramfs
+        run: |
+          python3 scripts/build-minimachine-initramfs.py \
+            build/busybox-defconfig.cpio \
+            --init-image defconfig/busybox-ash.bflt \
+            --init-output build/busybox-defconfig-copy.bflt \
+            2>&1 | tee build/busybox-defconfig-cpio.log
+          grep -F 'INITRAMFS_READY ' build/busybox-defconfig-cpio.log
+          test -s build/busybox-defconfig.cpio
+          test -s linux/llvm/linked.ll
+          test -s linux/llvm/linux-initramfs-p3-cache.pkl.gz
+          ls -lh \
+            build/busybox-defconfig.cpio \
+            defconfig/busybox-ash.bflt \
+            linux/llvm/linked.ll \
+            linux/llvm/linux-initramfs-p3-cache.pkl.gz
+
+      - name: Cold boot 64 MiB Linux into full defconfig BusyBox
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          set +e
+          printf 'echo BUSYBOX_DEFCFG_COLD_OK\nvalue=42\necho BUSYBOX_DEFCFG_COLD_VAR_$value\nfalse\necho BUSYBOX_DEFCFG_COLD_FALSE_STATUS_$?\nexit 0\n' | \
+          /usr/bin/time -f 'BUSYBOX_DEFCFG_COLD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 1500 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in linux/llvm/linux-initramfs-p3-cache.pkl.gz \
+            --initramfs build/busybox-defconfig.cpio \
+            --native-vm \
+            --native-boot-phases-only \
+            --native-report-every 50000000 \
+            --checkpoint-out build/busybox-defconfig-kernel-execve.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/busybox-defconfig-cold.log
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "BUSYBOX_DEFCFG_COLD_STATUS=$status" | tee -a build/busybox-defconfig-cold.log
+
+      - name: Assert full defconfig cold shell
+        run: |
+          grep -F 'BOOT_EXEC_INITRAMFS path=build/busybox-defconfig.cpio' build/busybox-defconfig-cold.log
+          grep -F 'BOOT_EXEC_INITRAMFS_NAME ' build/busybox-defconfig-cold.log | grep -F "name='init'"
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED path=build/busybox-defconfig-kernel-execve.chk.gz' build/busybox-defconfig-cold.log
+          grep -F 'BOOT_EXEC_USER_HANDOFF ' build/busybox-defconfig-cold.log
+          grep -F 'function=__mm_user_ash_main functions=3043' build/busybox-defconfig-cold.log
+          grep -Fx 'BUSYBOX_DEFCFG_COLD_OK' build/busybox-defconfig-cold.log
+          grep -Fx 'BUSYBOX_DEFCFG_COLD_VAR_42' build/busybox-defconfig-cold.log
+          grep -Fx 'BUSYBOX_DEFCFG_COLD_FALSE_STATUS_1' build/busybox-defconfig-cold.log
+          grep -F 'BOOT_EXEC_USER_EXIT status=0' build/busybox-defconfig-cold.log
+          grep -F 'BUSYBOX_DEFCFG_COLD_STATUS=0' build/busybox-defconfig-cold.log
+          ! grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/busybox-defconfig-cold.log
+          ! grep -F 'BOOT_EXEC_ROOTFS_INJECTED ' build/busybox-defconfig-cold.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-defconfig-cold.log
+
+      - name: Summarize full defconfig cold boot
+        if: always()
+        run: |
+          grep -E 'BOOT_EXEC_(STAGE|MILESTONE|INITRAMFS|CHECKPOINT_SAVED|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_VSNPRINTF|USER_ATOI|USER_EXIT|HALTED|BLOCKED)|BUSYBOX_DEFCFG_COLD_' \
+            build/busybox-defconfig-cold.log | tail -500 || true
+
+      - name: Upload full defconfig cold evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-defconfig-cold-${{ github.run_id }}
+          path: |
+            build/busybox-defconfig-cold.log
+            build/busybox-defconfig-cpio.log
+            build/busybox-defconfig-kernel-execve.chk.gz
+          if-no-files-found: warn
+          retention-days: 7
