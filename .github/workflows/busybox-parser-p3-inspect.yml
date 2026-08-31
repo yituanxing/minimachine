@@ -1,0 +1,51 @@
+name: MiniMachine BusyBox Parser P3 Inspect
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/busybox-parser-p3-inspect.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download pointer-phi-fixed multicall image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33396890631
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-multicall-33396890631
+          path: busybox
+
+      - name: Dump xxreadtoken P3 and data objects
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from src.minimachine.user_image import BFLT_HEADER_SIZE, unpack_user_image
+
+          blob = Path("busybox/busybox-multicall.bflt").read_bytes()
+          data_start = int.from_bytes(blob[12:16], "big")
+          program = unpack_user_image(blob[BFLT_HEADER_SIZE:data_start])
+
+          fn = next(f for f in program.functions if f.name == "__mm_user_xxreadtoken")
+          for block in fn.blocks:
+              if block.label in {"15", ".loopexit", "19", ".loopexit4", "45"}:
+                  print(f"PARSER_P3_BLOCK {block.label}")
+                  for i, inst in enumerate(block.instructions):
+                      print(f"PARSER_P3_INST block={block.label} ip={i} {inst!r}")
+
+          if program.image is not None:
+              for obj in program.image.objects:
+                  if "xxreadtoken" in obj.name:
+                      print(f"PARSER_DATA_OBJECT {obj!r}")
+          PY
