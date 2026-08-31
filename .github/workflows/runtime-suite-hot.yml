@@ -115,6 +115,7 @@ jobs:
       - name: Verify complete core runtime suite
         run: |
           python3 scripts/minimachine-runtime-suite.py             verify-log build/runtime-suite.log --profile core
+          grep -F 'BOOT_EXEC_INIT_EXEC_RESTART path=/mmrt' build/runtime-suite.log
           grep -F 'MMRT_RUN_STATUS=0' build/runtime-suite.log
 
       - name: Upload runtime evidence
