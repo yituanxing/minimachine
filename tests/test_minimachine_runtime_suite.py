@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
@@ -14,6 +15,7 @@ def load_suite():
     spec = spec_from_file_location("minimachine_runtime_suite", SUITE_PATH)
     assert spec is not None and spec.loader is not None
     module = module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
