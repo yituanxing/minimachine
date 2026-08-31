@@ -1862,8 +1862,9 @@ def linux_ecall(vm, args: tuple[int, ...]):
             ("__mm_user_setpwd", "25")
         )
         if setpwd_watch is not None and hasattr(vm, "set_watch_codes"):
-            vm.trace_single_step_watch_code = setpwd_watch
-            vm.trace_single_step_count = 400
+            if not getattr(vm, "trace_single_step_watch_code", 0):
+                vm.trace_single_step_watch_code = setpwd_watch
+                vm.trace_single_step_count = 400
             existing_watches = tuple(getattr(vm, "_watch_codes", ()))
             vm.set_watch_codes(existing_watches + (setpwd_watch,))
             print(
