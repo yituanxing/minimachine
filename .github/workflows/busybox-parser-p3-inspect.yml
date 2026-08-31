@@ -27,6 +27,33 @@ jobs:
           name: minimachine-busybox-multicall-33396890631
           path: busybox
 
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-18
+
+      - name: Download frozen whole-LTO carrier
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33300177445
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-bitcode-33300177445
+          path: carrier
+
+      - name: Dump xxreadtoken LLVM
+        run: |
+          llvm-dis-18 carrier/whole-lto/busybox_unstripped.0.4.opt.bc -o build-busybox.ll
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path("build-busybox.ll").read_text()
+          start = text.index("define internal fastcc i32 @xxreadtoken(")
+          end = text.index("\n}", start) + 2
+          print("PARSER_LLVM_BEGIN")
+          print(text[start:end])
+          print("PARSER_LLVM_END")
+          PY
+
       - name: Dump xxreadtoken P3 and data objects
         run: |
           python3 - <<'PY'
