@@ -95,37 +95,50 @@ def _line_present(text: str, marker: str) -> bool:
     return marker in text.replace("\r", "").splitlines()
 
 
+def case_script_name(index: int) -> str:
+    return f"mmrt-c{index:02d}"
+
+
 def write_init(path: Path, profile: str) -> None:
     cases = PROFILES[profile]
-    lines = [
-        "#!/bin/sh",
-        "PATH=/bin",
-        "export PATH",
-        f"printf 'MMRT_SUITE_START profile=%s cases=%s\\n' {profile} {len(cases)}",
-    ]
-    for case in cases:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    case_paths: list[Path] = []
+    for index, case in enumerate(cases):
         for marker in case.markers:
             if marker in case.command:
                 raise ValueError(
                     f"runtime case {case.case_id!r} embeds exact marker {marker!r}"
                 )
-        lines.extend(
-            [
-                (
-                    "printf 'MMRT_CASE_START id=%s level=%s\\n' "
-                    f"{case.case_id} {case.level}"
-                ),
-                f"if ( {case.command} ); then",
-                f"  printf 'MMRT_CASE_PASS id=%s\\n' {case.case_id}",
-                "else",
-                "  rc=$?",
-                (
-                    "  printf 'MMRT_CASE_FAIL id=%s status=%s\\n' "
-                    f'{case.case_id} "$rc"'
-                ),
-                '  exit "$rc"',
-                "fi",
-            ]
+        case_path = path.parent / case_script_name(index)
+        case_path.write_text(
+            "#!/bin/sh\n"
+            "PATH=/bin\n"
+            "export PATH\n"
+            f"{case.command}\n"
+        )
+        case_paths.append(case_path)
+
+    lines = [
+        "#!/bin/sh",
+        "PATH=/bin",
+        "export PATH",
+        "run_case() {",
+        "  id=$1; level=$2; script=$3",
+        "  printf 'MMRT_CASE_START id=%s level=%s\\n' \"$id\" \"$level\"",
+        "  if /bin/sh \"$script\"; then",
+        "    printf 'MMRT_CASE_PASS id=%s\\n' \"$id\"",
+        "  else",
+        "    rc=$?",
+        "    printf 'MMRT_CASE_FAIL id=%s status=%s\\n' \"$id\" \"$rc\"",
+        "    exit \"$rc\"",
+        "  fi",
+        "}",
+        f"printf 'MMRT_SUITE_START profile=%s cases=%s\\n' {profile} {len(cases)}",
+    ]
+    for index, case in enumerate(cases):
+        lines.append(
+            f"run_case {case.case_id} {case.level} /{case_script_name(index)}"
         )
     lines.extend(
         [
@@ -134,13 +147,28 @@ def write_init(path: Path, profile: str) -> None:
             "",
         ]
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines))
-    print(f"MMRT_INIT_READY profile={profile} cases={len(cases)} path={path}")
-    for case in cases:
+    text = "\n".join(lines)
+    if len(text.encode()) >= 1024:
+        raise ValueError(
+            f"runtime dispatcher exceeds one ash input buffer: {len(text.encode())}"
+        )
+    for case_path in case_paths:
+        size = case_path.stat().st_size
+        if size >= 1024:
+            raise ValueError(
+                f"runtime case script exceeds one ash input buffer: "
+                f"{case_path.name}={size}"
+            )
+    path.write_text(text)
+    print(
+        f"MMRT_INIT_READY profile={profile} cases={len(cases)} path={path} "
+        f"dispatcher_bytes={len(text.encode())} sidecars={len(case_paths)}"
+    )
+    for index, case in enumerate(cases):
         print(
             "MMRT_CASE "
             f"level={case.level} id={case.case_id} "
+            f"script={case_script_name(index)} "
             f"coverage={case.coverage}"
         )
 
