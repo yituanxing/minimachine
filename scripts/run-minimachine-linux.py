@@ -1044,6 +1044,24 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return libc_linux_result(vm, raw)
         return user_fcntl
 
+    if original in {"dup", "dup2"}:
+        def user_dup(vm, args):
+            expected = 1 if original == "dup" else 2
+            if len(args) != expected:
+                raise VMError(f"{original} expects {expected} fd argument(s)")
+            target = "__se_sys_dup" if original == "dup" else "__se_sys_dup2"
+            if target not in vm.program.functions:
+                raise VMError(f"Linux image is missing {target}")
+            raw, = _call_linux_function_preserving_control(
+                vm,
+                target,
+                tuple(int(value) for value in args),
+                result_count=1,
+                max_extra_steps=8_000_000,
+            )
+            return libc_linux_result(vm, raw)
+        return user_dup
+
     if original in {"open", "open64"}:
         def user_open(vm, args):
             if len(args) not in {2, 3}:
