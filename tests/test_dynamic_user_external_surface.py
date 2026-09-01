@@ -51,6 +51,32 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(vm.memory.read(environ, 64), 0x12345678)
 
 
+    def test_linux_context_switch_accepts_first_run_user_task(self):
+        runner = load_runner()
+        fn = muir.Function(
+            "minimachine_ret_from_fork",
+            [muir.Block("entry", [muir.Ret(None)])],
+            set(),
+        )
+        expanded, _ = expand_function(fn)
+        program = Program((lower_function(expanded),))
+        vm = program.new_vm()
+        vm.linux_shadow_stack_next = 0xF0000000
+
+        vm.memory.write(vm.sp + runner.RESULT_COUNT, 64, 1)
+        vm.memory.write(vm.sp + runner.CALLER_SP, 64, 0xABC000)
+        vm.memory.write(vm.sp + runner.RET_PC, 64, program.halt_code)
+        vm.memory.write(vm.sp + runner.RESULT_PTR, 64, 0xABD000)
+
+        result = runner.linux_ecall(
+            vm,
+            (2, 0x1000, 0x2000, 0x3000, 0, 0),
+        )
+        self.assertIs(result, runner.HOST_CONTROL_TRANSFER)
+        self.assertEqual(vm.linux_current_task, 0x2000)
+        self.assertEqual(vm.current_function, "minimachine_ret_from_fork")
+        self.assertEqual(vm.linux_task_shadow_stacks[0x2000], 0xF0000000)
+
     def test_getopt_tracks_guest_short_option_state(self):
         runner = load_runner()
         program = Program()
