@@ -781,10 +781,10 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return 0
         return user_fputs
 
-    if original == "putc_unlocked":
+    if original in {"fputc", "putc_unlocked"}:
         def user_putc(vm, args):
             if len(args) != 2:
-                raise VMError("putc_unlocked expects char,FILE*")
+                raise VMError(f"{original} expects char,FILE*")
             ch, stream = map(int, args)
             ptr = vm.alloc_bytes(1, align=1)
             vm.memory.write(ptr, 8, ch & 0xFF)
@@ -798,6 +798,21 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                 return (1 << 64) - 1
             return ch & 0xFF
         return user_putc
+
+    if original in {"putchar", "putchar_unlocked"}:
+        def user_putchar(vm, args):
+            if len(args) != 1:
+                raise VMError(f"{original} expects char")
+            ch = int(args[0])
+            ptr = vm.alloc_bytes(1, align=1)
+            vm.memory.write(ptr, 8, ch & 0xFF)
+            raw = user_syscall(vm, (64, 1, ptr, 1, 0, 0, 0))
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+            return ch & 0xFF
+        return user_putchar
 
     if original == "puts":
         def user_puts(vm, args):
