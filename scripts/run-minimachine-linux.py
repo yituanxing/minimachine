@@ -956,7 +956,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             vm.memory.write(stat_ptr + dst_off, 64, sec)
             vm.memory.write(stat_ptr + dst_off + 8, 64, nsec)
 
-    if original in {"stat", "lstat"}:
+    if original in {"stat", "stat64", "lstat", "lstat64"}:
         def user_stat(vm, args):
             if len(args) != 2:
                 raise VMError(f"{original} expects path,stat")
@@ -973,7 +973,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     vm.memory.write(statx_ptr + i, 8, 0)
 
             at_fdcwd = (-100) & ((1 << 64) - 1)
-            flags = 0x100 if original == "lstat" else 0
+            flags = 0x100 if original in {"lstat", "lstat64"} else 0
             statx_basic_stats = 0x000007FF
             result, = _call_linux_function_preserving_control(
                 vm,
