@@ -1123,6 +1123,112 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return libc_linux_result(vm, raw)
         return user_open
 
+    if original == "opendir":
+        def user_opendir(vm, args):
+            if len(args) != 1:
+                raise VMError("opendir expects path")
+            path = int(args[0])
+            # asm-generic Linux flags: O_DIRECTORY | O_CLOEXEC.
+            raw = user_syscall(
+                vm,
+                (
+                    56,
+                    (-100) & ((1 << 64) - 1),
+                    path,
+                    0x10000 | 0x80000,
+                    0,
+                    0,
+                    0,
+                ),
+            )
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                set_errno(vm, -signed)
+                return 0
+
+            streams = getattr(vm, "user_dir_streams", None)
+            if streams is None:
+                streams = {}
+                vm.user_dir_streams = streams
+            handle = vm.alloc_bytes(32, align=8)
+            buffer_ptr = vm.alloc_bytes(4096, align=8)
+            streams[handle] = {
+                "fd": int(raw),
+                "buffer": buffer_ptr,
+                "size": 0,
+                "pos": 0,
+            }
+            print(
+                "BOOT_EXEC_USER_OPENDIR "
+                f"path=0x{path:x} fd={int(raw)} handle=0x{handle:x}",
+                flush=True,
+            )
+            return handle
+        return user_opendir
+
+    if original in {"readdir", "readdir64"}:
+        def user_readdir(vm, args):
+            if len(args) != 1:
+                raise VMError(f"{original} expects DIR*")
+            handle = int(args[0])
+            streams = getattr(vm, "user_dir_streams", {})
+            state = streams.get(handle)
+            if state is None:
+                set_errno(vm, 9)
+                return 0
+
+            while True:
+                if state["pos"] < state["size"]:
+                    entry = state["buffer"] + state["pos"]
+                    reclen = vm.memory.read(entry + 16, 16)
+                    if reclen < 20 or state["pos"] + reclen > state["size"]:
+                        raise VMError(
+                            "getdents64 returned malformed dirent: "
+                            f"pos={state['pos']} size={state['size']} "
+                            f"reclen={reclen}"
+                        )
+                    state["pos"] += reclen
+                    return entry
+
+                raw = user_syscall(
+                    vm,
+                    (
+                        61,  # getdents64
+                        state["fd"],
+                        state["buffer"],
+                        4096,
+                        0,
+                        0,
+                        0,
+                    ),
+                )
+                signed = raw - (1 << 64) if raw & (1 << 63) else raw
+                if signed < 0:
+                    set_errno(vm, -signed)
+                    return 0
+                if signed == 0:
+                    return 0
+                state["size"] = int(signed)
+                state["pos"] = 0
+        return user_readdir
+
+    if original == "closedir":
+        def user_closedir(vm, args):
+            if len(args) != 1:
+                raise VMError("closedir expects DIR*")
+            handle = int(args[0])
+            streams = getattr(vm, "user_dir_streams", {})
+            state = streams.pop(handle, None)
+            if state is None:
+                set_errno(vm, 9)
+                return (1 << 64) - 1
+            raw = user_syscall(
+                vm,
+                (57, state["fd"], 0, 0, 0, 0, 0),
+            )
+            return libc_linux_result(vm, raw)
+        return user_closedir
+
     if original == "getcwd":
         def user_getcwd(vm, args):
             if len(args) != 2:
@@ -2404,6 +2510,7 @@ def user_syscall(vm, args: tuple[int, ...]):
         49: ("__se_sys_chdir", 1),
         56: ("__se_sys_openat", 4),
         57: ("__se_sys_close", 1),
+        61: ("__se_sys_getdents64", 3),
         63: ("__se_sys_read", 3),
         64: ("__se_sys_write", 3),
         93: ("__se_sys_exit", 1),
