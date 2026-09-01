@@ -87,6 +87,31 @@ class LegalizerTests(unittest.TestCase):
             )
         )
 
+    def test_switch_with_profile_metadata_lowers_normally(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @f(i8 %x) {
+            entry:
+              switch i8 %x, label %other [
+                i8 3, label %three
+                i8 19, label %nineteen
+              ], !prof !1
+            three:
+              ret i64 3
+            nineteen:
+              ret i64 19
+            other:
+              ret i64 0
+            }
+            !1 = !{!"branch_weights", i32 1, i32 2, i32 3}
+            """
+        )
+        self.assertEqual(stats.lowered_switch, 1)
+        by_name = {b.label: b for b in fn.blocks}
+        self.assertIn("three", by_name)
+        self.assertIn("nineteen", by_name)
+        self.assertIn("other", by_name)
+
     def test_switch_phi_copy_is_placed_on_selected_edge(self):
         fn, stats = self.lower_one(
             """
