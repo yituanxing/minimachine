@@ -217,10 +217,21 @@ def build_user_program_from_llvm(
     *,
     entry: str,
     entry_args: str = "linux-main",
+    namespace: str = "user",
 ) -> tuple[UserProgramImage, RuntimeSurface]:
+    if (
+        not namespace
+        or not all(ch.isalnum() or ch == "_" for ch in namespace)
+        or namespace[0].isdigit()
+    ):
+        raise ValueError(
+            "userspace namespace must start with a letter/underscore and "
+            "contain only letters, digits, or underscores"
+        )
+
     functions, _stats = legalize_module(text)
     if not any(function.name == entry for function in functions):
-        raise ValueError(f"BusyBox entry function is missing: {entry}")
+        raise ValueError(f"userspace entry function is missing: {entry}")
 
     for function in functions:
         verify_muir(function)
@@ -241,4 +252,8 @@ def build_user_program_from_llvm(
         entry_args=entry_args,
         runtime_helpers=tuple(sorted(surface.helpers)),
     )
-    return namespace_user_program(program), surface
+    return namespace_user_program(
+        program,
+        internal_prefix=f"__mm_{namespace}_",
+        external_prefix=f"__mm_{namespace}_ext_",
+    ), surface
