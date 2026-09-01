@@ -5,9 +5,15 @@ on:
   push:
     branches: [work/native-p3-vm]
     paths:
+      - native/p3vm.c
       - scripts/run-minimachine-linux.py
+      - src/minimachine/native_vm.py
       - src/minimachine/runtime.py
       - .github/workflows/busybox-ash-restart-hot.yml
+
+concurrency:
+  group: busybox-ash-restart-hot-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -16,7 +22,7 @@ permissions:
 jobs:
   ash-restart:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
 
@@ -26,41 +32,48 @@ jobs:
           gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
             native/p3vm.c -o build/libminimachine_p3vm.so
 
-      - name: Download exact Linux image
+      - name: Download current 64 MiB Linux image
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33295701837
+          run-id: 33348074309
           github-token: ${{ github.token }}
-          name: minimachine-linux-initramfs-33295701837
-          path: console
+          name: minimachine-linux-initramfs-33348074309
+          path: linux
 
-      - name: Download proven kernel_execve checkpoint
+      - name: Download current-lowering Linux P3 cache
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33296957158
+          run-id: 33399276976
           github-token: ${{ github.token }}
-          name: minimachine-shell-echo-33296957158
-          path: echo
+          name: minimachine-linux-p3-console-current-33399276976
+          path: current-cache
 
-      - name: Download frozen ash carrier
+      - name: Download full defconfig BusyBox bundle
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33322123027
+          run-id: 33313986393
           github-token: ${{ github.token }}
-          name: minimachine-busybox-ash-carrier-33322123027
-          path: ash
+          name: minimachine-busybox-bundle-33313986393
+          path: defconfig
 
-      - name: Download current console-read P3 cache
+      - name: Download current defconfig kernel_execve checkpoint
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33322528617
+          run-id: 33348461525
           github-token: ${{ github.token }}
-          name: minimachine-linux-p3-console-current-33322528617
-          path: console-refresh
+          name: minimachine-busybox-defconfig-cold-33348461525
+          path: defcold
+
+      - name: Rebuild exact defconfig initramfs
+        run: |
+          python3 scripts/build-minimachine-initramfs.py \
+            build/busybox-defconfig.cpio \
+            --init-image defconfig/busybox-ash.bflt
+          test -s defcold/busybox-defconfig-kernel-execve.chk.gz
 
       - name: Restart fresh init exec and run ash
         env:
@@ -70,14 +83,14 @@ jobs:
           set +e
           printf 'echo BUSYBOX_MINIMACHINE_HELLO\nvalue=42\necho BUSYBOX_VAR_$value\nfalse\necho BUSYBOX_FALSE_STATUS_$?\nexit 0\n' | \
           /usr/bin/time -f 'ASH_RESTART_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
-          timeout --signal=TERM 120 \
-          python3 scripts/run-minimachine-linux.py console/llvm/linked.ll \
+          timeout --signal=TERM 300 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
             --linker-contract configs/linux-6.6.143-minimachine-linker.json \
-            --program-cache-in console-refresh/linux-initramfs-p3-cache-console-current.pkl.gz \
-            --initramfs echo/mmsh-echo.cpio \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs build/busybox-defconfig.cpio \
             --native-vm \
-            --checkpoint-in echo/mmsh-echo-kernel-execve.chk.gz \
-            --inject-init ash/busybox-ash-first.bflt \
+            --checkpoint-in defcold/busybox-defconfig-kernel-execve.chk.gz \
+            --inject-init defconfig/busybox-ash.bflt \
             --restart-run-init-after-checkpoint \
             --stop-on-panic \
             --max-steps 0 \
@@ -102,8 +115,8 @@ jobs:
       - name: Summarize first BusyBox execution
         if: always()
         run: |
-          grep -E 'BOOT_EXEC_(INIT_EXEC_RESTART|USER_RUNTIME|USER_EXTERNAL_SURFACE|USER_EXTERNAL_DATA|USER_IMAGE_DATA|USER_ARGS|USER_HANDOFF|NATIVE_APPEND_PACK|NATIVE_APPEND|NATIVE_HOST_APPEND|NATIVE_DATA_APPEND|USER_EXTERNAL|USER_SYSCALL|USER_EXIT|HOST_INPUT|USER_READ_BUFFER|BLOCKED|HALTED)|BUSYBOX_MINIMACHINE_HELLO|ASH_RESTART_HOT_(WALL|STATUS)' \
-            build/ash-restart-hot.log | tail -320 || true
+          grep -E 'BOOT_EXEC_(INIT_EXEC_RESTART|CHECKPOINT_RESTORED|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_EXIT|BLOCKED|HALTED)|BUSYBOX_MINIMACHINE_HELLO|ASH_RESTART_HOT_(WALL|STATUS)' \
+            build/ash-restart-hot.log | tail -360 || true
 
       - name: Upload restart trace
         if: always()
