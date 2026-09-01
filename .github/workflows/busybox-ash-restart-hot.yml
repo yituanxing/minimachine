@@ -90,7 +90,6 @@ jobs:
             --initramfs build/busybox-defconfig.cpio \
             --native-vm \
             --checkpoint-in defcold/busybox-defconfig-kernel-execve.chk.gz \
-            --inject-init defconfig/busybox-ash.bflt \
             --restart-run-init-after-checkpoint \
             --stop-on-panic \
             --max-steps 0 \
