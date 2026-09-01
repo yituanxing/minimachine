@@ -430,6 +430,31 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
         if errno_address is not None:
             vm.memory.write(errno_address, 32, value & 0xFFFFFFFF)
 
+    def errno_message(vm) -> bytes:
+        err = (
+            vm.memory.read(errno_address, 32)
+            if errno_address is not None
+            else 0
+        )
+        messages = {
+            0: b"Success",
+            1: b"Operation not permitted",
+            2: b"No such file or directory",
+            5: b"Input/output error",
+            9: b"Bad file descriptor",
+            12: b"Cannot allocate memory",
+            13: b"Permission denied",
+            17: b"File exists",
+            20: b"Not a directory",
+            21: b"Is a directory",
+            22: b"Invalid argument",
+            28: b"No space left on device",
+            34: b"Numerical result out of range",
+            38: b"Function not implemented",
+            95: b"Operation not supported",
+        }
+        return messages.get(err, f"Unknown error {err}".encode("ascii"))
+
     def libc_linux_result(vm, raw: int) -> int:
         signed = raw - (1 << 64) if raw & (1 << 63) else raw
         if -4095 <= signed < 0:
@@ -567,6 +592,15 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                 piece = chr(next_arg() & 0xFF)
             elif spec == "s":
                 raw = read_user_cstring(vm, next_arg())
+                if precision is not None:
+                    raw = raw[:precision]
+                if width > len(raw):
+                    padding = b" " * (width - len(raw))
+                    raw = raw + padding if "-" in flags else padding + raw
+                out.extend(raw)
+                continue
+            elif spec == "m":
+                raw = errno_message(vm)
                 if precision is not None:
                     raw = raw[:precision]
                 if width > len(raw):
@@ -1707,6 +1741,19 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     if precision is not None:
                         raw = raw[:precision]
                     piece_bytes = raw
+                    if width > len(piece_bytes):
+                        padding = b" " * (width - len(piece_bytes))
+                        piece_bytes = (
+                            piece_bytes + padding
+                            if "-" in flags
+                            else padding + piece_bytes
+                        )
+                    out.extend(piece_bytes)
+                    continue
+                elif spec == "m":
+                    piece_bytes = errno_message(vm)
+                    if precision is not None:
+                        piece_bytes = piece_bytes[:precision]
                     if width > len(piece_bytes):
                         padding = b" " * (width - len(piece_bytes))
                         piece_bytes = (
