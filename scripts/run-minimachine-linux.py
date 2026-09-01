@@ -1447,6 +1447,127 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_atoi
 
+    if original in {
+        "strtol", "strtoll", "strtoul", "strtoull",
+        "__isoc23_strtol", "__isoc23_strtoll",
+        "__isoc23_strtoul", "__isoc23_strtoull",
+    }:
+        def user_strto(vm, args):
+            if len(args) != 3:
+                raise VMError(f"{original} expects string,endptr,base")
+            nptr, endptr, base = map(int, args)
+            raw_text = read_user_cstring(vm, nptr, 4096)
+            text = raw_text.decode("ascii", errors="ignore")
+            pos = 0
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+
+            negative = False
+            if pos < len(text) and text[pos] in "+-":
+                negative = text[pos] == "-"
+                pos += 1
+
+            c23 = original.startswith("__isoc23_")
+            signed = original.replace("__isoc23_", "") in {"strtol", "strtoll"}
+
+            def digit_value(ch: str) -> int:
+                code = ord(ch)
+                if 48 <= code <= 57:
+                    return code - 48
+                if 65 <= code <= 90:
+                    return code - 65 + 10
+                if 97 <= code <= 122:
+                    return code - 97 + 10
+                return -1
+
+            if base != 0 and not (2 <= base <= 36):
+                set_errno(vm, 22)
+                if endptr:
+                    vm.memory.write(endptr, 64, nptr)
+                return 0
+
+            prefix_pos = pos
+            if base == 0:
+                if (
+                    pos + 2 < len(text)
+                    and text[pos] == "0"
+                    and text[pos + 1] in "xX"
+                    and 0 <= digit_value(text[pos + 2]) < 16
+                ):
+                    base = 16
+                    pos += 2
+                elif (
+                    c23
+                    and pos + 2 < len(text)
+                    and text[pos] == "0"
+                    and text[pos + 1] in "bB"
+                    and 0 <= digit_value(text[pos + 2]) < 2
+                ):
+                    base = 2
+                    pos += 2
+                elif pos < len(text) and text[pos] == "0":
+                    base = 8
+                else:
+                    base = 10
+            elif (
+                base == 16
+                and pos + 2 < len(text)
+                and text[pos] == "0"
+                and text[pos + 1] in "xX"
+                and 0 <= digit_value(text[pos + 2]) < 16
+            ):
+                pos += 2
+            elif (
+                c23
+                and base == 2
+                and pos + 2 < len(text)
+                and text[pos] == "0"
+                and text[pos + 1] in "bB"
+                and 0 <= digit_value(text[pos + 2]) < 2
+            ):
+                pos += 2
+
+            digit_start = pos
+            value = 0
+            while pos < len(text):
+                digit = digit_value(text[pos])
+                if digit < 0 or digit >= base:
+                    break
+                value = value * base + digit
+                pos += 1
+
+            if pos == digit_start:
+                if endptr:
+                    vm.memory.write(endptr, 64, nptr)
+                result = 0
+            else:
+                if signed:
+                    limit = (1 << 63) if negative else (1 << 63) - 1
+                    if value > limit:
+                        set_errno(vm, 34)
+                        result = -(1 << 63) if negative else (1 << 63) - 1
+                    else:
+                        result = -value if negative else value
+                else:
+                    if value > (1 << 64) - 1:
+                        set_errno(vm, 34)
+                        result = (1 << 64) - 1
+                    else:
+                        result = (-value if negative else value) & ((1 << 64) - 1)
+                if endptr:
+                    vm.memory.write(endptr, 64, nptr + pos)
+
+            print(
+                "BOOT_EXEC_USER_STRTO "
+                f"name={original} text={text!r} base={base} "
+                f"end={pos if pos != digit_start else prefix_pos} "
+                f"result={result}",
+                flush=True,
+            )
+            return result & ((1 << 64) - 1)
+
+        return user_strto
+
     if original == "vsnprintf":
         def user_vsnprintf(vm, args):
             if len(args) != 4:
