@@ -47,6 +47,16 @@ def main() -> int:
         default="init",
         help="archive path for the injected script; defaults to init",
     )
+    p.add_argument(
+        "--extra-script",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "additional executable script to add at archive root using its "
+            "basename; may be repeated"
+        ),
+    )
     args = p.parse_args()
 
     archive_path = args.path.lstrip("/")
@@ -56,15 +66,35 @@ def main() -> int:
     if not script.startswith(b"#!"):
         raise SystemExit("runtime init script must start with a shebang")
 
+    scripts = [(archive_path, script)]
+    seen = {archive_path}
+    for extra in args.extra_script:
+        name = extra.name
+        if not name or name in seen or "/" in name:
+            raise SystemExit(f"invalid or duplicate --extra-script name: {name!r}")
+        data = extra.read_bytes()
+        if not data.startswith(b"#!"):
+            raise SystemExit(f"runtime extra script must start with a shebang: {extra}")
+        seen.add(name)
+        scripts.append((name, data))
+
     out = bytearray()
-    _entry(out, archive_path, mode=stat.S_IFREG | 0o755, data=script, ino=1)
-    _entry(out, "TRAILER!!!", mode=0, data=b"", ino=2)
+    for ino, (name, data) in enumerate(scripts, start=1):
+        _entry(
+            out,
+            name,
+            mode=stat.S_IFREG | 0o755,
+            data=data,
+            ino=ino,
+        )
+    _entry(out, "TRAILER!!!", mode=0, data=b"", ino=len(scripts) + 1)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(out)
     print(
         "MMRT_OVERLAY_READY "
         f"path={args.output} bytes={len(out)} script={archive_path} "
-        f"init_bytes={len(script)} entries=2",
+        f"init_bytes={len(script)} entries={len(scripts) + 1} "
+        f"extras={len(scripts) - 1}",
         flush=True,
     )
     return 0
