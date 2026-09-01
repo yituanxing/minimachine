@@ -86,6 +86,33 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         )
         self.assertEqual(vm.memory.read(errno_address, 32), 34)
 
+    def test_vsnprintf_percent_m_uses_guest_errno_without_consuming_arg(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+        errno_address = 0xC300
+        callback = runner._user_libc_callback(
+            "__mm_user_ext_vsnprintf",
+            errno_address,
+        )
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        fmt = 0xC400
+        ap = 0xC500
+        out = 0xC600
+        for index, byte in enumerate(b"%m:%d\0"):
+            vm.memory.write(fmt + index, 8, byte)
+        vm.memory.write(ap, 64, 7)
+        vm.memory.write(errno_address, 32, 2)
+
+        result = callback(vm, (out, 128, fmt, ap))
+        expected = b"No such file or directory:7"
+        self.assertEqual(result, len(expected))
+        self.assertEqual(
+            bytes(vm.memory.read(out + i, 8) for i in range(len(expected) + 1)),
+            expected + b"\0",
+        )
+
     def _mov64_function(self, name: str):
         src = muir.Slot("src")
         dst = muir.Slot("dst")
