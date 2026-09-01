@@ -675,14 +675,10 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     return int(value)
 
             payload = render_user_printf(vm, fmt_ptr, next_arg)
-            result = write_stdio_payload(vm, stream, payload)
-            print(
-                "BOOT_EXEC_USER_FPRINTF "
-                f"name={original} stream={stdio_fd(stream)} "
-                f"bytes={len(payload)} result={result}",
-                flush=True,
-            )
-            return result
+            # Keep guest stdout/stderr byte-clean.  BusyBox may assemble one
+            # logical line with several libc stdio calls, so host diagnostics
+            # here would splice BOOT_EXEC text into the guest stream.
+            return write_stdio_payload(vm, stream, payload)
 
         return user_fprintf
 
@@ -713,13 +709,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     return int(value)
 
             payload = render_user_printf(vm, fmt_ptr, next_arg)
-            result = write_stdio_payload(vm, 1, payload)
-            print(
-                "BOOT_EXEC_USER_PRINTF "
-                f"name={original} bytes={len(payload)} result={result}",
-                flush=True,
-            )
-            return result
+            return write_stdio_payload(vm, 1, payload)
 
         return user_printf
 
