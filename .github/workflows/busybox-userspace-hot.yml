@@ -10,6 +10,10 @@ on:
       - src/minimachine/native_vm.py
       - .github/workflows/busybox-userspace-hot.yml
 
+concurrency:
+  group: busybox-userspace-hot-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   actions: read
@@ -155,9 +159,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33348464715
+          run-id: 33456321243
           github-token: ${{ github.token }}
-          name: minimachine-busybox-multicall-cold-33348464715
+          name: minimachine-busybox-multicall-cold-33456321243
           path: multicold
 
       - name: Rebuild exact multicall rootfs
