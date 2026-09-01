@@ -2,18 +2,6 @@ name: MiniMachine Runtime Suite Hot
 
 on:
   workflow_dispatch:
-  push:
-    branches: [work/native-p3-vm]
-    paths:
-      - src/minimachine/runtime.py
-      - src/minimachine/native_vm.py
-      - scripts/run-minimachine-linux.py
-      - scripts/minimachine-runtime-suite.py
-      - scripts/build-minimachine-runtime-overlay.py
-      - scripts/build-minimachine-busybox-rootfs.py
-      - tests/test_runtime.py
-      - tests/test_minimachine_runtime_suite.py
-      - .github/workflows/runtime-suite-hot.yml
 
 permissions:
   contents: read
