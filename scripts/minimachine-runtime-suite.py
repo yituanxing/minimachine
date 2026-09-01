@@ -209,16 +209,20 @@ def verify_log(path: Path, profile: str) -> None:
             raise RuntimeError(f"bad runtime marker observed: {bad.strip()}")
     if "BOOT_EXEC_USER_HANDOFF " not in text or "function=__mm_user_main" not in text:
         raise RuntimeError("BusyBox multicall userspace handoff was not reached")
+    cursor = 0
     for case in cases:
-        if f"MMRT_CASE_START id={case.case_id} level={case.level}" not in text:
-            raise RuntimeError(f"runtime case did not start: {case.case_id}")
-        if f"MMRT_CASE_PASS id={case.case_id}" not in text:
+        pass_marker = f"MMRT_CASE_PASS id={case.case_id}"
+        pass_at = text.find(pass_marker, cursor)
+        if pass_at < 0:
             raise RuntimeError(f"runtime case did not pass: {case.case_id}")
         for marker in case.markers:
-            if not _line_present(text, marker):
+            marker_at = text.find("\n" + marker + "\n", cursor)
+            if marker_at < 0 or marker_at > pass_at:
                 raise RuntimeError(
-                    f"runtime output marker missing: {case.case_id}: {marker}"
+                    f"runtime output marker missing or out of order: "
+                    f"{case.case_id}: {marker}"
                 )
+        cursor = pass_at + len(pass_marker)
     endpoint = f"MMRT_SUITE_PASS profile={profile} cases={len(cases)}"
     if not _line_present(text, endpoint):
         raise RuntimeError(f"runtime suite endpoint missing: {endpoint}")
