@@ -1709,6 +1709,15 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 reference_blob[12:16], "big"
             )
             reference_payload = reference_blob[64:reference_data_start]
+            if len(reference_payload) < 12 or reference_payload[:4] != b"MMP3":
+                raise VMError(
+                    "MiniMachine userspace reference payload is invalid: "
+                    f"path={reference_path}"
+                )
+            reference_logical_size = (
+                12 + int.from_bytes(reference_payload[8:12], "big")
+            )
+            reference_payload = reference_payload[:reference_logical_size]
             guest_hash = hashlib.sha256(payload).hexdigest()
             reference_hash = hashlib.sha256(reference_payload).hexdigest()
             mismatch = next(
@@ -1738,6 +1747,11 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 f"guest_window={guest_window} reference_window={reference_window}",
                 flush=True,
             )
+            if mismatch is not None:
+                raise VMError(
+                    "MiniMachine userspace payload differs from reference image: "
+                    f"path={reference_path} offset={mismatch}"
+                )
         try:
             user_image = unpack_user_image(payload)
         except UserImageError as exc:
