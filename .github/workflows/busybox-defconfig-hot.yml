@@ -2,14 +2,6 @@ name: MiniMachine BusyBox Defconfig Hot
 
 on:
   workflow_dispatch:
-  push:
-    branches: [work/native-p3-vm]
-    paths:
-      - native/p3vm.c
-      - scripts/run-minimachine-linux.py
-      - src/minimachine/native_vm.py
-      - src/minimachine/runtime.py
-      - .github/workflows/busybox-defconfig-hot.yml
 
 concurrency:
   group: busybox-defconfig-hot-${{ github.ref }}
