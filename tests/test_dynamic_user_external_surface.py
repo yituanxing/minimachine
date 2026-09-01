@@ -51,6 +51,64 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(vm.memory.read(environ, 64), 0x12345678)
 
 
+    def test_getopt_tracks_guest_short_option_state(self):
+        runner = load_runner()
+        program = Program()
+        for name, value in (
+            ("optarg", 0),
+            ("opterr", 1),
+            ("optind", 1),
+            ("optopt", 0),
+        ):
+            program.define_data_symbol(
+                f"__mm_user_ext_{name}",
+                int(value).to_bytes(8, "little"),
+                align=8,
+            )
+        vm = program.new_vm()
+        callback = runner._user_libc_callback("__mm_user_ext_getopt", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        def put(address: int, data: bytes) -> None:
+            for index, byte in enumerate(data + b"\0"):
+                vm.memory.write(address + index, 8, byte)
+
+        argv = 0xCE00
+        prog = 0xCF00
+        cluster = 0xCF20
+        optstring = 0xCF40
+        put(prog, b"prog")
+        put(cluster, b"-ab")
+        put(optstring, b"ab")
+        vm.memory.write(argv + 0, 64, prog)
+        vm.memory.write(argv + 8, 64, cluster)
+        vm.memory.write(argv + 16, 64, 0)
+
+        optind = program.symbol_addresses["__mm_user_ext_optind"]
+        optarg = program.symbol_addresses["__mm_user_ext_optarg"]
+        self.assertEqual(callback(vm, (2, argv, optstring)), ord("a"))
+        self.assertEqual(vm.memory.read(optind, 32), 1)
+        self.assertEqual(callback(vm, (2, argv, optstring)), ord("b"))
+        self.assertEqual(vm.memory.read(optind, 32), 2)
+        self.assertEqual(callback(vm, (2, argv, optstring)), (1 << 64) - 1)
+
+        option = 0xCF60
+        value = 0xCF80
+        optstring2 = 0xCFA0
+        put(option, b"-n")
+        put(value, b"42")
+        put(optstring2, b"n:")
+        vm.memory.write(argv + 8, 64, option)
+        vm.memory.write(argv + 16, 64, value)
+        vm.memory.write(argv + 24, 64, 0)
+        vm.memory.write(optind, 32, 1)
+
+        self.assertEqual(callback(vm, (3, argv, optstring2)), ord("n"))
+        self.assertEqual(vm.memory.read(optind, 32), 3)
+        self.assertEqual(vm.memory.read(optarg, 64), value)
+        self.assertEqual(callback(vm, (3, argv, optstring2)), (1 << 64) - 1)
+
     def test_directory_callbacks_iterate_linux_dirent64(self):
         runner = load_runner()
         vm = Program().new_vm()
