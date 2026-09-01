@@ -32,6 +32,8 @@ class MiniMachineRuntimeSuiteTests(unittest.TestCase):
                 "cwd",
                 "fd-redirection",
                 "path-error",
+                "test-file",
+                "noclobber",
             ],
         )
         self.assertEqual(
