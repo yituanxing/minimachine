@@ -5,8 +5,15 @@ on:
   push:
     branches: [work/native-p3-vm]
     paths:
+      - native/p3vm.c
       - scripts/run-minimachine-linux.py
+      - src/minimachine/native_vm.py
+      - src/minimachine/runtime.py
       - .github/workflows/busybox-defconfig-hot.yml
+
+concurrency:
+  group: busybox-defconfig-hot-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -25,41 +32,23 @@ jobs:
           gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
             native/p3vm.c -o build/libminimachine_p3vm.so
 
-      - name: Download exact Linux image
+      - name: Download current 64 MiB Linux image
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33295701837
+          run-id: 33348074309
           github-token: ${{ github.token }}
-          name: minimachine-linux-initramfs-33295701837
+          name: minimachine-linux-initramfs-33348074309
           path: linux
 
-      - name: Download current console P3 cache
+      - name: Download current-lowering Linux P3 cache
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33322528617
+          run-id: 33399276976
           github-token: ${{ github.token }}
-          name: minimachine-linux-p3-console-current-33322528617
-          path: cache
-
-      - name: Download ash-first initramfs layout
-        uses: actions/download-artifact@v4
-        with:
-          repository: ${{ github.repository }}
-          run-id: 33322123027
-          github-token: ${{ github.token }}
-          name: minimachine-busybox-ash-carrier-33322123027
-          path: ash-first
-
-      - name: Download proven cold kernel_execve checkpoint
-        uses: actions/download-artifact@v4
-        with:
-          repository: ${{ github.repository }}
-          run-id: 33345157201
-          github-token: ${{ github.token }}
-          name: minimachine-busybox-cold-initramfs-33345157201
-          path: cold
+          name: minimachine-linux-p3-console-current-33399276976
+          path: current-cache
 
       - name: Download full defconfig BusyBox bundle
         uses: actions/download-artifact@v4
@@ -70,61 +59,61 @@ jobs:
           name: minimachine-busybox-bundle-33313986393
           path: defconfig
 
-      - name: Verify frozen inputs
-        run: |
-          test -s linux/llvm/linked.ll
-          test -s cache/linux-initramfs-p3-cache-console-current.pkl.gz
-          test -s ash-first/busybox-ash-first.cpio
-          test -s cold/busybox-cold-kernel-execve.chk.gz
-          test -s defconfig/busybox-ash.bflt
-          ls -lh \
-            ash-first/busybox-ash-first.cpio \
-            cold/busybox-cold-kernel-execve.chk.gz \
-            defconfig/busybox-ash.bflt
+      - name: Download current defconfig kernel_execve checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33348461525
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-defconfig-cold-33348461525
+          path: defcold
 
-      - name: Hot replace init with full defconfig BusyBox
+      - name: Rebuild exact defconfig initramfs
+        run: |
+          python3 scripts/build-minimachine-initramfs.py \
+            build/busybox-defconfig.cpio \
+            --init-image defconfig/busybox-ash.bflt
+          test -s defcold/busybox-defconfig-kernel-execve.chk.gz
+
+      - name: Resume defconfig BusyBox from current checkpoint
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
         run: |
           set -o pipefail
           set +e
-          printf 'echo BUSYBOX_DEFCFG_HELLO\nvalue=42\necho BUSYBOX_DEFCFG_VAR_$value\nfalse\necho BUSYBOX_DEFCFG_FALSE_STATUS_$?\nexit 0\n' | \
-          /usr/bin/time -f 'BUSYBOX_DEFCFG_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
-          timeout --signal=TERM 180 \
+          printf 'echo BUSYBOX_DEFCFG_HOT64_OK\nvalue=42\necho BUSYBOX_DEFCFG_HOT64_VAR_$value\nfalse\necho BUSYBOX_DEFCFG_HOT64_FALSE_STATUS_$?\nexit 0\n' | \
+          /usr/bin/time -f 'BUSYBOX_DEFCFG_HOT64_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 300 \
           python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
             --linker-contract configs/linux-6.6.143-minimachine-linker.json \
-            --program-cache-in cache/linux-initramfs-p3-cache-console-current.pkl.gz \
-            --initramfs ash-first/busybox-ash-first.cpio \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs build/busybox-defconfig.cpio \
             --native-vm \
-            --checkpoint-in cold/busybox-cold-kernel-execve.chk.gz \
-            --inject-init defconfig/busybox-ash.bflt \
-            --restart-run-init-after-checkpoint \
+            --checkpoint-in defcold/busybox-defconfig-kernel-execve.chk.gz \
             --stop-on-panic \
             --max-steps 0 \
             --progress-every 0 \
             2>&1 | tee build/busybox-defconfig-hot.log
           status=${PIPESTATUS[1]}
           set -e
-          echo "BUSYBOX_DEFCFG_HOT_STATUS=$status" | tee -a build/busybox-defconfig-hot.log
+          echo "BUSYBOX_DEFCFG_HOT64_STATUS=$status" | tee -a build/busybox-defconfig-hot.log
 
       - name: Assert full defconfig BusyBox shell
         run: |
           grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/busybox-defconfig-hot.log
-          grep -F 'BOOT_EXEC_ROOTFS_OPEN path=/init' build/busybox-defconfig-hot.log
-          grep -F 'BOOT_EXEC_ROOTFS_INJECTED path=/init' build/busybox-defconfig-hot.log
           grep -F 'BOOT_EXEC_USER_HANDOFF ' build/busybox-defconfig-hot.log
           grep -F 'function=__mm_user_ash_main functions=3043' build/busybox-defconfig-hot.log
-          grep -Fx 'BUSYBOX_DEFCFG_HELLO' build/busybox-defconfig-hot.log
-          grep -Fx 'BUSYBOX_DEFCFG_VAR_42' build/busybox-defconfig-hot.log
-          grep -Fx 'BUSYBOX_DEFCFG_FALSE_STATUS_1' build/busybox-defconfig-hot.log
+          grep -Fx 'BUSYBOX_DEFCFG_HOT64_OK' build/busybox-defconfig-hot.log
+          grep -Fx 'BUSYBOX_DEFCFG_HOT64_VAR_42' build/busybox-defconfig-hot.log
+          grep -Fx 'BUSYBOX_DEFCFG_HOT64_FALSE_STATUS_1' build/busybox-defconfig-hot.log
           grep -F 'BOOT_EXEC_USER_EXIT status=0' build/busybox-defconfig-hot.log
-          grep -F 'BUSYBOX_DEFCFG_HOT_STATUS=0' build/busybox-defconfig-hot.log
+          grep -F 'BUSYBOX_DEFCFG_HOT64_STATUS=0' build/busybox-defconfig-hot.log
           ! grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-defconfig-hot.log
 
       - name: Summarize defconfig execution
         if: always()
         run: |
-          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|ROOTFS_OPEN|ROOTFS_INJECTED|INIT_EXEC_RESTART|USER_RUNTIME|USER_EXTERNAL_SURFACE|USER_EXTERNAL_DATA|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_VSNPRINTF|USER_ATOI|USER_EXIT|BLOCKED|HALTED)|BUSYBOX_DEFCFG_' \
+          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_EXIT|BLOCKED|HALTED)|BUSYBOX_DEFCFG_HOT64_' \
             build/busybox-defconfig-hot.log | tail -420 || true
 
       - name: Upload defconfig trace
