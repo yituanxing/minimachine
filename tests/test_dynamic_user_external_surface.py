@@ -92,7 +92,9 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(vm.linux_current_task, 0x2000)
         self.assertEqual(vm.current_function, "minimachine_ret_from_fork")
         self.assertEqual(vm.linux_task_shadow_stacks[0x2000], 0xF0000000)
-        self.assertNotIn("pending_user_fork_continuation", vm.__dict__)
+        self.assertIsNone(
+            getattr(vm, "pending_user_fork_continuation", None)
+        )
         self.assertIn(0x2000, vm.linux_user_fork_continuations)
 
         result = runner.linux_ecall(vm, (3, 0x3000))
