@@ -29,19 +29,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           repository: ${{ github.repository }}
-          run-id: 33348074309
+          run-id: 33528059089
           github-token: ${{ github.token }}
-          name: minimachine-linux-initramfs-33348074309
+          name: minimachine-linux-initramfs-33528059089
           path: linux
-
-      - name: Download current-lowering Linux P3 cache
-        uses: actions/download-artifact@v4
-        with:
-          repository: ${{ github.repository }}
-          run-id: 33399276976
-          github-token: ${{ github.token }}
-          name: minimachine-linux-p3-console-current-33399276976
-          path: current-cache
 
       - name: Download BusyBox multicall image
         uses: actions/download-artifact@v4
@@ -87,7 +78,7 @@ jobs:
           timeout --signal=TERM 1500 \
           python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
             --linker-contract configs/linux-6.6.143-minimachine-linker.json \
-            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --program-cache-in linux/llvm/linux-initramfs-p3-cache.pkl.gz \
             --initramfs build/busybox-multicall.cpio \
             --native-vm \
             --native-boot-phases-only \
