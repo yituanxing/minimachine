@@ -1414,6 +1414,7 @@ _DIRECT_RUNTIME_SYMBOLS = (
     "strchr",
     "strchrnul",
     "memchr",
+    "fnmatch",
     "strcpy",
     "strncpy",
     "stpcpy",
@@ -1609,6 +1610,198 @@ def direct_runtime_callback(symbol: str):
                     return ptr + i
             return 0
         return memchr
+
+    if base == "fnmatch":
+        def fnmatch(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError("fnmatch expects pattern,string,flags")
+            pattern_ptr, string_ptr, flags = map(int, args)
+
+            def read_cstring(ptr: int) -> bytes:
+                out = bytearray()
+                while True:
+                    byte = vm.memory.read(ptr + len(out), 8)
+                    if byte == 0:
+                        return bytes(out)
+                    out.append(byte)
+
+            pattern = read_cstring(pattern_ptr)
+            string = read_cstring(string_ptr)
+
+            # glibc/POSIX fnmatch flag values.
+            FNM_PATHNAME = 0x01
+            FNM_NOESCAPE = 0x02
+            FNM_PERIOD = 0x04
+            FNM_LEADING_DIR = 0x08
+            FNM_CASEFOLD = 0x10
+
+            pathname = bool(flags & FNM_PATHNAME)
+            noescape = bool(flags & FNM_NOESCAPE)
+            period = bool(flags & FNM_PERIOD)
+            leading_dir = bool(flags & FNM_LEADING_DIR)
+            casefold = bool(flags & FNM_CASEFOLD)
+
+            def folded(ch: int) -> int:
+                if casefold and 65 <= ch <= 90:
+                    return ch + 32
+                return ch
+
+            def protected_period(si: int) -> bool:
+                if not period or si >= len(string) or string[si] != ord("."):
+                    return False
+                return si == 0 or (
+                    pathname and si > 0 and string[si - 1] == ord("/")
+                )
+
+            def bracket_close(pi: int) -> int:
+                j = pi + 1
+                if j < len(pattern) and pattern[j] in (ord("!"), ord("^")):
+                    j += 1
+                if j < len(pattern) and pattern[j] == ord("]"):
+                    j += 1
+                while j < len(pattern):
+                    if pattern[j] == ord("]"):
+                        return j
+                    if (
+                        pattern[j] == ord("\\")
+                        and not noescape
+                        and j + 1 < len(pattern)
+                    ):
+                        j += 2
+                    else:
+                        j += 1
+                return -1
+
+            def bracket_matches(pi: int, ch: int, close: int) -> bool:
+                j = pi + 1
+                negate = False
+                if j < close and pattern[j] in (ord("!"), ord("^")):
+                    negate = True
+                    j += 1
+
+                matched = False
+                first = True
+                while j < close:
+                    if pattern[j] == ord("]") and first:
+                        start = ord("]")
+                        j += 1
+                    elif (
+                        pattern[j] == ord("\\")
+                        and not noescape
+                        and j + 1 < close
+                    ):
+                        start = pattern[j + 1]
+                        j += 2
+                    else:
+                        start = pattern[j]
+                        j += 1
+                    first = False
+
+                    if (
+                        j + 1 < close
+                        and pattern[j] == ord("-")
+                        and pattern[j + 1] != ord("]")
+                    ):
+                        j += 1
+                        if (
+                            pattern[j] == ord("\\")
+                            and not noescape
+                            and j + 1 < close
+                        ):
+                            end = pattern[j + 1]
+                            j += 2
+                        else:
+                            end = pattern[j]
+                            j += 1
+                        lo = folded(start)
+                        hi = folded(end)
+                        value = folded(ch)
+                        if lo <= value <= hi or hi <= value <= lo:
+                            matched = True
+                    elif folded(start) == folded(ch):
+                        matched = True
+
+                return not matched if negate else matched
+
+            memo: dict[tuple[int, int], bool] = {}
+
+            def match(pi: int, si: int) -> bool:
+                key = (pi, si)
+                cached = memo.get(key)
+                if cached is not None:
+                    return cached
+
+                if pi == len(pattern):
+                    result = si == len(string) or (
+                        leading_dir
+                        and si < len(string)
+                        and string[si] == ord("/")
+                    )
+                    memo[key] = result
+                    return result
+
+                token = pattern[pi]
+                if token == ord("*"):
+                    while pi + 1 < len(pattern) and pattern[pi + 1] == ord("*"):
+                        pi += 1
+                    if match(pi + 1, si):
+                        memo[key] = True
+                        return True
+                    if protected_period(si):
+                        memo[key] = False
+                        return False
+                    k = si
+                    while k < len(string):
+                        if pathname and string[k] == ord("/"):
+                            break
+                        k += 1
+                        if match(pi + 1, k):
+                            memo[key] = True
+                            return True
+                    memo[key] = False
+                    return False
+
+                if token == ord("?"):
+                    result = (
+                        si < len(string)
+                        and not (pathname and string[si] == ord("/"))
+                        and not protected_period(si)
+                        and match(pi + 1, si + 1)
+                    )
+                    memo[key] = result
+                    return result
+
+                if token == ord("["):
+                    close = bracket_close(pi)
+                    if close >= 0:
+                        result = (
+                            si < len(string)
+                            and not (pathname and string[si] == ord("/"))
+                            and not protected_period(si)
+                            and bracket_matches(pi, string[si], close)
+                            and match(close + 1, si + 1)
+                        )
+                        memo[key] = result
+                        return result
+
+                if (
+                    token == ord("\\")
+                    and not noescape
+                    and pi + 1 < len(pattern)
+                ):
+                    pi += 1
+                    token = pattern[pi]
+
+                result = (
+                    si < len(string)
+                    and folded(token) == folded(string[si])
+                    and match(pi + 1, si + 1)
+                )
+                memo[key] = result
+                return result
+
+            return 0 if match(0, 0) else 1
+        return fnmatch
 
     if base in {"strcpy", "stpcpy", "strncpy", "stpncpy"}:
         def string_copy(vm: VM, args: tuple[int, ...]):
