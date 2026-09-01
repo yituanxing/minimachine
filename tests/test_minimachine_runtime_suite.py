@@ -38,6 +38,10 @@ class MiniMachineRuntimeSuiteTests(unittest.TestCase):
                 "device-meta",
                 "pattern-match",
                 "arithmetic",
+                "pathname-glob",
+                "bad-fd",
+                "ulimit-nofile",
+                "function-local",
             ],
         )
         self.assertEqual(
@@ -50,7 +54,7 @@ class MiniMachineRuntimeSuiteTests(unittest.TestCase):
                 "pipeline",
             ],
         )
-        self.assertEqual(len(suite.CORE_CASES), 12)
+        self.assertEqual(len(suite.CORE_CASES), 16)
         self.assertEqual(tuple(suite.PROFILES["smoke"]), suite.CORE_CASES[:2])
         self.assertEqual(tuple(suite.PROFILES["core"]), suite.CORE_CASES)
         self.assertEqual(tuple(suite.PROFILES["process"]), suite.PROCESS_CASES)
