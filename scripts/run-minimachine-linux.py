@@ -3046,6 +3046,7 @@ def main() -> int:
             cached = load_program_cache(
                 args.program_cache_in,
                 image_sha256=linked_image_sha256,
+                initramfs_sha256=initramfs_sha256,
             )
         except ProgramCacheError as exc:
             print(f"BOOT_EXEC_BLOCKED stage=program-cache error={exc}")
@@ -3162,6 +3163,7 @@ def main() -> int:
             flush=True,
         )
 
+    initramfs_sha256 = None
     if args.initramfs is not None:
         try:
             initramfs_data = args.initramfs.read_bytes()
@@ -3171,6 +3173,7 @@ def main() -> int:
         if not initramfs_data:
             print("BOOT_EXEC_BLOCKED stage=initramfs error=empty image")
             return 1
+        initramfs_sha256 = hashlib.sha256(initramfs_data).hexdigest()
         try:
             initramfs_start = program.define_data_symbol(
                 "__initramfs_start",
@@ -3307,6 +3310,7 @@ def main() -> int:
                 vm,
                 args.checkpoint_in,
                 image_sha256=linked_image_sha256,
+                initramfs_sha256=initramfs_sha256,
             )
         except CheckpointError as exc:
             print(f"BOOT_EXEC_BLOCKED stage=checkpoint error={exc}")
@@ -3814,6 +3818,7 @@ def main() -> int:
                     vm,
                     args.checkpoint_out,
                     image_sha256=linked_image_sha256,
+                    initramfs_sha256=initramfs_sha256,
                 )
                 checkpoint_written = True
                 checkpoint_after_armed = False
@@ -3836,6 +3841,7 @@ def main() -> int:
                     vm,
                     args.checkpoint_out,
                     image_sha256=linked_image_sha256,
+                    initramfs_sha256=initramfs_sha256,
                 )
                 checkpoint_written = True
                 print(
@@ -3874,6 +3880,7 @@ def main() -> int:
                     vm,
                     args.checkpoint_out,
                     image_sha256=linked_image_sha256,
+                    initramfs_sha256=initramfs_sha256,
                 )
                 checkpoint_written = True
                 print(
