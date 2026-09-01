@@ -11,6 +11,7 @@ on:
       - src/minimachine/runtime.py
       - scripts/build-minimachine-user-program.py
       - scripts/build-minimachine-program-rootfs.py
+      - scripts/run-minimachine-linux.py
       - tests/test_user_namespace.py
       - .github/workflows/lua-real-software.yml
 
@@ -215,6 +216,26 @@ jobs:
           test -s linux/llvm/linked.ll
           test -s linux/llvm/linux-initramfs-p3-cache.pkl.gz
 
+      - name: Build current-lowering Linux P3 cache
+        run: |
+          set -o pipefail
+          set +e
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --initramfs linux/out/minimachine-initramfs.cpio \
+            --program-cache-out build/linux-current-p3-cache.pkl.gz \
+            --probe-kallsyms start_kernel \
+            --max-steps 1 \
+            2>&1 | tee build/linux-current-cache.log
+          status=${PIPESTATUS[0]}
+          set -e
+          grep -F 'BOOT_EXEC_PROGRAM_CACHE_SAVED path=build/linux-current-p3-cache.pkl.gz' \
+            build/linux-current-cache.log
+          test -s build/linux-current-p3-cache.pkl.gz
+          if [ "$status" -ne 0 ]; then
+            grep -F 'step limit exceeded: 1' build/linux-current-cache.log
+          fi
+
       - name: Build Lua shebang initramfs
         run: |
           cat > build/init.lua <<'LUA'
@@ -251,7 +272,7 @@ jobs:
           timeout --signal=TERM 1500 \
           python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
             --linker-contract configs/linux-6.6.143-minimachine-linker.json \
-            --program-cache-in linux/llvm/linux-initramfs-p3-cache.pkl.gz \
+            --program-cache-in build/linux-current-p3-cache.pkl.gz \
             --initramfs build/lua-rootfs.cpio \
             --native-vm \
             --native-boot-phases-only \
@@ -286,7 +307,7 @@ jobs:
           timeout --signal=TERM 420 \
           python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
             --linker-contract configs/linux-6.6.143-minimachine-linker.json \
-            --program-cache-in linux/llvm/linux-initramfs-p3-cache.pkl.gz \
+            --program-cache-in build/linux-current-p3-cache.pkl.gz \
             --initramfs build/lua-rootfs.cpio \
             --native-vm \
             --checkpoint-in build/lua-kernel-execve.chk.gz \
