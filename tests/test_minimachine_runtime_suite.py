@@ -68,6 +68,8 @@ class MiniMachineRuntimeSuiteTests(unittest.TestCase):
                 self.assertLess(len(text.encode()), 1024)
                 self.assertIn("MMRT_CASE_START id=%s level=%s", text)
                 self.assertIn("MMRT_CASE_PASS id=%s", text)
+                self.assertIn('if . "$script"; then', text)
+                self.assertNotIn('/bin/sh "$script"', text)
                 self.assertIn("MMRT_SUITE_PASS profile=%s cases=%s", text)
                 self.assertIn('exit "$rc"', text)
                 for index, case in enumerate(suite.PROFILES[profile]):
