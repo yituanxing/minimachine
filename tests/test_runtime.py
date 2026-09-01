@@ -1189,6 +1189,39 @@ class RuntimeTests(unittest.TestCase):
             b"Beta\0",
         )
 
+    def test_portable_fnmatch_runtime_semantics(self):
+        callback = direct_runtime_callback("fnmatch")
+        self.assertIsNotNone(callback)
+        vm = Program().new_vm()
+
+        def put(address, data):
+            for i, byte in enumerate(data + b"\0"):
+                vm.memory.write(address + i, 8, byte)
+
+        pattern = 0xBA00
+        string = 0xBB00
+        assert callback is not None
+
+        cases = [
+            (b"alpha", b"alpha", 0, 0),
+            (b"a*", b"alpha", 0, 0),
+            (b"a?pha", b"alpha", 0, 0),
+            (b"a[kl]pha", b"alpha", 0, 0),
+            (b"a[!x]pha", b"alpha", 0, 0),
+            (b"a\\*b", b"a*b", 0, 0),
+            (b"a*b", b"a/x/b", 0x01, 1),
+            (b"*/b", b"a/b", 0x01, 0),
+            (b"*", b".hidden", 0x04, 1),
+            (b".*", b".hidden", 0x04, 0),
+            (b"ALPHA", b"alpha", 0x10, 0),
+            (b"alpha", b"alpha/rest", 0x01 | 0x08, 0),
+        ]
+        for pat, text, flags, expected in cases:
+            with self.subTest(pattern=pat, string=text, flags=flags):
+                put(pattern, pat)
+                put(string, text)
+                self.assertEqual(callback(vm, (pattern, string, flags)), expected)
+
     def test_portable_memmove_runtime_handles_overlap(self):
         callback = direct_runtime_callback("memmove")
         self.assertIsNotNone(callback)
