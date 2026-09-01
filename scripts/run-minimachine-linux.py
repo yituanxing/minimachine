@@ -1102,6 +1102,30 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return libc_linux_result(vm, raw)
         return user_poll
 
+    if original in {"getrlimit", "getrlimit64", "setrlimit", "setrlimit64"}:
+        def user_rlimit(vm, args):
+            if len(args) != 2:
+                raise VMError(f"{original} expects resource,rlim")
+            resource, rlim_ptr = map(int, args)
+            target = "__se_sys_prlimit64"
+            if target not in vm.program.functions:
+                raise VMError(f"Linux image is missing {target}")
+            if original.startswith("get"):
+                new_ptr = 0
+                old_ptr = rlim_ptr
+            else:
+                new_ptr = rlim_ptr
+                old_ptr = 0
+            raw, = _call_linux_function_preserving_control(
+                vm,
+                target,
+                (0, resource, new_ptr, old_ptr),
+                result_count=1,
+                max_extra_steps=8_000_000,
+            )
+            return libc_linux_result(vm, raw)
+        return user_rlimit
+
     if original in {"open", "open64"}:
         def user_open(vm, args):
             if len(args) not in {2, 3}:
