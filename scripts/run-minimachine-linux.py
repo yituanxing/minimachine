@@ -134,6 +134,17 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--inject-file",
+        action="append",
+        nargs=2,
+        metavar=("HOST", "GUEST"),
+        default=[],
+        help=(
+            "after restoring a checkpoint, write an additional host file to "
+            "the given guest path through filp_open/kernel_write/fput; may be repeated"
+        ),
+    )
+    p.add_argument(
         "--inject-initramfs-cpio",
         type=Path,
         help=(
@@ -3445,10 +3456,13 @@ def main() -> int:
             except VMError as exc:
                 print(f"BOOT_EXEC_BLOCKED stage=rootfs-probe error={exc}")
                 return 1
-        if args.inject_init is not None and args.inject_initramfs_cpio is not None:
+        if (
+            args.inject_initramfs_cpio is not None
+            and (args.inject_init is not None or args.inject_file)
+        ):
             print(
                 "BOOT_EXEC_BLOCKED stage=rootfs-inject "
-                "error=choose only one of --inject-init or --inject-initramfs-cpio"
+                "error=choose cpio injection or direct file injection, not both"
             )
             return 1
         if args.inject_initramfs_cpio is not None:
@@ -3459,13 +3473,20 @@ def main() -> int:
             except VMError as exc:
                 print(f"BOOT_EXEC_BLOCKED stage=rootfs-inject error={exc}")
                 return 1
-        elif args.inject_init is not None:
+        elif args.inject_init is not None or args.inject_file:
             try:
-                inject_live_root_init(
-                    vm,
-                    args.inject_init,
-                    guest_path_text=args.inject_init_path,
-                )
+                if args.inject_init is not None:
+                    inject_live_root_init(
+                        vm,
+                        args.inject_init,
+                        guest_path_text=args.inject_init_path,
+                    )
+                for host_text, guest_path in args.inject_file:
+                    inject_live_root_init(
+                        vm,
+                        Path(host_text),
+                        guest_path_text=guest_path,
+                    )
                 if args.skip_prepare_namespace_after_inject:
                     skip_prepare_namespace_after_hot_init(vm)
             except VMError as exc:
