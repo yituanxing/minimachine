@@ -10,6 +10,7 @@ on:
       - src/minimachine/legalize.py
       - src/minimachine/runtime.py
       - scripts/build-minimachine-user-program.py
+      - scripts/build-minimachine-program-rootfs.py
       - tests/test_user_namespace.py
       - .github/workflows/lua-real-software.yml
 
@@ -172,3 +173,167 @@ jobs:
             build/lua54-bundle.log
           if-no-files-found: warn
           retention-days: 14
+
+
+  lua-runtime:
+    needs: lua-bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download Lua bundle from this run
+        uses: actions/download-artifact@v4
+        with:
+          name: minimachine-lua54-${{ github.run_id }}
+          path: lua
+
+      - name: Download latest qualified Linux image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow initramfs-build.yml \
+            --branch work/native-p3-vm \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')"
+          test -n "$run_id"
+          echo "LUA_RUNTIME_LINUX_RUN=$run_id"
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$run_id" \
+            --dir linux
+          test -s linux/llvm/linked.ll
+          test -s linux/llvm/linux-initramfs-p3-cache.pkl.gz
+
+      - name: Build Lua shebang initramfs
+        run: |
+          cat > build/init.lua <<'LUA'
+          #!/bin/lua
+          local values = {}
+          local sum = 0
+          for i = 1, 1000 do
+            values[i] = i
+            sum = sum + i
+          end
+          collectgarbage("collect")
+          print("LUA_MINIMACHINE_RUNTIME", sum, values[42], _VERSION)
+          LUA
+          chmod +x build/init.lua
+
+          python3 scripts/build-minimachine-program-rootfs.py \
+            build/lua-rootfs.cpio \
+            --program-image lua/lua54.bflt \
+            --program-path /bin/lua \
+            --init-script-file build/init.lua \
+            2>&1 | tee build/lua-rootfs.log
+
+          grep -F 'PROGRAM_ROOTFS_READY ' build/lua-rootfs.log
+          grep -F 'program=/bin/lua ' build/lua-rootfs.log
+          test -s build/lua-rootfs.cpio
+
+      - name: Cold boot Lua rootfs to Linux exec boundary
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          set +e
+          /usr/bin/time -f 'LUA_COLD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 1500 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in linux/llvm/linux-initramfs-p3-cache.pkl.gz \
+            --initramfs build/lua-rootfs.cpio \
+            --native-vm \
+            --native-boot-phases-only \
+            --native-report-every 50000000 \
+            --checkpoint-out build/lua-kernel-execve.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-after-checkpoint \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/lua-cold.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "LUA_COLD_STATUS=$status" | tee -a build/lua-cold.log
+
+      - name: Assert Lua exec checkpoint
+        run: |
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/lua-cold.log
+          grep -F 'function=kernel_execve hit=1' build/lua-cold.log
+          test -s build/lua-kernel-execve.chk.gz
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/lua-cold.log
+
+      - name: Execute real Lua through Linux binfmt_script
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/lua/lua54.bflt
+        run: |
+          set -o pipefail
+          set +e
+          /usr/bin/time -f 'LUA_RUNTIME_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 420 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in linux/llvm/linux-initramfs-p3-cache.pkl.gz \
+            --initramfs build/lua-rootfs.cpio \
+            --native-vm \
+            --checkpoint-in build/lua-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/lua-runtime.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "LUA_RUNTIME_STATUS=$status" | tee -a build/lua-runtime.log
+
+      - name: Report Lua runtime frontier
+        if: always()
+        run: |
+          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_EXIT|BLOCKED|HALTED)|LUA_' \
+            build/lua-runtime.log | tail -420 || true
+          if grep -F 'BOOT_EXEC_BLOCKED ' build/lua-runtime.log >/dev/null; then
+            echo LUA_RUNTIME_FRONTIER=blocked
+            grep -F 'BOOT_EXEC_BLOCKED ' build/lua-runtime.log | tail -1
+          elif grep -F 'LUA_MINIMACHINE_RUNTIME' build/lua-runtime.log >/dev/null; then
+            echo LUA_RUNTIME_FRONTIER=script-output-reached
+          else
+            echo LUA_RUNTIME_FRONTIER=before-script-output
+          fi
+
+      - name: Assert real Lua execution
+        run: |
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/lua-runtime.log
+          grep -F 'BOOT_EXEC_USER_HANDOFF ' build/lua-runtime.log
+          grep -F 'function=__mm_lua54_main ' build/lua-runtime.log
+          grep -F 'LUA_MINIMACHINE_RUNTIME' build/lua-runtime.log
+          grep -F '500500' build/lua-runtime.log
+          grep -F '42' build/lua-runtime.log
+          grep -F 'Lua 5.4' build/lua-runtime.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/lua-runtime.log
+
+      - name: Upload Lua runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-lua54-runtime-${{ github.run_id }}
+          path: |
+            build/init.lua
+            build/lua-rootfs.log
+            build/lua-rootfs.cpio
+            build/lua-cold.log
+            build/lua-kernel-execve.chk.gz
+            build/lua-runtime.log
+          if-no-files-found: warn
+          retention-days: 7
