@@ -1997,30 +1997,33 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 flush=True,
             )
 
-        # Dynamic P3 userspace descriptors/data are machine representation
-        # for this exec image.  Do not append them after the kernel Program data:
-        # Linux owns the RAM immediately following the linked image and may
-        # already have slab/page state there.  Place the dynamic P3 segment in
-        # the task's own post-payload/pre-stack gap instead.
-        user_payload_end = (pc + 12 + size + 15) & ~15
+        # Dynamic P3 userspace descriptors/globals are VM metadata, not
+        # Linux-owned RAM.  The old post-payload arena shares the NOMMU
+        # numeric address space with live Linux allocations: late VFS writes
+        # can place page-cache pages there and a subsequent P3 install would
+        # overwrite them.  Allocate from the VM synthetic heap instead.  That
+        # heap starts beyond the configured Linux physical RAM and is already
+        # proven usable as a user pointer by the hot-injection/libc paths.
         kernel_program_data_end = vm.program._next_data
-        if user_payload_end < kernel_program_data_end:
+        user_data_base = (int(vm.heap_next) + 15) & ~15
+        if user_data_base <= kernel_program_data_end:
             raise VMError(
-                "MiniMachine userspace P3 data arena overlaps kernel Program "
-                f"data: user_base=0x{user_payload_end:x} "
+                "MiniMachine synthetic userspace P3 arena is not above kernel "
+                f"Program data: base=0x{user_data_base:x} "
                 f"kernel_end=0x{kernel_program_data_end:x}"
             )
-        if user_payload_end >= user_sp:
+        if user_data_base >= vm.stack_top:
             raise VMError(
-                "MiniMachine userspace P3 data arena has no stack gap: "
-                f"user_base=0x{user_payload_end:x} user_sp=0x{user_sp:x}"
+                "MiniMachine synthetic userspace P3 arena exhausted: "
+                f"base=0x{user_data_base:x} stack_top=0x{vm.stack_top:x}"
             )
-        vm.program._next_data = user_payload_end
+        vm.program._next_data = user_data_base
         print(
             "BOOT_EXEC_USER_DATA_ARENA "
             f"kernel_end=0x{kernel_program_data_end:x} "
-            f"base=0x{user_payload_end:x} limit=0x{user_sp:x} "
-            f"capacity={user_sp - user_payload_end}",
+            f"base=0x{user_data_base:x} limit=0x{vm.stack_top:x} "
+            f"heap_before=0x{vm.heap_next:x} "
+            f"capacity={vm.stack_top - user_data_base}",
             flush=True,
         )
 
@@ -2097,16 +2100,21 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 flush=True,
             )
         trace_user_external_descriptor(vm, "getcwd", "module-image")
-        if vm.program._next_data >= user_sp:
+        if vm.program._next_data >= vm.stack_top:
             raise VMError(
                 "MiniMachine userspace P3 data arena exhausted: "
-                f"end=0x{vm.program._next_data:x} user_sp=0x{user_sp:x}"
+                f"end=0x{vm.program._next_data:x} "
+                f"stack_top=0x{vm.stack_top:x}"
             )
+        # Future libc malloc/realloc allocations share the same synthetic
+        # address region, so advance the VM heap past immutable P3 metadata.
+        vm.heap_next = (vm.program._next_data + 15) & ~15
         print(
             "BOOT_EXEC_USER_DATA_ARENA_USED "
-            f"base=0x{user_payload_end:x} end=0x{vm.program._next_data:x} "
-            f"bytes={vm.program._next_data - user_payload_end} "
-            f"remaining={user_sp - vm.program._next_data}",
+            f"base=0x{user_data_base:x} end=0x{vm.program._next_data:x} "
+            f"bytes={vm.program._next_data - user_data_base} "
+            f"heap_next=0x{vm.heap_next:x} "
+            f"remaining={vm.stack_top - vm.heap_next}",
             flush=True,
         )
 
