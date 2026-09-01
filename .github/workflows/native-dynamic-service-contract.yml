@@ -10,6 +10,7 @@ on:
       - src/minimachine/vm.py
       - scripts/run-minimachine-linux.py
       - tests/test_dynamic_user_external_surface.py
+      - tests/test_user_external_namespace.py
       - .github/workflows/native-dynamic-service-contract.yml
 
 permissions:
@@ -31,4 +32,7 @@ jobs:
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
         run: |
-          python3 -m unittest tests.test_dynamic_user_external_surface -v
+          python3 -m unittest \
+            tests.test_dynamic_user_external_surface \
+            tests.test_user_external_namespace \
+            -v
