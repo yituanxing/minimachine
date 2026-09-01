@@ -1062,6 +1062,22 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return libc_linux_result(vm, raw)
         return user_dup
 
+    if original == "poll":
+        def user_poll(vm, args):
+            if len(args) != 3:
+                raise VMError("poll expects fds,nfds,timeout")
+            if "__se_sys_poll" not in vm.program.functions:
+                raise VMError("Linux image is missing __se_sys_poll")
+            raw, = _call_linux_function_preserving_control(
+                vm,
+                "__se_sys_poll",
+                tuple(int(value) for value in args),
+                result_count=1,
+                max_extra_steps=8_000_000,
+            )
+            return libc_linux_result(vm, raw)
+        return user_poll
+
     if original in {"open", "open64"}:
         def user_open(vm, args):
             if len(args) not in {2, 3}:
