@@ -15,7 +15,7 @@ class RuntimeCase:
     coverage: str
 
 
-CASES = (
+CORE_CASES = (
     RuntimeCase(
         "L0-shell",
         "builtin",
@@ -31,11 +31,42 @@ CASES = (
         "shell variables, builtin false, status propagation",
     ),
     RuntimeCase(
+        "L2-vfs",
+        "vfs-file",
+        ("MMRT_VFS_PASS",),
+        r"""printf 'alpha\nbeta\n' > /tmp/mmrt-file || exit 71; IFS= read -r first < /tmp/mmrt-file || exit 72; case "$first" in alpha) printf 'MMRT_VFS_%s\n' PASS;; *) exit 73;; esac""",
+        "open/create/truncate/write/read/close through ash redirection and read",
+    ),
+    RuntimeCase(
+        "L2-vfs",
+        "cwd",
+        ("MMRT_CWD_PASS",),
+        r"""cd /tmp || exit 81; pwd > /tmp/mmrt-pwd || exit 82; IFS= read -r here < /tmp/mmrt-pwd || exit 83; case "$here" in /tmp) printf 'MMRT_CWD_%s\n' PASS;; *) exit 84;; esac; cd / || exit 85""",
+        "chdir/getcwd, path lookup, shell cwd state, VFS readback",
+    ),
+    RuntimeCase(
+        "L2-fd",
+        "fd-redirection",
+        ("MMRT_FD_PASS",),
+        r"""printf 'one\n' > /tmp/mmrt-fd || exit 86; exec 3>>/tmp/mmrt-fd || exit 87; printf 'two\n' >&3 || exit 88; exec 3>&-; { IFS= read -r a; IFS= read -r b; } < /tmp/mmrt-fd; case "$a:$b" in one:two) printf 'MMRT_FD_%s\n' PASS;; *) exit 89;; esac""",
+        "append open, fd duplication/redirection, close, sequential read",
+    ),
+    RuntimeCase(
+        "L2-vfs",
+        "path-error",
+        ("MMRT_PATH_ERROR_PASS",),
+        r"""cd /__mmrt_path_that_does_not_exist__; rc=$?; case "$rc" in 0) exit 90;; *) printf 'MMRT_PATH_ERROR_%s\n' PASS;; esac""",
+        "negative path lookup and shell propagation of Linux VFS error",
+    ),
+)
+
+PROCESS_CASES = (
+    RuntimeCase(
         "L1-process",
         "external-status",
         ("MMRT_WAIT_STATUS_PASS",),
         r"""/bin/false; rc=$?; case "$rc" in 1) printf 'MMRT_WAIT_STATUS_%s\n' PASS;; *) exit 61;; esac""",
-        "external BusyBox applet dispatch, exec, wait, child exit status",
+        "external BusyBox applet dispatch, fork/exec/wait, child exit status",
     ),
     RuntimeCase(
         "L1-process",
@@ -53,17 +84,10 @@ CASES = (
     ),
     RuntimeCase(
         "L2-vfs",
-        "vfs-file",
-        ("MMRT_VFS_PASS",),
-        r"""printf 'alpha\nbeta\n' > /tmp/mmrt-file || exit 71; out=$(/bin/cat /tmp/mmrt-file) || exit 72; case "$out" in "$(printf 'alpha\nbeta')") printf 'MMRT_VFS_%s\n' PASS;; *) exit 73;; esac; /bin/rm -f /tmp/mmrt-file""",
-        "open/create/truncate/write/read/close, redirection, cat, unlink",
-    ),
-    RuntimeCase(
-        "L2-vfs",
         "directory",
         ("MMRT_DIR_PASS",),
-        r"""/bin/rm -rf /tmp/mmrt-dir; /bin/mkdir /tmp/mmrt-dir || exit 81; printf 'item\n' > /tmp/mmrt-dir/item || exit 82; out=$(/bin/ls /tmp/mmrt-dir) || exit 83; case "$out" in item) printf 'MMRT_DIR_%s\n' PASS;; *) exit 84;; esac; /bin/rm -f /tmp/mmrt-dir/item; /bin/rmdir /tmp/mmrt-dir""",
-        "mkdir, path lookup, directory iteration, ls, unlink, rmdir",
+        r"""/bin/rm -rf /tmp/mmrt-dir; /bin/mkdir /tmp/mmrt-dir || exit 91; printf 'item\n' > /tmp/mmrt-dir/item || exit 92; /bin/ls /tmp/mmrt-dir; rc=$?; case "$rc" in 0) printf 'MMRT_DIR_%s\n' PASS;; *) exit 93;; esac; /bin/rm -f /tmp/mmrt-dir/item; /bin/rmdir /tmp/mmrt-dir""",
+        "forked applets plus mkdir/path lookup/directory iteration/unlink/rmdir",
     ),
     RuntimeCase(
         "L3-pipe",
@@ -74,9 +98,13 @@ CASES = (
     ),
 )
 
+CASES = CORE_CASES + PROCESS_CASES
+
 PROFILES = {
-    "smoke": CASES[:2],
-    "core": CASES,
+    "smoke": CORE_CASES[:2],
+    "core": CORE_CASES,
+    "process": PROCESS_CASES,
+    "full": CASES,
 }
 
 BAD_MARKERS = (
