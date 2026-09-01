@@ -21,74 +21,81 @@ def load_suite():
 
 
 class MiniMachineRuntimeSuiteTests(unittest.TestCase):
-    def test_matrix_is_cumulative_and_frontier_focused(self):
+    def test_profiles_keep_core_progress_separate_from_process_frontier(self):
         suite = load_suite()
         self.assertEqual(
-            [case.case_id for case in suite.CASES],
+            [case.case_id for case in suite.CORE_CASES],
             [
                 "builtin",
                 "shell-state",
+                "vfs-file",
+                "cwd",
+                "fd-redirection",
+                "path-error",
+            ],
+        )
+        self.assertEqual(
+            [case.case_id for case in suite.PROCESS_CASES],
+            [
                 "external-status",
                 "subshell",
                 "uname",
-                "vfs-file",
                 "directory",
                 "pipeline",
             ],
         )
-        self.assertEqual(tuple(suite.PROFILES["smoke"]), suite.CASES[:2])
-        self.assertEqual(tuple(suite.PROFILES["core"]), suite.CASES)
-        self.assertEqual(
-            [case.level for case in suite.CASES],
-            [
-                "L0-shell",
-                "L0-shell",
-                "L1-process",
-                "L1-process",
-                "L1-process",
-                "L2-vfs",
-                "L2-vfs",
-                "L3-pipe",
-            ],
-        )
+        self.assertEqual(tuple(suite.PROFILES["smoke"]), suite.CORE_CASES[:2])
+        self.assertEqual(tuple(suite.PROFILES["core"]), suite.CORE_CASES)
+        self.assertEqual(tuple(suite.PROFILES["process"]), suite.PROCESS_CASES)
+        self.assertEqual(tuple(suite.PROFILES["full"]), suite.CASES)
+        self.assertEqual(suite.CASES, suite.CORE_CASES + suite.PROCESS_CASES)
+
+    def test_core_profile_has_no_external_process_commands(self):
+        suite = load_suite()
+        forbidden = ("/bin/false", "/bin/sh -c", "/bin/uname", "/bin/mkdir", "| /bin/cat")
+        for case in suite.CORE_CASES:
+            for text in forbidden:
+                self.assertNotIn(text, case.command)
 
     def test_generated_init_splits_cases_below_ash_read_buffer(self):
         suite = load_suite()
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "init.sh"
-            suite.write_init(path, "core")
-            text = path.read_text()
-            self.assertTrue(text.startswith("#!/bin/sh\n"))
-            self.assertLess(len(text.encode()), 1024)
-            self.assertIn("MMRT_CASE_START id=%s level=%s", text)
-            self.assertIn("MMRT_CASE_PASS id=%s", text)
-            self.assertIn("MMRT_SUITE_PASS profile=%s cases=%s", text)
-            self.assertIn('exit "$rc"', text)
-            for index, case in enumerate(suite.CASES):
-                sidecar = Path(td) / suite.case_script_name(index)
-                self.assertTrue(sidecar.is_file())
-                case_text = sidecar.read_text()
-                self.assertLess(len(case_text.encode()), 1024)
-                self.assertIn(case.command, case_text)
-                self.assertIn(
-                    f"run_case {case.case_id} {case.level} /{suite.case_script_name(index)}",
-                    text,
-                )
-                for marker in case.markers:
-                    self.assertNotIn(marker, case.command)
+        for profile in ("core", "process"):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as td:
+                path = Path(td) / "init.sh"
+                suite.write_init(path, profile)
+                text = path.read_text()
+                self.assertTrue(text.startswith("#!/bin/sh\n"))
+                self.assertLess(len(text.encode()), 1024)
+                self.assertIn("MMRT_CASE_START id=%s level=%s", text)
+                self.assertIn("MMRT_CASE_PASS id=%s", text)
+                self.assertIn("MMRT_SUITE_PASS profile=%s cases=%s", text)
+                self.assertIn('exit "$rc"', text)
+                for index, case in enumerate(suite.PROFILES[profile]):
+                    sidecar = Path(td) / suite.case_script_name(index)
+                    self.assertTrue(sidecar.is_file())
+                    case_text = sidecar.read_text()
+                    self.assertLess(len(case_text.encode()), 1024)
+                    self.assertIn(case.command, case_text)
+                    self.assertIn(
+                        f"run_case {case.case_id} {case.level} /{suite.case_script_name(index)}",
+                        text,
+                    )
+                    for marker in case.markers:
+                        self.assertNotIn(marker, case.command)
 
-    def test_verify_accepts_complete_log_and_rejects_blocked_log(self):
+    def test_verify_accepts_complete_core_log_and_rejects_blocked_log(self):
         suite = load_suite()
+        cases = suite.PROFILES["core"]
         lines = [
             "BOOT_EXEC_USER_HANDOFF function=__mm_user_main",
         ]
-        for case in suite.CASES:
+        for case in cases:
             lines.append(f"MMRT_CASE_START id={case.case_id} level={case.level}")
             lines.extend(case.markers)
             lines.append(f"MMRT_CASE_PASS id={case.case_id}")
         lines.extend(
             [
-                f"MMRT_SUITE_PASS profile=core cases={len(suite.CASES)}",
+                f"MMRT_SUITE_PASS profile=core cases={len(cases)}",
                 "BOOT_EXEC_USER_EXIT status=0",
             ]
         )
@@ -101,6 +108,24 @@ class MiniMachineRuntimeSuiteTests(unittest.TestCase):
             )
             with self.assertRaises(RuntimeError):
                 suite.verify_log(path, "core")
+
+    def test_process_frontier_reports_first_unpassed_case(self):
+        suite = load_suite()
+        cases = suite.PROFILES["process"]
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "runtime.log"
+            path.write_text(
+                "\n".join(
+                    [
+                        f"MMRT_CASE_START id={cases[0].case_id} level={cases[0].level}",
+                        "BOOT_EXEC_BLOCKED stage=userspace-after-exec error=fork",
+                    ]
+                )
+                + "\n"
+            )
+            # summarize_log is intentionally non-throwing: the process profile
+            # remains a focused frontier while the independent core gate advances.
+            suite.summarize_log(path, "process")
 
 
 if __name__ == "__main__":
