@@ -46,6 +46,7 @@ class MiniMachineRuntimeSuiteTests(unittest.TestCase):
                 "pipeline",
             ],
         )
+        self.assertEqual(len(suite.CORE_CASES), 12)
         self.assertEqual(tuple(suite.PROFILES["smoke"]), suite.CORE_CASES[:2])
         self.assertEqual(tuple(suite.PROFILES["core"]), suite.CORE_CASES)
         self.assertEqual(tuple(suite.PROFILES["process"]), suite.PROCESS_CASES)
