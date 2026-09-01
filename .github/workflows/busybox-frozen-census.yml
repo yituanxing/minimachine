@@ -2,13 +2,6 @@ name: MiniMachine Frozen BusyBox Census
 
 on:
   workflow_dispatch:
-  push:
-    branches: [work/native-p3-vm]
-    paths:
-      - src/minimachine/llvm_text.py
-      - src/minimachine/legalize.py
-      - tests/test_legalizer.py
-      - .github/workflows/busybox-frozen-census.yml
 
 permissions:
   contents: read
