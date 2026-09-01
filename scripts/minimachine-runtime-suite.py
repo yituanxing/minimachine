@@ -154,7 +154,7 @@ def write_init(path: Path, profile: str) -> None:
         "run_case() {",
         "  id=$1; level=$2; script=$3",
         "  printf 'MMRT_CASE_START id=%s level=%s\\n' \"$id\" \"$level\"",
-        "  if /bin/sh \"$script\"; then",
+        "  if . \"$script\"; then",
         "    printf 'MMRT_CASE_PASS id=%s\\n' \"$id\"",
         "  else",
         "    rc=$?",
