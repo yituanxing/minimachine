@@ -2148,6 +2148,59 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return HOST_CONTROL_TRANSFER
         return user_exit
 
+    if original == "fork":
+        def user_fork(vm, args):
+            if args:
+                raise VMError("fork expects no arguments")
+            if "__se_sys_clone" not in vm.program.functions:
+                raise VMError("Linux image is missing __se_sys_clone")
+            if getattr(vm, "pending_user_fork_continuation", None) is not None:
+                raise VMError("nested MiniMachine userspace fork is not supported")
+
+            expected = vm.memory.read(vm.sp + RESULT_COUNT, 64)
+            if expected != 1:
+                raise VMError(
+                    f"fork caller expects {expected} results, expected 1"
+                )
+            continuation = (
+                vm.memory.read(vm.sp + CALLER_SP, 64),
+                vm.memory.read(vm.sp + RET_PC, 64),
+                vm.memory.read(vm.sp + RESULT_PTR, 64),
+            )
+            vm.pending_user_fork_continuation = continuation
+
+            # MiniMachine Linux is NOMMU.  Preserve real Linux task/fd/VFS
+            # semantics by adapting the libc fork request to a vfork-style
+            # clone: child runs first, then exec/exit releases the parent.
+            clone_vm = 0x00000100
+            clone_vfork = 0x00004000
+            sigchld = 17
+            flags = clone_vm | clone_vfork | sigchld
+            try:
+                result, = _call_linux_function_preserving_control(
+                    vm,
+                    "__se_sys_clone",
+                    (flags, 0, 0, 0, 0),
+                    result_count=1,
+                    max_extra_steps=80_000_000,
+                    preserve_linux_task_state=True,
+                )
+            finally:
+                # service 2 consumes this once the new user task is first
+                # scheduled.  If clone failed before that point, do not leak
+                # the continuation into a later unrelated task.
+                if getattr(vm, "pending_user_fork_continuation", None) is continuation:
+                    vm.pending_user_fork_continuation = None
+
+            print(
+                "BOOT_EXEC_USER_FORK_VFORK "
+                f"flags=0x{flags:x} result={result}",
+                flush=True,
+            )
+            return libc_linux_result(vm, result)
+
+        return user_fork
+
     syscall_map = {
         "read": (63, 3),
         "write": (64, 3),
@@ -3168,6 +3221,7 @@ def _call_linux_function_preserving_control(
     *,
     result_count: int,
     max_extra_steps: int = 2_000_000,
+    preserve_linux_task_state: bool = False,
 ) -> tuple[int, ...]:
     if name not in vm.program.functions:
         raise VMError(f"rootfs injection missing Linux function: {name}")
@@ -3282,29 +3336,32 @@ def _call_linux_function_preserving_control(
             )
         raise
     finally:
-        if current_addr is not None and saved_current is not None:
-            observed_current = vm.memory.read(current_addr, 64)
-            if observed_current != saved_current:
-                print(
-                    "BOOT_EXEC_PRESERVE_CURRENT_RESTORE "
-                    f"function={name} "
-                    f"before=0x{saved_current:x} "
-                    f"after=0x{observed_current:x}",
-                    flush=True,
-                )
-                vm.memory.write(current_addr, 64, saved_current)
-        vm.linux_task_contexts = saved_contexts
-        vm.linux_task_shadow_stacks = saved_shadow_stacks
-        if saved_shadow_next is not None:
-            vm.linux_shadow_stack_next = saved_shadow_next
+        observed_steps = vm.steps
+        if not preserve_linux_task_state:
+            if current_addr is not None and saved_current is not None:
+                observed_current = vm.memory.read(current_addr, 64)
+                if observed_current != saved_current:
+                    print(
+                        "BOOT_EXEC_PRESERVE_CURRENT_RESTORE "
+                        f"function={name} "
+                        f"before=0x{saved_current:x} "
+                        f"after=0x{observed_current:x}",
+                        flush=True,
+                    )
+                    vm.memory.write(current_addr, 64, saved_current)
+            vm.linux_task_contexts = saved_contexts
+            vm.linux_task_shadow_stacks = saved_shadow_stacks
+            if saved_shadow_next is not None:
+                vm.linux_shadow_stack_next = saved_shadow_next
         (
             vm.sp,
             vm.current_function,
             vm.current_block,
             vm.ip,
             vm.halted,
-            vm.steps,
+            _saved_steps,
         ) = saved
+        vm.steps = observed_steps if preserve_linux_task_state else _saved_steps
 
 
 def skip_prepare_namespace_after_hot_init(vm) -> None:
