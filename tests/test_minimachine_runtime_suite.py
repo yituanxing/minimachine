@@ -73,7 +73,7 @@ class MiniMachineRuntimeSuiteTests(unittest.TestCase):
                 text = path.read_text()
                 self.assertTrue(text.startswith("#!/bin/sh\n"))
                 self.assertLess(len(text.encode()), 1024)
-                self.assertIn("MMRT_CASE_START id=%s level=%s", text)
+                self.assertIn("MMRT_CASE_START id=%s", text)
                 self.assertIn("MMRT_CASE_PASS id=%s", text)
                 self.assertIn('if . "$script"; then', text)
                 self.assertNotIn('/bin/sh "$script"', text)
@@ -86,7 +86,7 @@ class MiniMachineRuntimeSuiteTests(unittest.TestCase):
                     self.assertLess(len(case_text.encode()), 1024)
                     self.assertIn(case.command, case_text)
                     self.assertIn(
-                        f"run_case {case.case_id} {case.level} /{suite.case_script_name(index)}",
+                        f"run_case {case.case_id} /{suite.case_script_name(index)}",
                         text,
                     )
                     for marker in case.markers:
