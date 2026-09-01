@@ -95,12 +95,6 @@ jobs:
 
           python3 scripts/minimachine-runtime-suite.py             write-init build/runtime-init.sh --profile core
           chmod +x build/runtime-init.sh build/mmrt-c*
-          extra_args=()
-          for case_script in build/mmrt-c*; do
-            extra_args+=(--extra-script "$case_script")
-          done
-          python3 scripts/build-minimachine-runtime-overlay.py             build/runtime-overlay.cpio             --init-script build/runtime-init.sh             --path mmrt             "${extra_args[@]}"
-          test -s build/runtime-overlay.cpio
           test -s linux/llvm/linked.ll
           test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
           test -s cold/busybox-multicall-kernel-execve.chk.gz
@@ -116,7 +110,11 @@ jobs:
         run: |
           set -o pipefail
           set +e
-          /usr/bin/time -f 'MMRT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M'           timeout --signal=TERM 420           python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz             --initramfs build/frozen-multicall.cpio             --native-vm             --checkpoint-in cold/busybox-multicall-kernel-execve.chk.gz             --inject-initramfs-cpio build/runtime-overlay.cpio             --restart-run-init-after-checkpoint             --restart-init-path /mmrt             --stop-on-panic             --max-steps 0             --progress-every 0             2>&1 | tee build/runtime-suite.log
+          inject_args=(--inject-init build/runtime-init.sh --inject-init-path /mmrt)
+          for case_script in build/mmrt-c*; do
+            inject_args+=(--inject-file "$case_script" "/$(basename "$case_script")")
+          done
+          /usr/bin/time -f 'MMRT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M'           timeout --signal=TERM 420           python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz             --initramfs build/frozen-multicall.cpio             --native-vm             --checkpoint-in cold/busybox-multicall-kernel-execve.chk.gz             "${inject_args[@]}"             --restart-run-init-after-checkpoint             --restart-init-path /mmrt             --stop-on-panic             --max-steps 0             --progress-every 0             2>&1 | tee build/runtime-suite.log
           status=${PIPESTATUS[0]}
           set -e
           echo "MMRT_RUN_STATUS=$status" | tee -a build/runtime-suite.log
@@ -141,7 +139,6 @@ jobs:
           path: |
             build/runtime-init.sh
             build/mmrt-c*
-            build/runtime-overlay.cpio
             build/runtime-inputs.sha256
             build/runtime-suite.log
           if-no-files-found: warn
