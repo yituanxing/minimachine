@@ -870,124 +870,6 @@ class NativeVM(VM):
                     )
                     frame16 = self.memory.read(self.sp + 16, 64)
                     frame24 = self.memory.read(self.sp + 24, 64)
-                    result_ptr = self.memory.read(self.sp + 32, 64)
-                    result_count = self.memory.read(self.sp + 40, 64)
-                    try:
-                        result_value = (
-                            self.memory.read(result_ptr, 64)
-                            if result_ptr
-                            else 0
-                        )
-                    except Exception:
-                        result_value = 0
-                    parsefile_symbol = self.program.symbol_addresses.get(
-                        "__mm_user_g_parsefile"
-                    )
-                    try:
-                        parsefile = (
-                            self.memory.read(parsefile_symbol, 64)
-                            if parsefile_symbol is not None
-                            else 0
-                        )
-                        left_line = (
-                            self.memory.read(parsefile + 16, 32)
-                            if parsefile else -1
-                        )
-                        left_buffer = (
-                            self.memory.read(parsefile + 20, 32)
-                            if parsefile else -1
-                        )
-                        lastc0 = (
-                            self.memory.read(parsefile + 120, 32)
-                            if parsefile else -1
-                        )
-                        lastc1 = (
-                            self.memory.read(parsefile + 124, 32)
-                            if parsefile else -1
-                        )
-                        unget = (
-                            self.memory.read(parsefile + 128, 32)
-                            if parsefile else -1
-                        )
-                    except Exception:
-                        parsefile = 0
-                        left_line = left_buffer = lastc0 = lastc1 = unget = -1
-                    backing_inst = ""
-                    if (
-                        self.current_function == "__mm_user_xxreadtoken"
-                        and self.current_block == "19"
-                        and self.ip == 3
-                    ):
-                        code = self.program.block_code.get(
-                            (self.current_function, self.current_block)
-                        )
-                        matches = []
-                        packed_segments = []
-                        if self._packed is not None:
-                            packed_segments.append(
-                                ("base", self._packed[0], self._packed[1])
-                            )
-                        packed_segments.extend(
-                            (f"extra{index}", pair[0], pair[1])
-                            for index, pair in enumerate(self._extra_packed)
-                        )
-                        for label, insts, blocks in packed_segments:
-                            for native_block in blocks:
-                                if native_block.code != code:
-                                    continue
-                                native_inst = insts[
-                                    native_block.first + self.ip
-                                ]
-                                matches.append(
-                                    f"{label}:first={native_block.first}:"
-                                    f"count={native_block.count}:"
-                                    f"opcode={native_inst.opcode}:"
-                                    f"width={native_inst.width}:"
-                                    f"src={native_inst.src.kind}/"
-                                    f"{native_inst.src.value}:"
-                                    f"dst={native_inst.dst.kind}/"
-                                    f"{native_inst.dst.value}"
-                                )
-                        linked_runtime = self.program.functions.get(
-                            self.current_function
-                        )
-                        p3_inst = None
-                        if linked_runtime is not None:
-                            runtime_block = linked_runtime.block_map.get(
-                                self.current_block
-                            )
-                            if (
-                                runtime_block is not None
-                                and self.ip < len(runtime_block.instructions)
-                            ):
-                                p3_inst = runtime_block.instructions[self.ip]
-                        p3_width = getattr(
-                            getattr(p3_inst, "width", None), "value", None
-                        )
-                        backing_inst = (
-                            " p3_width="
-                            + str(p3_width)
-                            + " p3_type="
-                            + (type(p3_inst).__name__ if p3_inst is not None else "missing")
-                            + " backing="
-                            + (";".join(matches) if matches else "missing")
-                        )
-                    parser_slots = ""
-                    if self.current_function == "__mm_user_xxreadtoken":
-                        linked = self.program.functions.get(self.current_function)
-                        if linked is not None:
-                            slot_parts = []
-                            for slot_name in ("16", "17", "21", "22", "37", "38", "39", "40", "41", "42", "46"):
-                                offset = linked.slot_offsets.get(slot_name)
-                                if offset is None:
-                                    continue
-                                try:
-                                    value = self.memory.read(self.sp + offset, 64)
-                                except Exception:
-                                    continue
-                                slot_parts.append(f"{slot_name}=0x{value:x}")
-                            if slot_parts:
-                                parser_slots = " slots=" + ",".join(slot_parts)
                     print(
                         "BOOT_EXEC_NATIVE_SINGLE_STEP "
                         f"remaining={trace_remaining} steps={self.steps} "
@@ -996,14 +878,7 @@ class NativeVM(VM):
                         f"sp=0x{self.sp:x} "
                         f"descriptor=0x{descriptor or 0:x} "
                         f"desc_entry=0x{desc_entry:x} "
-                        f"sp16=0x{frame16:x} sp24=0x{frame24:x} "
-                        f"result_ptr=0x{result_ptr:x} "
-                        f"result_count={result_count} "
-                        f"result_value=0x{result_value:x} "
-                        f"parsefile=0x{parsefile:x} left_line={left_line} "
-                        f"left_buffer={left_buffer} lastc0={lastc0} "
-                        f"lastc1={lastc1} unget={unget}"
-                        f"{parser_slots}{backing_inst}",
+                        f"sp16=0x{frame16:x} sp24=0x{frame24:x}",
                         flush=True,
                     )
                     self._single_step_trace_remaining = trace_remaining - 1
