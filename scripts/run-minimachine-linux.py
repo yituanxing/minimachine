@@ -2458,6 +2458,22 @@ def linux_ecall(vm, args: tuple[int, ...]):
             )
 
         vm.linux_current_task = next_task
+        if not start_fn:
+            pending = getattr(vm, "pending_user_fork_continuation", None)
+            if pending is not None:
+                continuations = getattr(
+                    vm, "linux_user_fork_continuations", None
+                )
+                if continuations is None:
+                    continuations = {}
+                    vm.linux_user_fork_continuations = continuations
+                continuations[next_task] = pending
+                vm.pending_user_fork_continuation = None
+                print(
+                    "BOOT_EXEC_USER_FORK_CHILD_ARMED "
+                    f"task=0x{next_task:x}",
+                    flush=True,
+                )
         print(
             "BOOT_EXEC_TASK_FIRST_RUN "
             f"task=0x{next_task:x} kind={'kernel' if start_fn else 'user'} "
@@ -2479,6 +2495,28 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 f"got {len(args)} args"
             )
         _, regs = args
+
+        current_task = int(getattr(vm, "linux_current_task", 0) or 0)
+        fork_continuations = getattr(
+            vm, "linux_user_fork_continuations", {}
+        )
+        fork_continuation = (
+            fork_continuations.pop(current_task, None)
+            if current_task else None
+        )
+        if fork_continuation is not None:
+            caller_sp, ret_pc, result_ptr = fork_continuation
+            vm.memory.write(result_ptr, 64, 0)
+            vm.sp = caller_sp
+            vm.halted = False
+            vm._set_code(ret_pc)
+            print(
+                "BOOT_EXEC_USER_FORK_CHILD_RETURN "
+                f"task=0x{current_task:x} sp=0x{caller_sp:x} "
+                f"pc=0x{ret_pc:x} result_ptr=0x{result_ptr:x}",
+                flush=True,
+            )
+            return HOST_CONTROL_TRANSFER
         pc = vm.memory.read(regs + 0, 64)
         user_sp = vm.memory.read(regs + 8, 64)
         status = vm.memory.read(regs + 80, 64)
