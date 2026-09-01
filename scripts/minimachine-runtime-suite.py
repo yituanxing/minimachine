@@ -72,6 +72,34 @@ CORE_CASES = (
         r"""printf 'first\n' > /tmp/mmrt-noclobber || exit 103; set -C; printf 'second\n' > /tmp/mmrt-noclobber; rc=$?; set +C; case "$rc" in 0) exit 104;; *) printf 'MMRT_NOCLOBBER_%s\n' PASS;; esac""",
         "ash noclobber, exclusive create/open failure and errno propagation",
     ),
+    RuntimeCase(
+        "L2-vfs",
+        "symlink-meta",
+        ("MMRT_SYMLINK_META_PASS",),
+        r"""if test -L /bin/sh && test -x /bin/sh; then printf 'MMRT_SYMLINK_META_%s\n' PASS; else exit 105; fi""",
+        "lstat/stat through a real initramfs symlink plus executable metadata",
+    ),
+    RuntimeCase(
+        "L2-vfs",
+        "device-meta",
+        ("MMRT_DEVICE_META_PASS",),
+        r"""if test -c /dev/console; then printf 'MMRT_DEVICE_META_%s\n' PASS; else exit 106; fi""",
+        "character-device metadata and encoded rdev values through stat-family paths",
+    ),
+    RuntimeCase(
+        "L0-shell",
+        "pattern-match",
+        ("MMRT_PATTERN_PASS",),
+        r"""word=alpha42; case "$word" in a*[0-9][0-9]) printf 'MMRT_PATTERN_%s\n' PASS;; *) exit 107;; esac""",
+        "ash case expansion through portable fnmatch wildcards and bracket ranges",
+    ),
+    RuntimeCase(
+        "L0-shell",
+        "arithmetic",
+        ("MMRT_ARITH_PASS",),
+        r"""n=$((6 * 7)); if test "$n" -eq 42 && test "$((n + 1))" -gt 42; then printf 'MMRT_ARITH_%s\n' PASS; else exit 108; fi""",
+        "ash arithmetic expansion and integer conversion/comparison runtime",
+    ),
 )
 
 PROCESS_CASES = (
