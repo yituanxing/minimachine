@@ -3046,7 +3046,6 @@ def main() -> int:
             cached = load_program_cache(
                 args.program_cache_in,
                 image_sha256=linked_image_sha256,
-                initramfs_sha256=initramfs_sha256,
             )
         except ProgramCacheError as exc:
             print(f"BOOT_EXEC_BLOCKED stage=program-cache error={exc}")
@@ -4114,6 +4113,7 @@ def main() -> int:
                 vm,
                 args.checkpoint_out,
                 image_sha256=linked_image_sha256,
+                initramfs_sha256=initramfs_sha256,
             )
             checkpoint_written = True
             print(
