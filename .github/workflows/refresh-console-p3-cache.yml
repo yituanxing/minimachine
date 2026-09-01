@@ -24,14 +24,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download current 64 MiB Linux artifact
-        uses: actions/download-artifact@v4
-        with:
-          repository: ${{ github.repository }}
-          run-id: 33348074309
-          github-token: ${{ github.token }}
-          name: minimachine-linux-initramfs-33348074309
-          path: exact
+      - name: Download latest qualified Linux artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build
+          run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow initramfs-build.yml \
+            --branch work/native-p3-vm \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')"
+          test -n "$run_id"
+          echo "LINUX_RUN_ID=$run_id" | tee build/input-run.env
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$run_id" \
+            --dir exact
+          test -s exact/llvm/linked.ll
+          test -s exact/out/minimachine-initramfs.cpio
 
       - name: Build full current-lowering P3 cache
         run: |
@@ -59,6 +72,7 @@ jobs:
         with:
           name: minimachine-linux-p3-console-current-${{ github.run_id }}
           path: |
+            build/input-run.env
             build/linux-initramfs-p3-cache-full-current.pkl.gz
             build/full-refresh.log
           retention-days: 14
