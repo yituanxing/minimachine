@@ -41,6 +41,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import hashlib
+          from src.minimachine.user_image import BFLT_HEADER_SIZE, unpack_user_image
           for label, path in [
               ("old", Path("old/busybox-multicall.bflt")),
               ("current", Path("current/busybox-multicall.bflt")),
@@ -54,5 +55,15 @@ jobs:
                   f"payload_bytes={len(payload)} "
                   f"header={payload[:16].hex()} "
                   f"sha256={hashlib.sha256(payload).hexdigest()}"
+              )
+              image = unpack_user_image(payload)
+              fn = next(f for f in image.functions if f.name == "__mm_user_xxreadtoken")
+              block = next(b for b in fn.blocks if b.label == "19")
+              inst = block.instructions[3]
+              print(
+                  "BUNDLE_P3_WIDTH "
+                  f"label={label} function=__mm_user_xxreadtoken "
+                  f"block=19 ip=3 type={type(inst).__name__} "
+                  f"width={inst.width.value}"
               )
           PY
