@@ -435,6 +435,212 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return 1
         return 0
 
+    def read_user_cstring(vm, ptr: int, limit: int = 1 << 20) -> bytes:
+        if not ptr:
+            return b""
+        bulk_strlen = getattr(vm.memory, "bulk_strlen", None)
+        bulk_read = getattr(vm.memory, "bulk_read", None)
+        if bulk_strlen is not None and bulk_read is not None:
+            length = min(int(bulk_strlen(ptr)), limit)
+            return bytes(bulk_read(ptr, length))
+        data = bytearray()
+        for index in range(limit):
+            byte = vm.memory.read(ptr + index, 8)
+            if byte == 0:
+                break
+            data.append(byte)
+        return bytes(data)
+
+    def render_user_printf(vm, fmt_ptr: int, next_arg) -> bytes:
+        fmt = read_user_cstring(vm, fmt_ptr, 4096).decode("latin1")
+        out = bytearray()
+        index = 0
+
+        def signed_value(value: int, bits: int) -> int:
+            mask = (1 << bits) - 1
+            value &= mask
+            sign = 1 << (bits - 1)
+            return value - (1 << bits) if value & sign else value
+
+        while index < len(fmt):
+            if fmt[index] != "%":
+                out.append(ord(fmt[index]))
+                index += 1
+                continue
+            index += 1
+            if index < len(fmt) and fmt[index] == "%":
+                out.append(ord("%"))
+                index += 1
+                continue
+
+            flags = ""
+            while index < len(fmt) and fmt[index] in "-+ #0":
+                flags += fmt[index]
+                index += 1
+
+            if index < len(fmt) and fmt[index] == "*":
+                width = signed_value(next_arg(), 32)
+                if width < 0:
+                    flags += "-"
+                    width = -width
+                index += 1
+            else:
+                start = index
+                while index < len(fmt) and fmt[index].isdigit():
+                    index += 1
+                width = int(fmt[start:index] or "0")
+
+            precision = None
+            if index < len(fmt) and fmt[index] == ".":
+                index += 1
+                if index < len(fmt) and fmt[index] == "*":
+                    raw_precision = signed_value(next_arg(), 32)
+                    precision = None if raw_precision < 0 else raw_precision
+                    index += 1
+                else:
+                    start = index
+                    while index < len(fmt) and fmt[index].isdigit():
+                        index += 1
+                    precision = int(fmt[start:index] or "0")
+
+            length = ""
+            if index < len(fmt) and fmt[index] in "hljzt":
+                length = fmt[index]
+                index += 1
+                if (
+                    length in {"h", "l"}
+                    and index < len(fmt)
+                    and fmt[index] == length
+                ):
+                    length += fmt[index]
+                    index += 1
+            if index >= len(fmt):
+                raise VMError("printf format ends after %")
+
+            spec = fmt[index]
+            index += 1
+            bits = 64 if length in {"l", "ll", "j", "z", "t"} else 32
+            numeric = False
+
+            if spec in "di":
+                value = signed_value(next_arg(), bits)
+                sign = "-" if value < 0 else (
+                    "+" if "+" in flags else (" " if " " in flags else "")
+                )
+                digits = str(abs(value))
+                if precision is not None:
+                    digits = digits.rjust(precision, "0")
+                piece = sign + digits
+                numeric = True
+            elif spec in "uoxX":
+                value = next_arg() & ((1 << bits) - 1)
+                prefix = ""
+                if spec == "u":
+                    digits = str(value)
+                elif spec == "o":
+                    digits = format(value, "o")
+                    if "#" in flags and not digits.startswith("0"):
+                        prefix = "0"
+                else:
+                    digits = format(value, "x" if spec == "x" else "X")
+                    if "#" in flags and value:
+                        prefix = "0x" if spec == "x" else "0X"
+                if precision is not None:
+                    digits = digits.rjust(precision, "0")
+                piece = prefix + digits
+                numeric = True
+            elif spec == "p":
+                value = next_arg()
+                piece = "(nil)" if value == 0 else f"0x{value:x}"
+            elif spec == "c":
+                piece = chr(next_arg() & 0xFF)
+            elif spec == "s":
+                raw = read_user_cstring(vm, next_arg())
+                if precision is not None:
+                    raw = raw[:precision]
+                if width > len(raw):
+                    padding = b" " * (width - len(raw))
+                    raw = raw + padding if "-" in flags else padding + raw
+                out.extend(raw)
+                continue
+            else:
+                raise VMError(
+                    f"unsupported printf conversion %{length}{spec}"
+                )
+
+            raw = piece.encode("latin1")
+            if width > len(raw):
+                pad_len = width - len(raw)
+                if "-" in flags:
+                    raw += b" " * pad_len
+                elif "0" in flags and precision is None and numeric:
+                    lead = 1 if raw[:1] in {b"+", b"-", b" "} else (
+                        2 if raw[:2] in {b"0x", b"0X"} else 0
+                    )
+                    raw = raw[:lead] + b"0" * pad_len + raw[lead:]
+                else:
+                    raw = b" " * pad_len + raw
+            out.extend(raw)
+        return bytes(out)
+
+    def write_stdio_payload(vm, stream: int, payload: bytes) -> int:
+        if not payload:
+            return 0
+        ptr = vm.alloc_bytes(len(payload), align=1)
+        bulk_write = getattr(vm.memory, "bulk_write", None)
+        if bulk_write is not None:
+            bulk_write(ptr, payload)
+        else:
+            for offset, byte in enumerate(payload):
+                vm.memory.write(ptr + offset, 8, byte)
+        raw = user_syscall(
+            vm,
+            (64, stdio_fd(stream), ptr, len(payload), 0, 0, 0),
+        )
+        signed = raw - (1 << 64) if raw & (1 << 63) else raw
+        if signed < 0:
+            set_errno(vm, -signed)
+            return (1 << 64) - 1
+        return signed
+
+    if original in {"fprintf", "vfprintf"}:
+        def user_fprintf(vm, args):
+            if original == "fprintf":
+                if len(args) < 2:
+                    raise VMError("fprintf expects FILE*,format,...")
+                stream, fmt_ptr = map(int, args[:2])
+                values = iter(int(value) for value in args[2:])
+
+                def next_arg() -> int:
+                    try:
+                        return next(values)
+                    except StopIteration as exc:
+                        raise VMError(
+                            "fprintf format consumes more arguments than supplied"
+                        ) from exc
+            else:
+                if len(args) != 3:
+                    raise VMError("vfprintf expects FILE*,format,va_list")
+                stream, fmt_ptr, cursor = map(int, args)
+
+                def next_arg() -> int:
+                    nonlocal cursor
+                    value = vm.memory.read(cursor, 64)
+                    cursor += 8
+                    return int(value)
+
+            payload = render_user_printf(vm, fmt_ptr, next_arg)
+            result = write_stdio_payload(vm, stream, payload)
+            print(
+                "BOOT_EXEC_USER_FPRINTF "
+                f"name={original} stream={stdio_fd(stream)} "
+                f"bytes={len(payload)} result={result}",
+                flush=True,
+            )
+            return result
+
+        return user_fprintf
+
     if original == "bsearch":
         def user_bsearch(vm, args):
             if len(args) != 5:
