@@ -350,17 +350,24 @@ def _parse_icmp(
 
 def _parse_switch(inst: TextInst):
     text = re.sub(r"\s+", " ", inst.text.strip())
-    m = re.fullmatch(
-        r"switch\s+i(\d+)\s+(.+?),\s*label\s+%([-A-Za-z$._0-9]+)\s*\[(.*)\]",
+    m = re.match(
+        r"switch\s+i(\d+)\s+(.+?),\s*label\s+%([-A-Za-z$._0-9]+)\s*\[",
         text,
     )
     if not m:
         raise ValueError(f"cannot parse switch: {inst.text}")
 
+    case_close = text.find("]", m.end())
+    if case_close < 0:
+        raise ValueError(f"unterminated switch cases: {inst.text}")
+    trailing = text[case_close + 1 :].strip()
+    if trailing and not trailing.startswith(","):
+        raise ValueError(f"cannot parse switch metadata: {inst.text}")
+
     bits = int(m.group(1))
     selector = _value(m.group(2))
     default = m.group(3)
-    case_body = m.group(4).strip()
+    case_body = text[m.end() : case_close].strip()
     cases: list[tuple[int, str]] = []
 
     if case_body:
