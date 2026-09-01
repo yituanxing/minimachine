@@ -7,6 +7,7 @@ from pathlib import Path
 from src.minimachine import muir
 from src.minimachine.abi import expand_function
 from src.minimachine.checkpoint import (
+    CHECKPOINT_VERSION,
     CheckpointError,
     load_checkpoint,
     save_checkpoint,
@@ -81,7 +82,7 @@ class CheckpointTests(unittest.TestCase):
             with gzip.open(path, "rb") as handle:
                 payload = pickle.load(handle)
 
-        self.assertEqual(payload["version"], 2)
+        self.assertEqual(payload["version"], CHECKPOINT_VERSION)
         self.assertIn("memory_delta", payload)
         self.assertNotIn("memory", payload)
         self.assertLess(len(payload["memory_delta"]), len(vm.memory.bytes))
