@@ -194,8 +194,8 @@ def write_init(path: Path, profile: str) -> None:
         "PATH=/bin",
         "export PATH",
         "run_case() {",
-        "  id=$1; level=$2; script=$3",
-        "  printf 'MMRT_CASE_START id=%s level=%s\\n' \"$id\" \"$level\"",
+        "  id=$1; script=$2",
+        "  printf 'MMRT_CASE_START id=%s\\n' \"$id\"",
         "  if . \"$script\"; then",
         "    printf 'MMRT_CASE_PASS id=%s\\n' \"$id\"",
         "  else",
@@ -208,7 +208,7 @@ def write_init(path: Path, profile: str) -> None:
     ]
     for index, case in enumerate(cases):
         lines.append(
-            f"run_case {case.case_id} {case.level} /{case_script_name(index)}"
+            f"run_case {case.case_id} /{case_script_name(index)}"
         )
     lines.extend(
         [
@@ -286,7 +286,7 @@ def summarize_log(path: Path, profile: str) -> None:
     started = [
         case.case_id
         for case in cases
-        if f"MMRT_CASE_START id={case.case_id} level={case.level}" in text
+        if f"MMRT_CASE_START id={case.case_id}" in text
     ]
     blocked = [
         line
