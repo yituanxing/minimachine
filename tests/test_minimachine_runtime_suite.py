@@ -92,7 +92,9 @@ class MiniMachineRuntimeSuiteTests(unittest.TestCase):
             "BOOT_EXEC_USER_HANDOFF function=__mm_user_main",
         ]
         for case in cases:
-            lines.append(f"MMRT_CASE_START id={case.case_id} level={case.level}")
+            # START lines are diagnostic-only: the first one can be absent
+            # during the initial ash handoff.  Result markers + ordered PASS
+            # lines are the durable execution evidence.
             lines.extend(case.markers)
             lines.append(f"MMRT_CASE_PASS id={case.case_id}")
         lines.extend(
