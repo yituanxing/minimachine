@@ -52,26 +52,30 @@ class MiniMachineRuntimeSuiteTests(unittest.TestCase):
             ],
         )
 
-    def test_generated_init_has_per_case_start_pass_and_suite_endpoint(self):
+    def test_generated_init_splits_cases_below_ash_read_buffer(self):
         suite = load_suite()
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "init.sh"
             suite.write_init(path, "core")
             text = path.read_text()
-        self.assertTrue(text.startswith("#!/bin/sh\n"))
-        for case in suite.CASES:
-            self.assertIn(
-                f"MMRT_CASE_START id=%s level=%s\\n' {case.case_id} {case.level}",
-                text,
-            )
-            self.assertIn(
-                f"MMRT_CASE_PASS id=%s\\n' {case.case_id}",
-                text,
-            )
-            for marker in case.markers:
-                self.assertNotIn(marker, case.command)
-        self.assertIn("MMRT_SUITE_PASS profile=%s cases=%s", text)
-        self.assertIn('exit "$rc"', text)
+            self.assertTrue(text.startswith("#!/bin/sh\n"))
+            self.assertLess(len(text.encode()), 1024)
+            self.assertIn("MMRT_CASE_START id=%s level=%s", text)
+            self.assertIn("MMRT_CASE_PASS id=%s", text)
+            self.assertIn("MMRT_SUITE_PASS profile=%s cases=%s", text)
+            self.assertIn('exit "$rc"', text)
+            for index, case in enumerate(suite.CASES):
+                sidecar = Path(td) / suite.case_script_name(index)
+                self.assertTrue(sidecar.is_file())
+                case_text = sidecar.read_text()
+                self.assertLess(len(case_text.encode()), 1024)
+                self.assertIn(case.command, case_text)
+                self.assertIn(
+                    f"run_case {case.case_id} {case.level} /{suite.case_script_name(index)}",
+                    text,
+                )
+                for marker in case.markers:
+                    self.assertNotIn(marker, case.command)
 
     def test_verify_accepts_complete_log_and_rejects_blocked_log(self):
         suite = load_suite()
