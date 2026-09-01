@@ -118,6 +118,37 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(restored.memory.read(0x24000, 64), 0xCAFEBABE)
         self.assertEqual(restored.current_function, "entry")
 
+    def test_checkpoint_rejects_other_initramfs(self):
+        fn = muir.Function(
+            "entry",
+            [muir.Block("entry", [muir.Ret(None)])],
+            set(),
+        )
+        program = Program([machine(fn)])
+        vm = program.new_vm()
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "linux.chk.gz"
+            save_checkpoint(
+                vm,
+                path,
+                image_sha256="abc",
+                initramfs_sha256="rootfs-a",
+            )
+            load_checkpoint(
+                program.new_vm(),
+                path,
+                image_sha256="abc",
+                initramfs_sha256="rootfs-a",
+            )
+            with self.assertRaises(CheckpointError):
+                load_checkpoint(
+                    program.new_vm(),
+                    path,
+                    image_sha256="abc",
+                    initramfs_sha256="rootfs-b",
+                )
+
     def test_checkpoint_rejects_other_linked_image(self):
         fn = muir.Function(
             "entry",
