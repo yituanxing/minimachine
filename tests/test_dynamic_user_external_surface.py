@@ -51,6 +51,41 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(vm.memory.read(environ, 64), 0x12345678)
 
 
+    def test_isoc23_strtoul_updates_endptr_and_errno(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+        errno_address = 0xC000
+        callback = runner._user_libc_callback(
+            "__mm_user_ext___isoc23_strtoul",
+            errno_address,
+        )
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        def put(address: int, data: bytes) -> None:
+            for index, byte in enumerate(data + b"\0"):
+                vm.memory.write(address + index, 8, byte)
+
+        text = 0xC100
+        endptr = 0xC200
+        put(text, b"  0b101x")
+        self.assertEqual(callback(vm, (text, endptr, 0)), 5)
+        self.assertEqual(vm.memory.read(endptr, 64), text + 7)
+
+        put(text, b"-1")
+        self.assertEqual(
+            callback(vm, (text, endptr, 10)),
+            (1 << 64) - 1,
+        )
+
+        vm.memory.write(errno_address, 32, 0)
+        put(text, b"18446744073709551616")
+        self.assertEqual(
+            callback(vm, (text, endptr, 10)),
+            (1 << 64) - 1,
+        )
+        self.assertEqual(vm.memory.read(errno_address, 32), 34)
+
     def _mov64_function(self, name: str):
         src = muir.Slot("src")
         dst = muir.Slot("dst")
