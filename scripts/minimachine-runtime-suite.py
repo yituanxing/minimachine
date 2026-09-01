@@ -58,6 +58,20 @@ CORE_CASES = (
         r"""cd /__mmrt_path_that_does_not_exist__; rc=$?; case "$rc" in 0) exit 90;; *) printf 'MMRT_PATH_ERROR_%s\n' PASS;; esac""",
         "negative path lookup and shell propagation of Linux VFS error",
     ),
+    RuntimeCase(
+        "L2-vfs",
+        "test-file",
+        ("MMRT_TEST_FILE_PASS",),
+        r"""printf 'x\n' > /tmp/mmrt-test || exit 101; if test -f /tmp/mmrt-test && test -s /tmp/mmrt-test && test -r /tmp/mmrt-test; then printf 'MMRT_TEST_FILE_%s\n' PASS; else exit 102; fi""",
+        "ash test builtin with file type, size, readability and stat-family VFS metadata",
+    ),
+    RuntimeCase(
+        "L2-vfs",
+        "noclobber",
+        ("MMRT_NOCLOBBER_PASS",),
+        r"""printf 'first\n' > /tmp/mmrt-noclobber || exit 103; set -C; printf 'second\n' > /tmp/mmrt-noclobber; rc=$?; set +C; case "$rc" in 0) exit 104;; *) printf 'MMRT_NOCLOBBER_%s\n' PASS;; esac""",
+        "ash noclobber, exclusive create/open failure and errno propagation",
+    ),
 )
 
 PROCESS_CASES = (
