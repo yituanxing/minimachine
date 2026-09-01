@@ -2,11 +2,6 @@ name: MiniMachine Hot filp_open Trace
 
 on:
   workflow_dispatch:
-  push:
-    branches: [work/native-p3-vm]
-    paths:
-      - src/minimachine/llvm_text.py
-      - .github/workflows/hot-filp-open-trace.yml
 
 permissions:
   contents: read
