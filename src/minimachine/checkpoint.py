@@ -25,7 +25,12 @@ def image_fingerprint(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _snapshot(vm: VM, *, image_sha256: str) -> dict:
+def _snapshot(
+    vm: VM,
+    *,
+    image_sha256: str,
+    initramfs_sha256: str | None = None,
+) -> dict:
     linux_state = {
         name: getattr(vm, name)
         for name in _LINUX_ATTRS
@@ -51,6 +56,7 @@ def _snapshot(vm: VM, *, image_sha256: str) -> dict:
     return {
         "version": CHECKPOINT_VERSION,
         "image_sha256": image_sha256,
+        "initramfs_sha256": initramfs_sha256,
         "stack_top": vm.stack_top,
         **memory_payload,
         "sp": vm.sp,
@@ -74,8 +80,13 @@ def save_checkpoint(
     path: Path,
     *,
     image_sha256: str,
+    initramfs_sha256: str | None = None,
 ) -> None:
-    payload = _snapshot(vm, image_sha256=image_sha256)
+    payload = _snapshot(
+        vm,
+        image_sha256=image_sha256,
+        initramfs_sha256=initramfs_sha256,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(path, "wb", compresslevel=3) as handle:
         pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -86,6 +97,7 @@ def load_checkpoint(
     path: Path,
     *,
     image_sha256: str,
+    initramfs_sha256: str | None = None,
 ) -> None:
     try:
         with gzip.open(path, "rb") as handle:
@@ -101,6 +113,13 @@ def load_checkpoint(
         )
     if payload.get("image_sha256") != image_sha256:
         raise CheckpointError("checkpoint linked-image fingerprint mismatch")
+    checkpoint_initramfs = payload.get("initramfs_sha256")
+    if (
+        checkpoint_initramfs is not None
+        and initramfs_sha256 is not None
+        and checkpoint_initramfs != initramfs_sha256
+    ):
+        raise CheckpointError("checkpoint initramfs fingerprint mismatch")
     if payload.get("stack_top") != vm.stack_top:
         raise CheckpointError("checkpoint stack layout mismatch")
 
