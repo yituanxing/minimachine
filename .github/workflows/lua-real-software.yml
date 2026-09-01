@@ -100,7 +100,8 @@ jobs:
             -O2 -std=gnu99 -DLUA_USE_LINUX -I"$src" \
             -flto=full \
             "${args[@]}" \
-            -fuse-ld=lld -Wl,--save-temps -Wl,-E -lm -ldl \
+            -fuse-ld=lld -Wl,--sysroot=/ -Wl,--save-temps -Wl,-E \
+            -L/usr/riscv64-linux-gnu/lib -lm -ldl \
             -o build/lua-lto
 
           find build -maxdepth 2 -type f -name '*.bc' -printf '%p %s\n' \
