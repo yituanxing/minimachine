@@ -100,6 +100,34 @@ CORE_CASES = (
         r"""n=$((6 * 7)); if test "$n" -eq 42 && test "$((n + 1))" -gt 42; then printf 'MMRT_ARITH_%s\n' PASS; else exit 108; fi""",
         "ash arithmetic expansion and integer conversion/comparison runtime",
     ),
+    RuntimeCase(
+        "L2-vfs",
+        "pathname-glob",
+        ("MMRT_GLOB_PASS",),
+        r"""set -- /bin/s?; found=0; for p in "$@"; do case "$p" in /bin/sh) found=1;; esac; done; if test "$found" -eq 1; then printf 'MMRT_GLOB_%s\n' PASS; else exit 109; fi""",
+        "ash pathname expansion with real directory iteration and fnmatch filtering",
+    ),
+    RuntimeCase(
+        "L2-fd",
+        "bad-fd",
+        ("MMRT_BAD_FD_PASS",),
+        r"""printf 'x\n' >&9; rc=$?; case "$rc" in 0) exit 110;; *) printf 'MMRT_BAD_FD_%s\n' PASS;; esac""",
+        "invalid descriptor redirection and EBADF propagation through ash",
+    ),
+    RuntimeCase(
+        "L2-resource",
+        "ulimit-nofile",
+        ("MMRT_ULIMIT_PASS",),
+        r"""ulimit -n > /tmp/mmrt-ulimit || exit 111; IFS= read -r lim < /tmp/mmrt-ulimit || exit 112; case "$lim" in ''|*[!0-9]*) exit 113;; *) printf 'MMRT_ULIMIT_%s\n' PASS;; esac""",
+        "ash ulimit builtin, getrlimit path, redirection and numeric parsing",
+    ),
+    RuntimeCase(
+        "L0-shell",
+        "function-local",
+        ("MMRT_FUNCTION_PASS",),
+        r"""mmrt_fn() { local x=alpha; set -- first second; shift; case "$x:$1" in alpha:second) printf 'MMRT_FUNCTION_%s\n' PASS;; *) return 114;; esac; }; mmrt_fn""",
+        "ash function frames, local variables, positional parameters and shift",
+    ),
 )
 
 PROCESS_CASES = (
