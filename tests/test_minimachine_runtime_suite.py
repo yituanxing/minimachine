@@ -34,6 +34,10 @@ class MiniMachineRuntimeSuiteTests(unittest.TestCase):
                 "path-error",
                 "test-file",
                 "noclobber",
+                "symlink-meta",
+                "device-meta",
+                "pattern-match",
+                "arithmetic",
             ],
         )
         self.assertEqual(
