@@ -86,3 +86,27 @@ Total complexity =
 ```
 
 The project therefore measures lowering pressure before growing the ISA.
+
+
+## Real-software development driver
+
+MiniMachine is developed against complete upstream software, not by enumerating
+application behaviors one by one.
+
+The primary progression rule is:
+
+1. boot the pinned Linux image;
+2. run a real BusyBox multicall userspace through the normal Linux exec path;
+3. let BusyBox init, rcS, the shell, and external applets expose the next missing
+   machine/runtime semantic;
+4. fix that semantic at the lowest reusable layer;
+5. rerun the whole software workload.
+
+Small shell/process cases are diagnostic and regression tests only. They must
+not become the development roadmap, and a BusyBox/ash-specific host shortcut is
+not considered a completed feature unless it represents a reusable ABI/runtime
+contract.
+
+The current software ladder is Linux -> BusyBox init/userspace, followed by
+additional real programs such as Lua and SQLite once the BusyBox userspace path
+is stable.
