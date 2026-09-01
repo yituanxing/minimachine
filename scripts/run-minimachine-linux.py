@@ -2371,14 +2371,15 @@ def linux_ecall(vm, args: tuple[int, ...]):
         if saved is not None:
             resume_sp, resume_pc, result_ptr = saved
             vm.memory.write(result_ptr, 64, prev)
+            vm.linux_current_task = next_task
             vm.sp = resume_sp
             vm.halted = False
             vm._set_code(resume_pc)
             return HOST_CONTROL_TRANSFER
 
-        if not fresh_sp or not start_fn:
+        if not fresh_sp:
             raise VMError(
-                "first MiniMachine task switch lacks fresh stack/function: "
+                "first MiniMachine task switch lacks fresh stack: "
                 f"next=0x{next_task:x} sp=0x{fresh_sp:x} fn=0x{start_fn:x}"
             )
         if "minimachine_ret_from_fork" not in vm.program.functions:
@@ -2403,6 +2404,13 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 flush=True,
             )
 
+        vm.linux_current_task = next_task
+        print(
+            "BOOT_EXEC_TASK_FIRST_RUN "
+            f"task=0x{next_task:x} kind={'kernel' if start_fn else 'user'} "
+            f"guest_sp=0x{fresh_sp:x} start_fn=0x{start_fn:x}",
+            flush=True,
+        )
         vm.enter_function(
             "minimachine_ret_from_fork",
             (prev, start_fn, start_arg),
