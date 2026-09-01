@@ -652,6 +652,43 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_fprintf
 
+    if original in {"printf", "vprintf"}:
+        def user_printf(vm, args):
+            if original == "printf":
+                if len(args) < 1:
+                    raise VMError("printf expects format,...")
+                fmt_ptr = int(args[0])
+                values = iter(int(value) for value in args[1:])
+
+                def next_arg() -> int:
+                    try:
+                        return next(values)
+                    except StopIteration as exc:
+                        raise VMError(
+                            "printf format consumes more arguments than supplied"
+                        ) from exc
+            else:
+                if len(args) != 2:
+                    raise VMError("vprintf expects format,va_list")
+                fmt_ptr, cursor = map(int, args)
+
+                def next_arg() -> int:
+                    nonlocal cursor
+                    value = vm.memory.read(cursor, 64)
+                    cursor += 8
+                    return int(value)
+
+            payload = render_user_printf(vm, fmt_ptr, next_arg)
+            result = write_stdio_payload(vm, 1, payload)
+            print(
+                "BOOT_EXEC_USER_PRINTF "
+                f"name={original} bytes={len(payload)} result={result}",
+                flush=True,
+            )
+            return result
+
+        return user_printf
+
     if original == "bsearch":
         def user_bsearch(vm, args):
             if len(args) != 5:
