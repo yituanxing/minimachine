@@ -36,6 +36,9 @@ jobs:
           assert ctypes.sizeof(CInst) == 200
           PY
 
+      - name: Checkpoint unit contracts
+        run: python3 -m unittest tests.test_checkpoint -v
+
       - name: Native checkpoint save restore
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
