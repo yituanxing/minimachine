@@ -53,15 +53,31 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
 
     def test_linux_context_switch_accepts_first_run_user_task(self):
         runner = load_runner()
-        fn = muir.Function(
-            "minimachine_ret_from_fork",
-            [muir.Block("entry", [muir.Ret(None)])],
-            set(),
+
+        def lowered(name):
+            fn = muir.Function(
+                name,
+                [muir.Block("entry", [muir.Ret(None)])],
+                set(),
+            )
+            expanded, _ = expand_function(fn)
+            return lower_function(expanded)
+
+        program = Program(
+            (
+                lowered("minimachine_ret_from_fork"),
+                lowered("resume_after_fork"),
+            )
         )
-        expanded, _ = expand_function(fn)
-        program = Program((lower_function(expanded),))
         vm = program.new_vm()
         vm.linux_shadow_stack_next = 0xF0000000
+
+        resume_code = program.block_code[("resume_after_fork", "entry")]
+        vm.pending_user_fork_continuation = (
+            0xAB1000,
+            resume_code,
+            0xAB2000,
+        )
 
         vm.memory.write(vm.sp + runner.RESULT_COUNT, 64, 1)
         vm.memory.write(vm.sp + runner.CALLER_SP, 64, 0xABC000)
@@ -76,6 +92,50 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(vm.linux_current_task, 0x2000)
         self.assertEqual(vm.current_function, "minimachine_ret_from_fork")
         self.assertEqual(vm.linux_task_shadow_stacks[0x2000], 0xF0000000)
+        self.assertNotIn("pending_user_fork_continuation", vm.__dict__)
+        self.assertIn(0x2000, vm.linux_user_fork_continuations)
+
+        result = runner.linux_ecall(vm, (3, 0x3000))
+        self.assertIs(result, runner.HOST_CONTROL_TRANSFER)
+        self.assertEqual(vm.sp, 0xAB1000)
+        self.assertEqual(vm.current_function, "resume_after_fork")
+        self.assertEqual(vm.memory.read(0xAB2000, 64), 0)
+        self.assertNotIn(0x2000, vm.linux_user_fork_continuations)
+
+    def test_fork_adapts_to_nommu_vfork_clone_flags(self):
+        runner = load_runner()
+        fn = muir.Function(
+            "__se_sys_clone",
+            [muir.Block("entry", [muir.Ret(muir.Imm(0))])],
+            set(),
+        )
+        expanded, _ = expand_function(fn)
+        program = Program((lower_function(expanded),))
+        vm = program.new_vm()
+
+        vm.memory.write(vm.sp + runner.RESULT_COUNT, 64, 1)
+        vm.memory.write(vm.sp + runner.CALLER_SP, 64, 0xAC1000)
+        vm.memory.write(vm.sp + runner.RET_PC, 64, program.halt_code)
+        vm.memory.write(vm.sp + runner.RESULT_PTR, 64, 0xAC2000)
+
+        seen = {}
+
+        def fake_call(vm_arg, name, args, **kwargs):
+            self.assertIs(vm_arg, vm)
+            seen["name"] = name
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+            return (321,)
+
+        runner._call_linux_function_preserving_control = fake_call
+        callback = runner._user_libc_callback("__mm_user_ext_fork", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+        self.assertEqual(callback(vm, ()), 321)
+        self.assertEqual(seen["name"], "__se_sys_clone")
+        self.assertEqual(seen["args"], (0x4111, 0, 0, 0, 0))
+        self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
+        self.assertIsNone(getattr(vm, "pending_user_fork_continuation", None))
 
     def test_getopt_tracks_guest_short_option_state(self):
         runner = load_runner()
