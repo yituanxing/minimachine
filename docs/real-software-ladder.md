@@ -110,3 +110,33 @@ When a ladder workload fails:
 
 A regression test may explain a failure, but passing that regression is not the
 milestone.  The milestone is the real program moving forward.
+
+
+## Evidence log
+
+### Lua 5.4.9 — bundle milestone
+
+The first complete Lua attempt immediately exposed a generic LLVM-text parser
+defect rather than a Lua-specific problem. LLVM 18 emits profiled switch
+terminators in the form `switch ... [ ... ], !prof !N`. MiniMachine had
+incorrectly treated a switch as multiline until the whole instruction ended
+with `]`, so it consumed the following basic blocks into the switch text.
+The switch legalizer also rejected metadata after the closing case bracket.
+
+The parser and legalizer were fixed generically and regression coverage was
+added. Re-running the unchanged upstream Lua workload then passed the complete
+bundle stage:
+
+- normal RISC-V GCC/QEMU execution: PASS;
+- whole-program LLVM LTO: PASS;
+- MiniMachine lowering and bFLT/MMP3 bundle: PASS;
+- 543 P3 functions;
+- 684 global objects;
+- 495 relocations;
+- 113 runtime helpers;
+- 108 external functions;
+- 2,525,468-byte compressed payload.
+
+This is the intended development pattern: a real program discovers a missing
+generic mechanism; the repair is made below the application layer; the same
+unmodified program advances.
