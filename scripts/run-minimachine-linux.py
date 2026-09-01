@@ -2092,6 +2092,34 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_vsnprintf
 
+    if original == "reboot":
+        def user_reboot(vm, args):
+            if len(args) != 1:
+                raise VMError("reboot expects command")
+            cmd = int(args[0])
+            # glibc reboot(2) supplies the Linux magic values around the
+            # single libc command argument. Keep the real permission and
+            # reboot-command semantics in Linux instead of acknowledging the
+            # request in the host runtime.
+            result = user_syscall(
+                vm,
+                (
+                    142,          # asm-generic __NR_reboot
+                    0xFEE1DEAD,   # LINUX_REBOOT_MAGIC1
+                    0x28121969,   # LINUX_REBOOT_MAGIC2
+                    cmd,
+                    0,
+                    0,
+                    0,
+                ),
+            )
+            signed = result - (1 << 64) if result & (1 << 63) else result
+            if signed < 0:
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+            return result
+        return user_reboot
+
     if original == "_exit":
         def user_exit(vm, args):
             if len(args) != 1:
@@ -2816,6 +2844,7 @@ def user_syscall(vm, args: tuple[int, ...]):
         64: ("__se_sys_write", 3),
         93: ("__se_sys_exit", 1),
         94: ("__se_sys_exit_group", 1),
+        142: ("__se_sys_reboot", 4),
         153: ("__se_sys_times", 1),
         160: ("__se_sys_newuname", 1),
         166: ("__se_sys_umask", 1),
