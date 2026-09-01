@@ -51,6 +51,66 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(vm.memory.read(environ, 64), 0x12345678)
 
 
+    def test_directory_callbacks_iterate_linux_dirent64(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+        errno_address = 0xD000
+        path = 0xD100
+        for index, byte in enumerate(b"/bin\0"):
+            vm.memory.write(path + index, 8, byte)
+
+        calls = {"getdents": 0}
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            nr, a0, a1, a2, _a3, _a4, _a5 = map(int, args)
+            if nr == 56:
+                self.assertEqual(a0, ((-100) & ((1 << 64) - 1)))
+                self.assertEqual(a1, path)
+                self.assertTrue(a2 & 0x10000)
+                return 7
+            if nr == 61:
+                self.assertEqual(a0, 7)
+                calls["getdents"] += 1
+                if calls["getdents"] > 1:
+                    return 0
+                buf = a1
+                vm.memory.write(buf + 0, 64, 123)
+                vm.memory.write(buf + 8, 64, 1)
+                vm.memory.write(buf + 16, 16, 24)
+                vm.memory.write(buf + 18, 8, 10)
+                for index, byte in enumerate(b"sh\0"):
+                    vm.memory.write(buf + 19 + index, 8, byte)
+                return 24
+            if nr == 57:
+                self.assertEqual(a0, 7)
+                return 0
+            self.fail(f"unexpected syscall {nr}")
+
+        runner.user_syscall = fake_user_syscall
+        opendir = runner._user_libc_callback("__mm_user_ext_opendir", errno_address)
+        readdir = runner._user_libc_callback("__mm_user_ext_readdir64", errno_address)
+        closedir = runner._user_libc_callback("__mm_user_ext_closedir", errno_address)
+        self.assertIsNotNone(opendir)
+        self.assertIsNotNone(readdir)
+        self.assertIsNotNone(closedir)
+        assert opendir is not None and readdir is not None and closedir is not None
+
+        handle = opendir(vm, (path,))
+        self.assertNotEqual(handle, 0)
+        entry = readdir(vm, (handle,))
+        self.assertNotEqual(entry, 0)
+        self.assertEqual(vm.memory.read(entry + 0, 64), 123)
+        self.assertEqual(vm.memory.read(entry + 16, 16), 24)
+        self.assertEqual(
+            bytes(vm.memory.read(entry + 19 + i, 8) for i in range(3)),
+            b"sh\0",
+        )
+        self.assertEqual(readdir(vm, (handle,)), 0)
+        self.assertEqual(closedir(vm, (handle,)), 0)
+        self.assertEqual(readdir(vm, (handle,)), 0)
+        self.assertEqual(vm.memory.read(errno_address, 32), 9)
+
     def test_isoc23_strtoul_updates_endptr_and_errno(self):
         runner = load_runner()
         vm = Program().new_vm()
