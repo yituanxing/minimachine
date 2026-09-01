@@ -347,13 +347,24 @@ def _call_guest_descriptor_preserving_control(
     )
 
 
+def _user_external_prefix(symbol: str) -> str | None:
+    if not symbol.startswith("__mm_"):
+        return None
+    marker = "_ext_"
+    marker_at = symbol.find(marker, len("__mm_"))
+    if marker_at < 0:
+        return None
+    return symbol[: marker_at + len(marker)]
+
+
 def _user_external_original(symbol: str) -> str:
-    prefix = "__mm_user_ext_"
-    return symbol[len(prefix):] if symbol.startswith(prefix) else symbol
+    prefix = _user_external_prefix(symbol)
+    return symbol[len(prefix):] if prefix is not None else symbol
 
 
 def _user_libc_callback(symbol: str, errno_address: int | None):
     original = _user_external_original(symbol)
+    external_prefix = _user_external_prefix(symbol) or "__mm_user_ext_"
 
     direct = direct_runtime_callback(original)
     if direct is not None:
@@ -1733,7 +1744,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
             def data_address(name: str) -> int:
                 address = vm.program.symbol_addresses.get(
-                    f"__mm_user_ext_{name}"
+                    f"{external_prefix}{name}"
                 )
                 if address is None:
                     raise VMError(
@@ -2240,15 +2251,21 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             flush=True,
         )
         raise VMError(
-            f"unimplemented BusyBox userspace external {original}"
+            f"unimplemented userspace external {original}"
         )
 
     return unimplemented
 
 
 def trace_user_external_descriptor(vm, original: str, stage: str) -> None:
-    symbol = f"__mm_user_ext_{original}"
-    descriptor = vm.program.symbol_addresses.get(symbol)
+    matches = [
+        symbol
+        for symbol in vm.program.symbol_addresses
+        if _user_external_prefix(symbol) is not None
+        and _user_external_original(symbol) == original
+    ]
+    symbol = matches[-1] if matches else ""
+    descriptor = vm.program.symbol_addresses.get(symbol) if symbol else None
     if descriptor is None:
         print(
             "BOOT_EXEC_USER_DESCRIPTOR "
@@ -2271,6 +2288,18 @@ def install_user_external_surface(vm, user_image, envp: int) -> None:
     image = user_image.image
     if image is None:
         return
+
+    external_prefixes = {
+        prefix
+        for symbol in (*image.external_data, *image.external_functions)
+        if (prefix := _user_external_prefix(symbol)) is not None
+    }
+    if len(external_prefixes) > 1:
+        raise VMError(
+            "userspace image mixes external namespaces: "
+            + ",".join(sorted(external_prefixes))
+        )
+    external_prefix = next(iter(external_prefixes), "__mm_user_ext_")
 
     data_defaults = {
         "environ": envp,
@@ -2307,7 +2336,7 @@ def install_user_external_surface(vm, user_image, envp: int) -> None:
             flush=True,
         )
 
-    errno_symbol = "__mm_user_ext___errno_cell"
+    errno_symbol = f"{external_prefix}__errno_cell"
     errno_address = vm.program.symbol_addresses.get(errno_symbol)
     if errno_address is None:
         errno_address = vm.program.define_data_symbol(
