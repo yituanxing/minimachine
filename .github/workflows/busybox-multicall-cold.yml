@@ -25,23 +25,46 @@ jobs:
           gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
             native/p3vm.c -o build/libminimachine_p3vm.so
 
-      - name: Download 64 MiB Linux image
-        uses: actions/download-artifact@v4
-        with:
-          repository: ${{ github.repository }}
-          run-id: 33528059089
-          github-token: ${{ github.token }}
-          name: minimachine-linux-initramfs-33528059089
-          path: linux
+      - name: Download latest qualified Linux image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow initramfs-build.yml \
+            --branch work/native-p3-vm \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')"
+          test -n "$run_id"
+          echo "MINIMACHINE_LINUX_RUN=$run_id"
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$run_id" \
+            --dir linux
+          test -s linux/llvm/linked.ll
+          test -s linux/llvm/linux-initramfs-p3-cache.pkl.gz
 
-      - name: Download BusyBox multicall image
-        uses: actions/download-artifact@v4
-        with:
-          repository: ${{ github.repository }}
-          run-id: 33396890631
-          github-token: ${{ github.token }}
-          name: minimachine-busybox-multicall-33396890631
-          path: busybox
+      - name: Download latest BusyBox multicall image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow busybox-multicall-bundle.yml \
+            --branch work/native-p3-vm \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')"
+          test -n "$run_id"
+          echo "MINIMACHINE_BUSYBOX_RUN=$run_id"
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-multicall-$run_id" \
+            --dir busybox
+          test -s busybox/busybox-multicall.bflt
 
       - name: Build standard multicall rootfs
         run: |
@@ -64,8 +87,6 @@ jobs:
 
           grep -F 'BUSYBOX_ROOTFS_READY ' build/busybox-multicall-rootfs.log
           test -s build/busybox-multicall.cpio
-          test -s linux/llvm/linked.ll
-          test -s linux/llvm/linux-initramfs-p3-cache.pkl.gz
           ls -lh build/busybox-multicall.cpio busybox/busybox-multicall.bflt
 
       - name: Cold boot standard BusyBox multicall rootfs
@@ -107,7 +128,7 @@ jobs:
       - name: Summarize multicall cold boot
         if: always()
         run: |
-          grep -E 'BOOT_EXEC_(STAGE|MILESTONE|INITRAMFS|CHECKPOINT_SAVED|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_VSNPRINTF|USER_ATOI|USER_EXIT|HALTED|BLOCKED)|BUSYBOX_MULTICALL_' \
+          grep -E 'BOOT_EXEC_(STAGE|MILESTONE|INITRAMFS|CHECKPOINT_SAVED|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_EXIT|HALTED|BLOCKED)|BUSYBOX_MULTICALL_' \
             build/busybox-multicall-cold.log | tail -520 || true
 
       - name: Upload multicall cold evidence
@@ -118,6 +139,159 @@ jobs:
           path: |
             build/busybox-multicall-cold.log
             build/busybox-multicall-rootfs.log
+            build/busybox-multicall.cpio
             build/busybox-multicall-kernel-execve.chk.gz
+          if-no-files-found: warn
+          retention-days: 7
+
+  real-software:
+    needs: multicall-cold
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download latest qualified Linux image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow initramfs-build.yml \
+            --branch work/native-p3-vm \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')"
+          test -n "$run_id"
+          echo "MINIMACHINE_LINUX_RUN=$run_id"
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$run_id" \
+            --dir linux
+
+      - name: Download latest BusyBox multicall image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow busybox-multicall-bundle.yml \
+            --branch work/native-p3-vm \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')"
+          test -n "$run_id"
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-multicall-$run_id" \
+            --dir busybox
+
+      - name: Download fresh cold checkpoint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-multicall-cold-$GITHUB_RUN_ID" \
+            --dir cold
+          test -s cold/busybox-multicall-kernel-execve.chk.gz
+          test -s cold/busybox-multicall.cpio
+
+      - name: Build real BusyBox init rootfs
+        run: |
+          cat > build/rcS <<'SH'
+          #!/bin/sh
+          PATH=/bin
+          export PATH
+          echo MINIMACHINE_REAL_BUSYBOX_RCS
+          exec /bin/sh
+          SH
+          chmod +x build/rcS
+
+          python3 scripts/build-minimachine-busybox-rootfs.py \
+            build/busybox-real-init.cpio \
+            --busybox-image busybox/busybox-multicall.bflt \
+            --busybox-init \
+            --rc-script-file build/rcS \
+            2>&1 | tee build/busybox-real-rootfs.log
+
+          grep -F 'mode=busybox-init' build/busybox-real-rootfs.log
+          test -s build/busybox-real-init.cpio
+
+      - name: Run real BusyBox init and shell
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+        run: |
+          set -o pipefail
+          set +e
+          {
+            echo 'echo MINIMACHINE_REAL_EXTERNAL_BEGIN'
+            echo '/bin/uname -s'
+            echo '/bin/ls /etc'
+            echo '/bin/cat /etc/inittab'
+            echo 'echo MINIMACHINE_REAL_EXTERNAL_END'
+          } | \
+          /usr/bin/time -f 'MINIMACHINE_REAL_SOFTWARE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 300 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in linux/llvm/linux-initramfs-p3-cache.pkl.gz \
+            --initramfs cold/busybox-multicall.cpio \
+            --native-vm \
+            --checkpoint-in cold/busybox-multicall-kernel-execve.chk.gz \
+            --inject-initramfs-cpio build/busybox-real-init.cpio \
+            --restart-run-init-after-checkpoint \
+            --restart-init-path /init \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/busybox-real-software.log
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "MINIMACHINE_REAL_SOFTWARE_STATUS=$status" | tee -a build/busybox-real-software.log
+
+      - name: Report real-software frontier
+        if: always()
+        run: |
+          echo '=== real software frontier ==='
+          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|ROOTFS|INIT_EXEC_RESTART|USER_HANDOFF|USER_EXIT|BLOCKED|HALTED)|MINIMACHINE_REAL_' \
+            build/busybox-real-software.log | tail -420 || true
+          if grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-real-software.log >/dev/null; then
+            echo 'MINIMACHINE_REAL_FRONTIER=blocked'
+            grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-real-software.log | tail -1
+          elif grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' build/busybox-real-software.log >/dev/null; then
+            echo 'MINIMACHINE_REAL_FRONTIER=external-software-passed'
+          else
+            echo 'MINIMACHINE_REAL_FRONTIER=before-external-software-end'
+          fi
+
+      - name: Assert real-software progress
+        run: |
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/busybox-real-software.log
+          grep -F 'BOOT_EXEC_USER_HANDOFF ' build/busybox-real-software.log
+          grep -Fx 'MINIMACHINE_REAL_BUSYBOX_RCS' build/busybox-real-software.log
+          grep -Fx 'MINIMACHINE_REAL_EXTERNAL_BEGIN' build/busybox-real-software.log
+          grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' build/busybox-real-software.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-real-software.log
+          grep -E '^MINIMACHINE_REAL_SOFTWARE_STATUS=(0|124)$' build/busybox-real-software.log
+
+      - name: Upload real-software evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-real-software-${{ github.run_id }}
+          path: |
+            build/busybox-real-rootfs.log
+            build/busybox-real-init.cpio
+            build/busybox-real-software.log
           if-no-files-found: warn
           retention-days: 7
