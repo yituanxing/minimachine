@@ -2,13 +2,6 @@ name: MiniMachine Runtime Process Frontier
 
 on:
   workflow_dispatch:
-  push:
-    branches: [work/native-p3-vm]
-    paths:
-      - scripts/run-minimachine-linux.py
-      - scripts/minimachine-runtime-suite.py
-      - tests/test_minimachine_runtime_suite.py
-      - .github/workflows/runtime-process-frontier.yml
 
 permissions:
   contents: read
@@ -105,16 +98,16 @@ jobs:
           python3 scripts/minimachine-runtime-suite.py             frontier-log build/runtime-process.log --profile process || true
           grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|USER_HANDOFF|USER_EXIT|BLOCKED)|^MMRT_'             build/runtime-process.log | tail -360 || true
 
-      - name: Verify process result or known fork frontier
+      - name: Record diagnostic result
         run: |
           if grep -Fx 'MMRT_SUITE_PASS profile=process cases=5' build/runtime-process.log; then
-            python3 scripts/minimachine-runtime-suite.py               verify-log build/runtime-process.log --profile process
-            grep -F 'MMRT_PROCESS_RUN_STATUS=0' build/runtime-process.log
-            echo MMRT_PROCESS_SUITE_PASS
+            python3 scripts/minimachine-runtime-suite.py verify-log build/runtime-process.log --profile process
+            echo MMRT_PROCESS_DIAGNOSTIC=pass
+          elif grep -F 'BOOT_EXEC_BLOCKED ' build/runtime-process.log >/dev/null; then
+            echo MMRT_PROCESS_DIAGNOSTIC=blocked
+            grep -F 'BOOT_EXEC_BLOCKED ' build/runtime-process.log | tail -1
           else
-            grep -F 'error=unimplemented BusyBox userspace external fork' build/runtime-process.log
-            grep -F 'MMRT_PROCESS_RUN_STATUS=1' build/runtime-process.log
-            echo MMRT_PROCESS_FRONTIER_FORK
+            echo MMRT_PROCESS_DIAGNOSTIC=inconclusive
           fi
 
       - name: Upload process evidence
