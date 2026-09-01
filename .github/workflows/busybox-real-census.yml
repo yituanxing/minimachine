@@ -2,11 +2,6 @@ name: MiniMachine Real BusyBox Census
 
 on:
   workflow_dispatch:
-  push:
-    branches: [work/native-p3-vm]
-    paths:
-      - src/minimachine/legalize.py
-      - .github/workflows/busybox-real-census.yml
 
 permissions:
   contents: read
