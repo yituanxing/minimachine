@@ -139,6 +139,51 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
         self.assertIsNone(getattr(vm, "pending_user_fork_continuation", None))
 
+    def test_reboot_libc_wrapper_uses_linux_magic_syscall(self):
+        runner = load_runner()
+        program = Program()
+        vm = program.new_vm()
+        seen = {}
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            seen["args"] = args
+            return 0
+
+        runner.user_syscall = fake_user_syscall
+        callback = runner._user_libc_callback("__mm_user_ext_reboot", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+        self.assertEqual(callback(vm, (0,)), 0)
+        self.assertEqual(
+            seen["args"],
+            (142, 0xFEE1DEAD, 0x28121969, 0, 0, 0, 0),
+        )
+
+    def test_reboot_syscall_falls_back_to_linux_wrapper(self):
+        runner = load_runner()
+        fn = muir.Function(
+            "__se_sys_reboot",
+            [muir.Block("entry", [muir.Ret(muir.Imm(0))])],
+            set(),
+        )
+        expanded, _ = expand_function(fn)
+        program = Program((lower_function(expanded),))
+        vm = program.new_vm()
+        seen = {}
+
+        def fake_call(vm_arg, name, args, **kwargs):
+            self.assertIs(vm_arg, vm)
+            seen["name"] = name
+            seen["args"] = args
+            return (0,)
+
+        runner._call_linux_function_preserving_control = fake_call
+        result = runner.user_syscall(vm, (142, 1, 2, 3, 4, 5, 6))
+        self.assertEqual(result, 0)
+        self.assertEqual(seen["name"], "__se_sys_reboot")
+        self.assertEqual(seen["args"], (1, 2, 3, 4))
+
     def test_getopt_tracks_guest_short_option_state(self):
         runner = load_runner()
         program = Program()
