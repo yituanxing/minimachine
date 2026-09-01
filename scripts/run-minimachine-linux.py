@@ -1698,6 +1698,155 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_strto
 
+    if original == "getopt":
+        def user_getopt(vm, args):
+            if len(args) != 3:
+                raise VMError("getopt expects argc,argv,optstring")
+            argc, argv, optstring_ptr = map(int, args)
+            optstring = read_user_cstring(
+                vm, optstring_ptr, 4096
+            ).decode("latin1")
+
+            def data_address(name: str) -> int:
+                address = vm.program.symbol_addresses.get(
+                    f"__mm_user_ext_{name}"
+                )
+                if address is None:
+                    raise VMError(
+                        f"getopt missing userspace external data {name}"
+                    )
+                return int(address)
+
+            optarg_addr = data_address("optarg")
+            optind_addr = data_address("optind")
+            optopt_addr = data_address("optopt")
+
+            optind = int(vm.memory.read(optind_addr, 32))
+            if optind <= 0:
+                optind = 1
+
+            state = getattr(vm, "user_getopt_state", None)
+            if (
+                state is None
+                or state.get("argv") != argv
+                or state.get("optstring") != optstring_ptr
+                or state.get("argc") != argc
+                or optind == 1 and state.get("optind_seen") != 1
+            ):
+                state = {
+                    "argv": argv,
+                    "optstring": optstring_ptr,
+                    "argc": argc,
+                    "index": optind,
+                    "next": 0,
+                    "optind_seen": optind,
+                }
+                vm.user_getopt_state = state
+            elif state.get("index") != optind and state.get("next", 0) == 0:
+                state["index"] = optind
+
+            vm.memory.write(optarg_addr, 64, 0)
+
+            while True:
+                index = int(state["index"])
+                next_pos = int(state.get("next", 0))
+
+                if index >= argc:
+                    vm.memory.write(optind_addr, 32, index)
+                    state["optind_seen"] = index
+                    return (1 << 64) - 1
+
+                arg_ptr = vm.memory.read(argv + index * 8, 64)
+                if not arg_ptr:
+                    vm.memory.write(optind_addr, 32, index)
+                    state["optind_seen"] = index
+                    return (1 << 64) - 1
+                arg = read_user_cstring(vm, arg_ptr, 4096).decode("latin1")
+
+                if next_pos == 0:
+                    if len(arg) < 2 or arg[0] != "-" or arg == "-":
+                        vm.memory.write(optind_addr, 32, index)
+                        state["optind_seen"] = index
+                        return (1 << 64) - 1
+                    if arg == "--":
+                        index += 1
+                        state["index"] = index
+                        state["next"] = 0
+                        vm.memory.write(optind_addr, 32, index)
+                        state["optind_seen"] = index
+                        return (1 << 64) - 1
+                    next_pos = 1
+
+                option = arg[next_pos]
+                next_pos += 1
+                option_code = ord(option) & 0xFF
+                vm.memory.write(optopt_addr, 32, option_code)
+
+                search_start = 1 if optstring.startswith(":") else 0
+                pos = optstring.find(option, search_start)
+                if option == ":" or pos < 0:
+                    if next_pos >= len(arg):
+                        index += 1
+                        next_pos = 0
+                    state["index"] = index
+                    state["next"] = next_pos
+                    vm.memory.write(optind_addr, 32, index)
+                    state["optind_seen"] = index
+                    return ord("?")
+
+                requires_arg = (
+                    pos + 1 < len(optstring)
+                    and optstring[pos + 1] == ":"
+                )
+                optional_arg = (
+                    requires_arg
+                    and pos + 2 < len(optstring)
+                    and optstring[pos + 2] == ":"
+                )
+
+                if requires_arg:
+                    if next_pos < len(arg):
+                        vm.memory.write(
+                            optarg_addr, 64, arg_ptr + next_pos
+                        )
+                        index += 1
+                        next_pos = 0
+                    elif optional_arg:
+                        vm.memory.write(optarg_addr, 64, 0)
+                        index += 1
+                        next_pos = 0
+                    elif index + 1 < argc:
+                        index += 1
+                        value_ptr = vm.memory.read(argv + index * 8, 64)
+                        vm.memory.write(optarg_addr, 64, value_ptr)
+                        index += 1
+                        next_pos = 0
+                    else:
+                        index += 1
+                        next_pos = 0
+                        state["index"] = index
+                        state["next"] = next_pos
+                        vm.memory.write(optind_addr, 32, index)
+                        state["optind_seen"] = index
+                        return ord(":") if optstring.startswith(":") else ord("?")
+                elif next_pos >= len(arg):
+                    index += 1
+                    next_pos = 0
+
+                state["index"] = index
+                state["next"] = next_pos
+                vm.memory.write(optind_addr, 32, index)
+                state["optind_seen"] = index
+                print(
+                    "BOOT_EXEC_USER_GETOPT "
+                    f"option={option!r} optind={index} "
+                    f"optarg=0x{vm.memory.read(optarg_addr, 64):x}",
+                    flush=True,
+                )
+                return option_code
+
+        return user_getopt
+
     if original == "vsnprintf":
         def user_vsnprintf(vm, args):
             if len(args) != 4:
