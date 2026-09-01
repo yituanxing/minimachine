@@ -179,15 +179,14 @@ def parse_module(text: str) -> list[TextFunction]:
         # Keep all case rows attached to the terminator.
         if block is not None and block.instructions:
             prev = block.instructions[-1]
-            if (
-                prev.opcode == "switch"
-                and "[" in prev.text
-                and not prev.text.rstrip().endswith("]")
-            ):
-                block.instructions[-1] = TextInst(
-                    prev.result, prev.opcode, prev.text + " " + line
-                )
-                continue
+            if prev.opcode == "switch" and "[" in prev.text:
+                case_open = prev.text.find("[")
+                case_close = prev.text.find("]", case_open + 1)
+                if case_close < 0:
+                    block.instructions[-1] = TextInst(
+                        prev.result, prev.opcode, prev.text + " " + line
+                    )
+                    continue
 
         lm = _LABEL_RE.match(line)
         if lm:
