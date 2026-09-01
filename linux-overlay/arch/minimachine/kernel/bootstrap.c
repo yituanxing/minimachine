@@ -378,23 +378,25 @@ void __noreturn minimachine_ret_from_fork(struct task_struct *prev,
 {
 	int (*fn)(void *) = (int (*)(void *))fn_addr;
 	struct pt_regs *regs;
-	int ret;
+	int ret = 0;
 
 	schedule_tail(prev);
-	if (!fn)
-		panic("MiniMachine: first-run task has no kernel entry");
-
-	ret = fn((void *)arg);
 
 	/*
-	 * A successful kernel_execve() returns from kernel_init() with the task
-	 * frame already converted to user mode.  Real architectures return
-	 * through their assembly entry path here; MiniMachine uses an explicit
-	 * semantic host transfer instead.
+	 * Kernel-thread children enter with args->fn populated.  User children
+	 * instead inherit pt_regs in copy_thread() and reach this trampoline with
+	 * fn_addr == 0, exactly like a conventional ret_from_fork path before the
+	 * final return-to-user transition.
 	 */
+	if (fn)
+		ret = fn((void *)arg);
+
 	regs = current_pt_regs();
 	if (user_mode(regs))
 		minimachine_enter_userspace(regs);
+
+	if (!fn)
+		panic("MiniMachine: user child lost user-mode pt_regs");
 
 	do_exit(ret);
 }
@@ -417,14 +419,29 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 {
 	struct pt_regs *regs = task_pt_regs(p);
 
-	memset(regs, 0, sizeof(*regs));
-	regs->sp = args->stack;
-	regs->pc = args->fn ? (unsigned long)args->fn : 0;
-	regs->args[0] = (unsigned long)args->fn_arg;
-	regs->status = MINIMACHINE_STATUS_IRQ_ENABLE;
+	if (args->fn) {
+		memset(regs, 0, sizeof(*regs));
+		regs->sp = args->stack;
+		regs->pc = (unsigned long)args->fn;
+		regs->args[0] = (unsigned long)args->fn_arg;
+		regs->status = MINIMACHINE_STATUS_IRQ_ENABLE;
+		p->thread.resume_pc = regs->pc;
+	} else {
+		/*
+		 * User vfork/clone children inherit the parent's syscall frame.
+		 * The child observes a zero return value; an explicit clone stack,
+		 * when supplied, replaces the inherited userspace SP.
+		 */
+		*regs = *current_pt_regs();
+		regs->result = 0;
+		if (args->stack)
+			regs->sp = args->stack;
+		regs->status |=
+			MINIMACHINE_STATUS_USER | MINIMACHINE_STATUS_IRQ_ENABLE;
+		p->thread.resume_pc = 0;
+	}
 
 	p->thread.kernel_sp = (unsigned long)regs;
-	p->thread.resume_pc = regs->pc;
 	return 0;
 }
 
