@@ -1,0 +1,173 @@
+name: MiniMachine Lua Real Software
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/user_bundle.py
+      - src/minimachine/user_image.py
+      - src/minimachine/legalize.py
+      - src/minimachine/runtime.py
+      - scripts/build-minimachine-user-program.py
+      - tests/test_user_namespace.py
+      - .github/workflows/lua-real-software.yml
+
+permissions:
+  contents: read
+
+jobs:
+  lua-bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      LUA_VERSION: "5.4.9"
+      LUA_SHA256: "2335b6c582a52654f94612bf10d2f4672805d05329aa6568b1d8cd9e5c6fb8e6"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross and LLVM dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates \
+            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross qemu-user \
+            clang-18 llvm-18 lld-18
+
+      - name: Validate generic user-program namespace contracts
+        run: |
+          python3 -m unittest \
+            tests.test_user_bundle \
+            tests.test_user_namespace \
+            -v
+          python3 -m py_compile scripts/build-minimachine-user-program.py
+
+      - name: Fetch pinned upstream Lua
+        run: |
+          mkdir -p build
+          tarball="lua-${LUA_VERSION}.tar.gz"
+          curl -fL --retry 5 --retry-delay 2 \
+            -o "build/$tarball" \
+            "https://www.lua.org/ftp/$tarball"
+          echo "${LUA_SHA256}  build/$tarball" | sha256sum -c -
+          tar -xzf "build/$tarball" -C build
+          printf 'version=%s\nsha256=%s\n' \
+            "$LUA_VERSION" "$LUA_SHA256" | tee build/lua-source.txt
+
+      - name: Build and run normal RISC-V Lua baseline
+        run: |
+          src="build/lua-${LUA_VERSION}/src"
+          sources=(
+            lapi.c lcode.c lctype.c ldebug.c ldo.c ldump.c lfunc.c lgc.c
+            llex.c lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c
+            ltable.c ltm.c lundump.c lvm.c lzio.c
+            lauxlib.c lbaselib.c lcorolib.c ldblib.c liolib.c lmathlib.c
+            loadlib.c loslib.c lstrlib.c ltablib.c lutf8lib.c linit.c lua.c
+          )
+          args=()
+          for file in "${sources[@]}"; do args+=("$src/$file"); done
+
+          riscv64-linux-gnu-gcc \
+            -O2 -std=gnu99 -DLUA_USE_LINUX -I"$src" \
+            "${args[@]}" -Wl,-E -lm -ldl \
+            -o build/lua-riscv64
+
+          qemu-riscv64 -L /usr/riscv64-linux-gnu \
+            build/lua-riscv64 -e \
+            'local s=0; for i=1,1000 do s=s+i end; local t={answer=42}; print("LUA_RISCV_BASELINE",s,t.answer,_VERSION)' \
+            | tee build/lua-riscv-baseline.txt
+          grep -F 'LUA_RISCV_BASELINE' build/lua-riscv-baseline.txt
+          grep -F '500500' build/lua-riscv-baseline.txt
+          grep -F '42' build/lua-riscv-baseline.txt
+
+      - name: Build whole-program RISC-V LLVM LTO image
+        run: |
+          src="build/lua-${LUA_VERSION}/src"
+          sources=(
+            lapi.c lcode.c lctype.c ldebug.c ldo.c ldump.c lfunc.c lgc.c
+            llex.c lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c
+            ltable.c ltm.c lundump.c lvm.c lzio.c
+            lauxlib.c lbaselib.c lcorolib.c ldblib.c liolib.c lmathlib.c
+            loadlib.c loslib.c lstrlib.c ltablib.c lutf8lib.c linit.c lua.c
+          )
+          args=()
+          for file in "${sources[@]}"; do args+=("$src/$file"); done
+
+          clang-18 \
+            --target=riscv64-linux-gnu \
+            --sysroot=/usr/riscv64-linux-gnu \
+            --gcc-toolchain=/usr \
+            -O2 -std=gnu99 -DLUA_USE_LINUX -I"$src" \
+            -flto=full \
+            "${args[@]}" \
+            -fuse-ld=lld -Wl,--save-temps -Wl,-E -lm -ldl \
+            -o build/lua-lto
+
+          find build -maxdepth 2 -type f -name '*.bc' -printf '%p %s\n' \
+            | sort | tee build/lua-lto-files.txt
+          opt_bc="$(find build -maxdepth 2 -type f -name '*.opt.bc' -print | head -1)"
+          test -n "$opt_bc"
+          test -s "$opt_bc"
+          llvm-dis-18 "$opt_bc" -o build/lua-whole.ll
+          test -s build/lua-whole.ll
+
+      - name: Lower complete Lua interpreter to MiniMachine bundle
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'LUA_MINIMACHINE_BUNDLE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 scripts/build-minimachine-user-program.py \
+              build/lua-whole.ll \
+              build/lua54.bflt \
+              --entry main \
+              --namespace lua54 \
+              --entry-args linux-main \
+              --stack-size 0x100000 \
+              --report build/lua54-bundle.json \
+              2>&1 | tee build/lua54-bundle.log
+
+          grep -F 'USER_BUNDLE namespace=lua54 entry=__mm_lua54_main ' \
+            build/lua54-bundle.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report=json.loads(Path("build/lua54-bundle.json").read_text())
+          print(
+              "LUA_MINIMACHINE_GATE "
+              f"entry={report['entry_namespaced']} "
+              f"functions={report['functions']} "
+              f"externals={len(report['external_functions'])} "
+              f"helpers={report['runtime_helpers']} "
+              f"payload={report['compressed_payload_bytes']}"
+          )
+          assert report["namespace"] == "lua54"
+          assert report["entry_namespaced"] == "__mm_lua54_main"
+          assert report["functions"] > 100
+          assert report["payload_under_16m"]
+          PY
+
+      - name: Report Lua semantic surface
+        if: always()
+        run: |
+          echo '=== Lua source ==='
+          cat build/lua-source.txt || true
+          echo '=== native RISC-V baseline ==='
+          cat build/lua-riscv-baseline.txt || true
+          echo '=== MiniMachine bundle ==='
+          grep -E '^(USER_BUNDLE|USER_EXTERNAL_FUNCTION|USER_EXTERNAL_DATA|LUA_MINIMACHINE_)' \
+            build/lua54-bundle.log | tail -240 || true
+
+      - name: Upload Lua evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-lua54-${{ github.run_id }}
+          path: |
+            build/lua-source.txt
+            build/lua-riscv-baseline.txt
+            build/lua-lto-files.txt
+            build/lua-whole.ll
+            build/lua54.bflt
+            build/lua54-bundle.json
+            build/lua54-bundle.log
+          if-no-files-found: warn
+          retention-days: 14
