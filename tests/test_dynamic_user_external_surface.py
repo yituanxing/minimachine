@@ -311,6 +311,55 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         )
         self.assertEqual(fclose(vm, (stream,)), 0)
 
+    def test_syslog_state_preserves_log_perror_output(self):
+        runner = load_runner()
+        program = Program()
+        vm = program.new_vm()
+        calls = []
+
+        ident_ptr = 0xD300
+        fmt_ptr = 0xD340
+        string_ptr = 0xD380
+        for base, payload in (
+            (ident_ptr, b"init\0"),
+            (fmt_ptr, b"message %s %d\0"),
+            (string_ptr, b"ready\0"),
+        ):
+            for offset, byte in enumerate(payload):
+                vm.memory.write(base + offset, 8, byte)
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            calls.append(args)
+            self.assertEqual(args[0], 64)
+            self.assertEqual(args[1], 2)
+            return int(args[3])
+
+        runner.user_syscall = fake_user_syscall
+        openlog = runner._user_libc_callback("__mm_user_ext_openlog", None)
+        syslog = runner._user_libc_callback("__mm_user_ext_syslog", None)
+        closelog = runner._user_libc_callback("__mm_user_ext_closelog", None)
+        self.assertIsNotNone(openlog)
+        self.assertIsNotNone(syslog)
+        self.assertIsNotNone(closelog)
+        assert openlog is not None and syslog is not None and closelog is not None
+
+        openlog(vm, (ident_ptr, 0x20, 0x18))
+        self.assertEqual(
+            vm.user_syslog_state,
+            {"ident": b"init", "option": 0x20, "facility": 0x18},
+        )
+        syslog(vm, (5, fmt_ptr, string_ptr, 7))
+        self.assertEqual(len(calls), 1)
+        ptr = int(calls[0][2])
+        size = int(calls[0][3])
+        self.assertEqual(
+            bytes(vm.memory.read(ptr + i, 8) for i in range(size)),
+            b"init: message ready 7\n",
+        )
+        closelog(vm, ())
+        self.assertIsNone(vm.user_syslog_state)
+
     def test_fwrite_and_setsid_use_linux_syscalls(self):
         runner = load_runner()
         program = Program()
