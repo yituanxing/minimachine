@@ -5,6 +5,12 @@ on:
   push:
     branches: [work/native-p3-vm]
     paths:
+      - src/minimachine/program_cache.py
+      - src/minimachine/llvm_text.py
+      - src/minimachine/legalize.py
+      - src/minimachine/abi.py
+      - src/minimachine/lower_p3.py
+      - scripts/refresh-p3-cache-function.py
       - scripts/build-minimachine-busybox-rootfs.py
       - .github/workflows/busybox-multicall-cold.yml
 
@@ -33,15 +39,34 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          refresh_id="$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow refresh-console-p3-cache.yml \
-            --branch work/native-p3-vm \
-            --status success \
-            --limit 1 \
-            --json databaseId \
-            --jq '.[0].databaseId')"
+          lowering_sha="$(git log -1 --format=%H -- \
+            src/minimachine/program_cache.py \
+            src/minimachine/llvm_text.py \
+            src/minimachine/legalize.py \
+            src/minimachine/abi.py \
+            src/minimachine/lower_p3.py \
+            scripts/refresh-p3-cache-function.py)"
+          test -n "$lowering_sha"
+          echo "LOWERING_SHA=$lowering_sha"
+
+          refresh_id=""
+          for attempt in $(seq 1 60); do
+            refresh_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow refresh-console-p3-cache.yml \
+              --branch work/native-p3-vm \
+              --limit 50 \
+              --json databaseId,headSha,status,conclusion \
+              --jq ".[] | select(.headSha == \"$lowering_sha\" and .status == \"completed\" and .conclusion == \"success\") | .databaseId" \
+              | head -1)"
+            if [ -n "$refresh_id" ]; then
+              break
+            fi
+            echo "waiting for lowering-matched P3 refresh attempt=$attempt sha=$lowering_sha"
+            sleep 10
+          done
           test -n "$refresh_id"
+          echo "LOWERING_REFRESH_RUN_ID=$refresh_id"
 
           gh run download "$refresh_id" \
             --repo "$GITHUB_REPOSITORY" \
