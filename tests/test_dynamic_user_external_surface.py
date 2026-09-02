@@ -947,6 +947,106 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(vm.memory.read(optarg, 64), value)
         self.assertEqual(callback(vm, (3, argv, optstring2)), (1 << 64) - 1)
 
+    def test_getopt_long_handles_short_and_struct_option_paths(self):
+        runner = load_runner()
+        program = Program()
+        for name, value in (
+            ("optarg", 0),
+            ("opterr", 1),
+            ("optind", 1),
+            ("optopt", 0),
+        ):
+            program.define_data_symbol(
+                f"__mm_user_ext_{name}",
+                int(value).to_bytes(8, "little"),
+                align=8,
+            )
+        vm = program.new_vm()
+        callback = runner._user_libc_callback(
+            "__mm_user_ext_getopt_long",
+            None,
+        )
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        def put(address: int, data: bytes) -> None:
+            for index, byte in enumerate(data + b"\0"):
+                vm.memory.write(address + index, 8, byte)
+
+        argv = 0xD200
+        prog = 0xD300
+        short_arg = 0xD320
+        optstring = 0xD340
+        long_arg = 0xD380
+        long_name = 0xD3C0
+        longopts = 0xD400
+        longindex = 0xD480
+        flag = 0xD4C0
+
+        put(prog, b"uname")
+        put(short_arg, b"-s")
+        put(optstring, b"sn")
+        vm.memory.write(argv + 0, 64, prog)
+        vm.memory.write(argv + 8, 64, short_arg)
+        vm.memory.write(argv + 16, 64, 0)
+
+        optind = program.symbol_addresses["__mm_user_ext_optind"]
+        optarg = program.symbol_addresses["__mm_user_ext_optarg"]
+        self.assertEqual(
+            callback(vm, (2, argv, optstring, 0, 0)),
+            ord("s"),
+        )
+        self.assertEqual(vm.memory.read(optind, 32), 2)
+        self.assertEqual(vm.memory.read(optarg, 64), 0)
+        self.assertEqual(
+            callback(vm, (2, argv, optstring, 0, 0)),
+            (1 << 64) - 1,
+        )
+
+        # struct option { "output", required_argument, NULL, 'o' }
+        put(long_arg, b"--output=value")
+        put(long_name, b"output")
+        vm.memory.write(longopts + 0, 64, long_name)
+        vm.memory.write(longopts + 8, 32, 1)
+        vm.memory.write(longopts + 16, 64, 0)
+        vm.memory.write(longopts + 24, 32, ord("o"))
+        vm.memory.write(longopts + 32, 64, 0)
+        vm.memory.write(argv + 8, 64, long_arg)
+        vm.memory.write(optind, 32, 1)
+
+        self.assertEqual(
+            callback(vm, (2, argv, optstring, longopts, longindex)),
+            ord("o"),
+        )
+        self.assertEqual(vm.memory.read(optind, 32), 2)
+        self.assertEqual(vm.memory.read(longindex, 32), 0)
+        value_ptr = vm.memory.read(optarg, 64)
+        self.assertEqual(
+            bytes(vm.memory.read(value_ptr + i, 8) for i in range(6)),
+            b"value\0",
+        )
+
+        # struct option { "quiet", no_argument, &flag, 7 }
+        quiet_arg = 0xD500
+        quiet_name = 0xD540
+        put(quiet_arg, b"--quiet")
+        put(quiet_name, b"quiet")
+        vm.memory.write(longopts + 0, 64, quiet_name)
+        vm.memory.write(longopts + 8, 32, 0)
+        vm.memory.write(longopts + 16, 64, flag)
+        vm.memory.write(longopts + 24, 32, 7)
+        vm.memory.write(longopts + 32, 64, 0)
+        vm.memory.write(argv + 8, 64, quiet_arg)
+        vm.memory.write(optind, 32, 1)
+        vm.memory.write(flag, 32, 0)
+
+        self.assertEqual(
+            callback(vm, (2, argv, optstring, longopts, longindex)),
+            0,
+        )
+        self.assertEqual(vm.memory.read(flag, 32), 7)
+        self.assertEqual(vm.memory.read(optind, 32), 2)
+
     def test_directory_callbacks_iterate_linux_dirent64(self):
         runner = load_runner()
         vm = Program().new_vm()
