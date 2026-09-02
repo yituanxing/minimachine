@@ -311,6 +311,39 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         )
         self.assertEqual(fclose(vm, (stream,)), 0)
 
+    def test_strsep_splits_in_place_and_preserves_empty_tokens(self):
+        runner = load_runner()
+        program = Program()
+        vm = program.new_vm()
+
+        stringp = 0xD100
+        text_ptr = 0xD180
+        delim_ptr = 0xD200
+        for offset, byte in enumerate(b"a::bc\0"):
+            vm.memory.write(text_ptr + offset, 8, byte)
+        for offset, byte in enumerate(b":\0"):
+            vm.memory.write(delim_ptr + offset, 8, byte)
+        vm.memory.write(stringp, 64, text_ptr)
+
+        callback = runner._user_libc_callback("__mm_user_ext_strsep", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        first = callback(vm, (stringp, delim_ptr))
+        second = callback(vm, (stringp, delim_ptr))
+        third = callback(vm, (stringp, delim_ptr))
+        final = callback(vm, (stringp, delim_ptr))
+
+        self.assertEqual(first, text_ptr)
+        self.assertEqual(second, text_ptr + 2)
+        self.assertEqual(third, text_ptr + 3)
+        self.assertEqual(final, 0)
+        self.assertEqual(
+            bytes(vm.memory.read(text_ptr + i, 8) for i in range(6)),
+            b"a\0\0bc\0",
+        )
+        self.assertEqual(vm.memory.read(stringp, 64), 0)
+
     def test_syslog_state_preserves_log_perror_output(self):
         runner = load_runner()
         program = Program()
