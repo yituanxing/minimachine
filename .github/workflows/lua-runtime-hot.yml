@@ -124,45 +124,51 @@ jobs:
           echo "LUA_LINKED_IMAGE_SHA256=$linked_sha" | tee -a build/hot-inputs.env
 
           found=""
-          for run_id in $(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow lua-real-software.yml \
-            --branch work/native-p3-vm \
-            --limit 20 \
-            --json databaseId \
-            --jq '.[].databaseId'); do
-            rm -rf prior-runtime/* prior-bundle/*
-            if ! gh run download "$run_id" \
+          for attempt in $(seq 1 60); do
+            for run_id in $(gh run list \
               --repo "$GITHUB_REPOSITORY" \
-              --name "minimachine-lua54-runtime-$run_id" \
-              --dir prior-runtime >/dev/null 2>&1; then
-              continue
-            fi
-            if ! gh run download "$run_id" \
-              --repo "$GITHUB_REPOSITORY" \
-              --name "minimachine-lua54-$run_id" \
-              --dir prior-bundle >/dev/null 2>&1; then
-              continue
-            fi
-            test -s prior-runtime/lua-kernel-execve.chk.gz || continue
-            test -s prior-runtime/lua-rootfs.cpio || continue
-            test -s prior-bundle/lua54.bflt || continue
+              --workflow lua-real-software.yml \
+              --branch work/native-p3-vm \
+              --limit 20 \
+              --json databaseId \
+              --jq '.[].databaseId'); do
+              rm -rf prior-runtime/* prior-bundle/*
+              if ! gh run download "$run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "minimachine-lua54-runtime-$run_id" \
+                --dir prior-runtime >/dev/null 2>&1; then
+                continue
+              fi
+              if ! gh run download "$run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "minimachine-lua54-$run_id" \
+                --dir prior-bundle >/dev/null 2>&1; then
+                continue
+              fi
+              test -s prior-runtime/lua-kernel-execve.chk.gz || continue
+              test -s prior-runtime/lua-rootfs.cpio || continue
+              test -s prior-bundle/lua54.bflt || continue
 
-            read -r checkpoint_image checkpoint_rootfs < <(python3 - <<'PY'
+              read -r checkpoint_image checkpoint_rootfs < <(python3 - <<'PY'
           import gzip
           import pickle
-          from pathlib import Path
           with gzip.open("prior-runtime/lua-kernel-execve.chk.gz", "rb") as handle:
               payload = pickle.load(handle)
           print(payload.get("image_sha256", ""), payload.get("initramfs_sha256", ""))
           PY
-            )
-            rootfs_sha="$(sha256sum prior-runtime/lua-rootfs.cpio | awk '{print $1}')"
-            if [ "$checkpoint_image" = "$linked_sha" ] && \
-               [ "$checkpoint_rootfs" = "$rootfs_sha" ]; then
-              found="$run_id"
+              )
+              rootfs_sha="$(sha256sum prior-runtime/lua-rootfs.cpio | awk '{print $1}')"
+              if [ "$checkpoint_image" = "$linked_sha" ] && \
+                 [ "$checkpoint_rootfs" = "$rootfs_sha" ]; then
+                found="$run_id"
+                break
+              fi
+            done
+            if [ -n "$found" ]; then
               break
             fi
+            echo "waiting for linked-image-compatible Lua checkpoint attempt=$attempt image=$linked_sha"
+            sleep 10
           done
           test -n "$found"
           echo "LUA_CHECKPOINT_RUN_ID=$found" | tee -a build/hot-inputs.env
