@@ -482,14 +482,23 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return (1 << 64) - 1
         return raw
 
-    def stdio_fd(stream: int) -> int:
-        # Userspace external FILE* values are opaque MiniMachine handles.
-        # Keep stdio unbuffered and route visible I/O through Linux fds.
-        if stream == 2:
-            return 2
-        if stream == 1:
-            return 1
-        return 0
+    def stdio_streams(vm):
+        streams = getattr(vm, "user_file_streams", None)
+        if streams is None:
+            streams = {}
+            vm.user_file_streams = streams
+        return streams
+
+    def stdio_state(vm, stream: int):
+        return stdio_streams(vm).get(stream)
+
+    def stdio_fd(vm, stream: int) -> int:
+        # External stdin/stdout/stderr use their Linux fd values directly.
+        # Other FILE* values are opaque guest handles backed by Linux fds.
+        if stream in {0, 1, 2}:
+            return stream
+        state = stdio_state(vm, stream)
+        return int(state["fd"]) if state is not None else -1
 
     def read_user_cstring(vm, ptr: int, limit: int = 1 << 20) -> bytes:
         if not ptr:
@@ -660,13 +669,256 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                 vm.memory.write(ptr + offset, 8, byte)
         raw = user_syscall(
             vm,
-            (64, stdio_fd(stream), ptr, len(payload), 0, 0, 0),
+            (64, stdio_fd(vm, stream), ptr, len(payload), 0, 0, 0),
         )
         signed = raw - (1 << 64) if raw & (1 << 63) else raw
         if signed < 0:
             set_errno(vm, -signed)
             return (1 << 64) - 1
         return signed
+
+    if original in {"fopen", "fopen64"}:
+        def user_fopen(vm, args):
+            if len(args) != 2:
+                raise VMError(f"{original} expects path,mode")
+            path_ptr, mode_ptr = map(int, args)
+            mode = read_user_cstring(vm, mode_ptr, 32).decode(
+                "ascii", errors="ignore"
+            )
+            if not mode or mode[0] not in "rwa":
+                set_errno(vm, 22)
+                return 0
+
+            if mode[0] == "r":
+                flags = 0
+            elif mode[0] == "w":
+                flags = 0x1 | 0x40 | 0x200  # O_WRONLY|O_CREAT|O_TRUNC
+            else:
+                flags = 0x1 | 0x40 | 0x400  # O_WRONLY|O_CREAT|O_APPEND
+            if "+" in mode:
+                flags = (flags & ~0x3) | 0x2  # O_RDWR
+            if "x" in mode:
+                flags |= 0x80  # O_EXCL
+            if "e" in mode:
+                flags |= 0x80000  # O_CLOEXEC
+
+            raw = user_syscall(
+                vm,
+                (
+                    56,  # openat
+                    (-100) & ((1 << 64) - 1),  # AT_FDCWD
+                    path_ptr,
+                    flags,
+                    0o666,
+                    0,
+                    0,
+                ),
+            )
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                set_errno(vm, -signed)
+                return 0
+
+            handle = vm.alloc_bytes(32, align=8)
+            stdio_streams(vm)[handle] = {
+                "fd": int(signed),
+                "eof": False,
+                "error": False,
+                "ungetc": None,
+            }
+            print(
+                "BOOT_EXEC_USER_FOPEN "
+                f"kind={original} path_ptr=0x{path_ptr:x} mode={mode!r} "
+                f"fd={signed} handle=0x{handle:x}",
+                flush=True,
+            )
+            return handle
+
+        return user_fopen
+
+    if original == "fclose":
+        def user_fclose(vm, args):
+            if len(args) != 1:
+                raise VMError("fclose expects FILE*")
+            stream = int(args[0])
+            state = stdio_streams(vm).pop(stream, None)
+            if state is None:
+                set_errno(vm, 9)
+                return (1 << 64) - 1
+            raw = user_syscall(
+                vm,
+                (57, int(state["fd"]), 0, 0, 0, 0, 0),
+            )
+            return libc_linux_result(vm, raw)
+
+        return user_fclose
+
+    if original == "fread":
+        def user_fread(vm, args):
+            if len(args) != 4:
+                raise VMError("fread expects ptr,size,nmemb,FILE*")
+            ptr, size, nmemb, stream = map(int, args)
+            if size == 0 or nmemb == 0:
+                return 0
+            state = stdio_state(vm, stream)
+            if state is None:
+                set_errno(vm, 9)
+                return 0
+
+            total = size * nmemb
+            copied = 0
+            pushed = state.get("ungetc")
+            if pushed is not None and total:
+                vm.memory.write(ptr, 8, int(pushed) & 0xFF)
+                state["ungetc"] = None
+                copied = 1
+
+            if copied < total:
+                raw = user_syscall(
+                    vm,
+                    (
+                        63,  # read
+                        int(state["fd"]),
+                        ptr + copied,
+                        total - copied,
+                        0,
+                        0,
+                        0,
+                    ),
+                )
+                signed = raw - (1 << 64) if raw & (1 << 63) else raw
+                if signed < 0:
+                    state["error"] = True
+                    set_errno(vm, -signed)
+                    return copied // size
+                copied += int(signed)
+                if int(signed) < total - (1 if pushed is not None else 0):
+                    state["eof"] = True
+
+            return copied // size
+
+        return user_fread
+
+    if original in {"getc", "fgetc", "getc_unlocked"}:
+        def user_getc(vm, args):
+            if len(args) != 1:
+                raise VMError(f"{original} expects FILE*")
+            stream = int(args[0])
+            state = stdio_state(vm, stream)
+            if state is None:
+                set_errno(vm, 9)
+                return (1 << 64) - 1
+
+            pushed = state.get("ungetc")
+            if pushed is not None:
+                state["ungetc"] = None
+                state["eof"] = False
+                return int(pushed) & 0xFF
+
+            byte_ptr = vm.alloc_bytes(1, align=1)
+            raw = user_syscall(
+                vm,
+                (63, int(state["fd"]), byte_ptr, 1, 0, 0, 0),
+            )
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                state["error"] = True
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+            if signed == 0:
+                state["eof"] = True
+                return (1 << 64) - 1
+            return vm.memory.read(byte_ptr, 8)
+
+        return user_getc
+
+    if original == "ungetc":
+        def user_ungetc(vm, args):
+            if len(args) != 2:
+                raise VMError("ungetc expects char,FILE*")
+            ch, stream = map(int, args)
+            state = stdio_state(vm, stream)
+            if state is None or ch == ((1 << 64) - 1):
+                return (1 << 64) - 1
+            if state.get("ungetc") is not None:
+                return (1 << 64) - 1
+            state["ungetc"] = ch & 0xFF
+            state["eof"] = False
+            return ch & 0xFF
+
+        return user_ungetc
+
+    if original == "feof":
+        def user_feof(vm, args):
+            if len(args) != 1:
+                raise VMError("feof expects FILE*")
+            state = stdio_state(vm, int(args[0]))
+            return 1 if state is not None and state.get("eof") else 0
+
+        return user_feof
+
+    if original in {"fseeko", "fseeko64"}:
+        def user_fseeko(vm, args):
+            if len(args) != 3:
+                raise VMError(f"{original} expects FILE*,offset,whence")
+            stream, offset, whence = map(int, args)
+            state = stdio_state(vm, stream)
+            if state is None:
+                set_errno(vm, 9)
+                return (1 << 64) - 1
+            raw = user_syscall(
+                vm,
+                (62, int(state["fd"]), offset, whence, 0, 0, 0),
+            )
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                state["error"] = True
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+            state["eof"] = False
+            state["ungetc"] = None
+            return 0
+
+        return user_fseeko
+
+    if original in {"ftello", "ftello64"}:
+        def user_ftello(vm, args):
+            if len(args) != 1:
+                raise VMError(f"{original} expects FILE*")
+            stream = int(args[0])
+            state = stdio_state(vm, stream)
+            if state is None:
+                set_errno(vm, 9)
+                return (1 << 64) - 1
+            raw = user_syscall(
+                vm,
+                (62, int(state["fd"]), 0, 1, 0, 0, 0),
+            )
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                state["error"] = True
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+            if state.get("ungetc") is not None:
+                signed -= 1
+            return signed & ((1 << 64) - 1)
+
+        return user_ftello
+
+    if original == "setvbuf":
+        def user_setvbuf(vm, args):
+            if len(args) != 4:
+                raise VMError("setvbuf expects FILE*,buf,mode,size")
+            stream = int(args[0])
+            if stream not in {0, 1, 2} and stdio_state(vm, stream) is None:
+                set_errno(vm, 9)
+                return (1 << 64) - 1
+            # MiniMachine stdio is intentionally unbuffered; accepting the
+            # buffering request preserves observable file contents while
+            # avoiding a second host-side buffering layer.
+            return 0
+
+        return user_setvbuf
 
     if original in {"fprintf", "vfprintf"}:
         def user_fprintf(vm, args):
@@ -826,17 +1078,22 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
         return user_fflush
 
     if original == "clearerr":
-        def user_clearerr(_vm, args):
+        def user_clearerr(vm, args):
             if len(args) != 1:
                 raise VMError("clearerr expects FILE*")
+            state = stdio_state(vm, int(args[0]))
+            if state is not None:
+                state["eof"] = False
+                state["error"] = False
             return None
         return user_clearerr
 
-    if original == "ferror_unlocked":
-        def user_ferror(_vm, args):
+    if original in {"ferror", "ferror_unlocked"}:
+        def user_ferror(vm, args):
             if len(args) != 1:
-                raise VMError("ferror_unlocked expects FILE*")
-            return 0
+                raise VMError(f"{original} expects FILE*")
+            state = stdio_state(vm, int(args[0]))
+            return 1 if state is not None and state.get("error") else 0
         return user_ferror
 
     if original == "fputs_unlocked":
@@ -853,7 +1110,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     length += 1
             raw = user_syscall(
                 vm,
-                (64, stdio_fd(stream), ptr, length, 0, 0, 0),
+                (64, stdio_fd(vm, stream), ptr, length, 0, 0, 0),
             )
             signed = raw - (1 << 64) if raw & (1 << 63) else raw
             if signed < 0:
@@ -871,7 +1128,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             vm.memory.write(ptr, 8, ch & 0xFF)
             raw = user_syscall(
                 vm,
-                (64, stdio_fd(stream), ptr, 1, 0, 0, 0),
+                (64, stdio_fd(vm, stream), ptr, 1, 0, 0, 0),
             )
             signed = raw - (1 << 64) if raw & (1 << 63) else raw
             if signed < 0:
