@@ -149,6 +149,53 @@ class LegalizerTests(unittest.TestCase):
         )
         self.assertEqual(stats.phi_edge_moves, 1)
 
+    def test_indirectbr_phi_copy_uses_selected_edge_trampoline(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @f(ptr %target, i64 %a) {
+            entry:
+              indirectbr ptr %target, [label %chosen, label %other]
+            chosen:
+              %v = phi i64 [ %a, %entry ]
+              ret i64 %v
+            other:
+              ret i64 99
+            }
+            """
+        )
+        by_name = {b.label: b for b in fn.blocks}
+        entry = by_name["entry"]
+        self.assertIsInstance(entry.instructions[-1], muir.Br)
+        self.assertEqual(entry.instructions[-1].cond, muir.Cond.EQ)
+        self.assertEqual(
+            entry.instructions[-1].b,
+            muir.BlockAddr("f", "chosen"),
+        )
+        edge_blocks = [
+            block
+            for block in fn.blocks
+            if block.label.startswith("__indirectbr_entry_phi0_edge")
+        ]
+        self.assertEqual(len(edge_blocks), 1)
+        edge = edge_blocks[0]
+        self.assertTrue(
+            any(
+                isinstance(inst, muir.Mov)
+                and inst.dst == muir.Slot("v")
+                and inst.src == muir.Slot("a")
+                for inst in edge.instructions
+            )
+        )
+        self.assertEqual(edge.instructions[-1].true_target.label, "chosen")
+        fallback = [
+            block
+            for block in fn.blocks
+            if block.label.startswith("__indirectbr_entry_fallback")
+        ]
+        self.assertEqual(len(fallback), 1)
+        self.assertTrue(fallback[0].instructions[-1].true_target.is_indirect())
+        self.assertEqual(stats.phi_edge_moves, 1)
+
     def test_pointer_phi_ignores_nested_i8_gep_type(self):
         fn, stats = self.lower_one(
             """
