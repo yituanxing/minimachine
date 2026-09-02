@@ -23,6 +23,53 @@ def load_runner():
 
 
 class UserExternalNamespaceTests(unittest.TestCase):
+    def test_namespaced_getenv_reads_guest_environment(self):
+        runner = load_runner()
+        program = Program()
+        vm = program.new_vm()
+
+        envp = 0xD000
+        first = 0xD100
+        second = 0xD140
+        name = 0xD180
+
+        def put_cstring(address: int, payload: bytes) -> None:
+            for offset, byte in enumerate(payload + b"\0"):
+                vm.memory.write(address + offset, 8, byte)
+
+        put_cstring(first, b"PATH=/bin")
+        put_cstring(second, b"HOME=/root")
+        put_cstring(name, b"HOME")
+        vm.memory.write(envp, 64, first)
+        vm.memory.write(envp + 8, 64, second)
+        vm.memory.write(envp + 16, 64, 0)
+
+        image = SimpleNamespace(
+            external_functions=("__mm_lua54_ext_getenv",),
+            external_data=("__mm_lua54_ext_environ",),
+        )
+        runner.install_user_external_surface(
+            vm,
+            SimpleNamespace(image=image),
+            envp,
+        )
+
+        callback = runner._user_libc_callback(
+            "__mm_lua54_ext_getenv",
+            None,
+        )
+        self.assertIsNotNone(callback)
+        assert callback is not None
+        value = callback(vm, (name,))
+        self.assertEqual(value, second + len(b"HOME="))
+        self.assertEqual(
+            bytes(vm.memory.read(value + i, 8) for i in range(5)),
+            b"/root",
+        )
+
+        put_cstring(name, b"MISSING")
+        self.assertEqual(callback(vm, (name,)), 0)
+
     def test_namespaced_external_surface_uses_its_own_errno_and_data(self):
         runner = load_runner()
         program = Program()
