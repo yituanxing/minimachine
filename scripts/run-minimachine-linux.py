@@ -2951,7 +2951,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             sigchld = 17
             flags = clone_vm | clone_vfork | sigchld
             try:
-                result, = _call_linux_function_preserving_control(
+                call_result = _call_linux_function_preserving_control(
                     vm,
                     "__se_sys_clone",
                     (flags, 0, 0, 0, 0),
@@ -2959,6 +2959,9 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     max_extra_steps=80_000_000,
                     preserve_linux_task_state=True,
                 )
+                if call_result is HOST_CONTROL_TRANSFER:
+                    return HOST_CONTROL_TRANSFER
+                result, = call_result
             finally:
                 # service 2 consumes this once the new user task is first
                 # scheduled.  If clone failed before that point, do not leak
@@ -3003,6 +3006,8 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                 )
             padded = tuple(args) + (0,) * (6 - len(args))
             raw = user_syscall(vm, (nr, *padded))
+            if raw is HOST_CONTROL_TRANSFER:
+                return HOST_CONTROL_TRANSFER
             return libc_linux_result(vm, raw)
         return libc_syscall
 
@@ -3546,6 +3551,20 @@ def linux_ecall(vm, args: tuple[int, ...]):
             stack_top=user_sp,
             result_count=0,
         )
+        if getattr(vm, "_preserved_call_depth", 0):
+            # A successful exec reached the architecture return-to-user path
+            # while a semantic Linux call is nested inside userspace. Stop
+            # the nested run and unwind its host frames without restoring the
+            # pre-exec P3 continuation. The outermost preserved call clears
+            # this temporary halt and resumes the freshly installed image.
+            vm._preserved_nonreturning_transfer = True
+            vm.halted = True
+            print(
+                "BOOT_EXEC_PRESERVED_CONTROL_TRANSFER "
+                f"depth={vm._preserved_call_depth} "
+                f"task=0x{current_task:x} function={entry_name}",
+                flush=True,
+            )
         if getattr(vm, "stop_after_user_handoff", False):
             vm.halted = True
             print(
@@ -3633,13 +3652,16 @@ def user_syscall(vm, args: tuple[int, ...]):
 
     try:
         if "minimachine_user_syscall" in vm.program.functions:
-            result, = _call_linux_function_preserving_control(
+            call_result = _call_linux_function_preserving_control(
                 vm,
                 "minimachine_user_syscall",
                 tuple(args),
                 result_count=1,
                 max_extra_steps=8_000_000,
             )
+            if call_result is HOST_CONTROL_TRANSFER:
+                return HOST_CONTROL_TRANSFER
+            result, = call_result
     finally:
         if read_watch_previous is not None:
             vm.set_watch_codes(read_watch_previous)
@@ -4055,7 +4077,7 @@ def _call_linux_function_preserving_control(
     result_count: int,
     max_extra_steps: int = 2_000_000,
     preserve_linux_task_state: bool = False,
-) -> tuple[int, ...]:
+):
     if name not in vm.program.functions:
         raise VMError(f"rootfs injection missing Linux function: {name}")
 
@@ -4087,6 +4109,10 @@ def _call_linux_function_preserving_control(
     callee_sp = temp_stack_top - total
     result_base = callee_sp + linked.frame_size + len(args) * 8
 
+    previous_depth = int(getattr(vm, "_preserved_call_depth", 0))
+    vm._preserved_call_depth = previous_depth + 1
+    transfer_seen = False
+
     try:
         vm.enter_function(
             name,
@@ -4095,6 +4121,11 @@ def _call_linux_function_preserving_control(
             result_count=result_count,
         )
         vm.run(max_steps=saved[5] + max_extra_steps)
+        transfer_seen = bool(
+            getattr(vm, "_preserved_nonreturning_transfer", False)
+        )
+        if transfer_seen:
+            return HOST_CONTROL_TRANSFER
         return tuple(
             vm.memory.read(result_base + i * 8, 64)
             for i in range(result_count)
@@ -4170,31 +4201,52 @@ def _call_linux_function_preserving_control(
         raise
     finally:
         observed_steps = vm.steps
-        if not preserve_linux_task_state:
-            if current_addr is not None and saved_current is not None:
-                observed_current = vm.memory.read(current_addr, 64)
-                if observed_current != saved_current:
-                    print(
-                        "BOOT_EXEC_PRESERVE_CURRENT_RESTORE "
-                        f"function={name} "
-                        f"before=0x{saved_current:x} "
-                        f"after=0x{observed_current:x}",
-                        flush=True,
-                    )
-                    vm.memory.write(current_addr, 64, saved_current)
-            vm.linux_task_contexts = saved_contexts
-            vm.linux_task_shadow_stacks = saved_shadow_stacks
-            if saved_shadow_next is not None:
-                vm.linux_shadow_stack_next = saved_shadow_next
-        (
-            vm.sp,
-            vm.current_function,
-            vm.current_block,
-            vm.ip,
-            vm.halted,
-            _saved_steps,
-        ) = saved
-        vm.steps = observed_steps if preserve_linux_task_state else _saved_steps
+        transfer_seen = transfer_seen or bool(
+            getattr(vm, "_preserved_nonreturning_transfer", False)
+        )
+        vm._preserved_call_depth = previous_depth
+
+        if transfer_seen:
+            # Keep the task, P3 PC/SP, scheduler contexts, and newly installed
+            # userspace image exactly as established by service 3. Every
+            # enclosing preserved call sees the same marker and unwinds
+            # without resurrecting its pre-exec continuation.
+            vm.steps = observed_steps
+            if previous_depth == 0:
+                vm._preserved_nonreturning_transfer = False
+                vm.halted = False
+                print(
+                    "BOOT_EXEC_PRESERVED_CONTROL_RESUME "
+                    f"function={vm.current_function} "
+                    f"steps={vm.steps}",
+                    flush=True,
+                )
+        else:
+            if not preserve_linux_task_state:
+                if current_addr is not None and saved_current is not None:
+                    observed_current = vm.memory.read(current_addr, 64)
+                    if observed_current != saved_current:
+                        print(
+                            "BOOT_EXEC_PRESERVE_CURRENT_RESTORE "
+                            f"function={name} "
+                            f"before=0x{saved_current:x} "
+                            f"after=0x{observed_current:x}",
+                            flush=True,
+                        )
+                        vm.memory.write(current_addr, 64, saved_current)
+                vm.linux_task_contexts = saved_contexts
+                vm.linux_task_shadow_stacks = saved_shadow_stacks
+                if saved_shadow_next is not None:
+                    vm.linux_shadow_stack_next = saved_shadow_next
+            (
+                vm.sp,
+                vm.current_function,
+                vm.current_block,
+                vm.ip,
+                vm.halted,
+                _saved_steps,
+            ) = saved
+            vm.steps = observed_steps if preserve_linux_task_state else _saved_steps
 
 
 def skip_prepare_namespace_after_hot_init(vm) -> None:
