@@ -105,6 +105,142 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(vm.memory.read(0xAB2000, 64), 0)
         self.assertNotIn(0x2000, vm.linux_user_fork_continuations)
 
+    def test_execvp_searches_guest_path_and_propagates_exec_transfer(self):
+        runner = load_runner()
+        program = Program()
+        program.define_data_symbol(
+            "__mm_user_ext_environ",
+            (0).to_bytes(8, "little"),
+            align=8,
+        )
+        vm = program.new_vm()
+
+        def put(address: int, payload: bytes) -> None:
+            for offset, byte in enumerate(payload + b"\0"):
+                vm.memory.write(address + offset, 8, byte)
+
+        file_ptr = 0xCC00
+        argv_ptr = 0xCC80
+        envp = 0xCD00
+        path_entry = 0xCD80
+        put(file_ptr, b"sh")
+        put(path_entry, b"PATH=/missing:/bin")
+        vm.memory.write(envp, 64, path_entry)
+        vm.memory.write(envp + 8, 64, 0)
+        environ_addr = program.symbol_addresses["__mm_user_ext_environ"]
+        vm.memory.write(environ_addr, 64, envp)
+
+        seen = []
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            self.assertEqual(args[0], 221)
+            candidate = runner._user_libc_callback
+            path = bytearray()
+            ptr = int(args[1])
+            for index in range(256):
+                byte = vm.memory.read(ptr + index, 8)
+                if byte == 0:
+                    break
+                path.append(byte)
+            seen.append((bytes(path), int(args[2]), int(args[3])))
+            if len(seen) == 1:
+                return ((1 << 64) - 2)
+            return runner.HOST_CONTROL_TRANSFER
+
+        runner.user_syscall = fake_user_syscall
+        callback = runner._user_libc_callback("__mm_user_ext_execvp", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        result = callback(vm, (file_ptr, argv_ptr))
+        self.assertIs(result, runner.HOST_CONTROL_TRANSFER)
+        self.assertEqual(
+            seen,
+            [
+                (b"/missing/sh", argv_ptr, envp),
+                (b"/bin/sh", argv_ptr, envp),
+            ],
+        )
+
+    def test_execve_libc_bridge_propagates_nonreturning_transfer(self):
+        runner = load_runner()
+        program = Program()
+        vm = program.new_vm()
+
+        runner.user_syscall = (
+            lambda _vm, _args: runner.HOST_CONTROL_TRANSFER
+        )
+        callback = runner._user_libc_callback("__mm_user_ext_execve", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+        self.assertIs(
+            callback(vm, (0xD000, 0xD100, 0xD200)),
+            runner.HOST_CONTROL_TRANSFER,
+        )
+
+    def test_preserved_call_does_not_restore_pre_exec_control(self):
+        runner = load_runner()
+        program = Program()
+
+        replacement = muir.Function(
+            "replacement_user",
+            [muir.Block("entry", [muir.Ret(None)])],
+            set(),
+        )
+        expanded, _ = expand_function(replacement)
+        program.add_function(lower_function(expanded))
+
+        def transfer(vm_arg, args):
+            self.assertEqual(args, ())
+            vm_arg.enter_function(
+                "replacement_user",
+                (),
+                stack_top=0xEE0000,
+                result_count=0,
+            )
+            vm_arg._preserved_nonreturning_transfer = True
+            vm_arg.halted = True
+            return runner.HOST_CONTROL_TRANSFER
+
+        program.register_service("__mm_exec_transfer_probe", transfer)
+        outer = muir.Function(
+            "linux_exec_probe",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Call(
+                            muir.Callee(symbol="__mm_exec_transfer_probe"),
+                            (),
+                            None,
+                        ),
+                        muir.Ret(None),
+                    ],
+                )
+            ],
+            set(),
+        )
+        expanded, _ = expand_function(outer)
+        program.add_function(lower_function(expanded))
+
+        vm = program.new_vm()
+        old_sp = vm.sp
+        result = runner._call_linux_function_preserving_control(
+            vm,
+            "linux_exec_probe",
+            (),
+            result_count=0,
+        )
+        self.assertIs(result, runner.HOST_CONTROL_TRANSFER)
+        self.assertEqual(vm.current_function, "replacement_user")
+        self.assertNotEqual(vm.sp, old_sp)
+        self.assertFalse(vm.halted)
+        self.assertEqual(getattr(vm, "_preserved_call_depth", -1), 0)
+        self.assertFalse(
+            getattr(vm, "_preserved_nonreturning_transfer", True)
+        )
+
     def test_fork_adapts_to_nommu_vfork_clone_flags(self):
         runner = load_runner()
         fn = muir.Function(
