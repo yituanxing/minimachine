@@ -68,6 +68,15 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--native-report-slot",
+        action="append",
+        default=[],
+        help=(
+            "native VM only: include the named current-function P3 frame slot "
+            "in each --native-report-every sample; may be repeated"
+        ),
+    )
+    p.add_argument(
         "--native-boot-phases-only",
         action="store_true",
         help=(
@@ -4177,6 +4186,7 @@ def main() -> int:
         native_init_started = time.perf_counter()
         vm = NativeVM(program)
         vm.native_report_every = max(0, args.native_report_every)
+        vm.native_report_slots = tuple(args.native_report_slot)
         print("BOOT_EXEC_BACKEND backend=native-c", flush=True)
         print(
             "BOOT_EXEC_STAGE "
