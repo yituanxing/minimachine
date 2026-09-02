@@ -4,6 +4,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
 import sys
+import struct
 import unittest
 
 from src.minimachine import muir
@@ -165,6 +166,117 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             seen["args"],
             (169, seen["args"][1], 0, 0, 0, 0, 0),
         )
+
+    def test_snprintf_formats_double_and_reports_untruncated_length(self):
+        runner = load_runner()
+        program = Program()
+        vm = program.new_vm()
+
+        fmt = 0xD400
+        buf = 0xD480
+        for offset, byte in enumerate(b"%.14g\0"):
+            vm.memory.write(fmt + offset, 8, byte)
+
+        callback = runner._user_libc_callback(
+            "__mm_lua54_ext_snprintf",
+            None,
+        )
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        raw_double = int.from_bytes(
+            struct.pack("<d", 1234.5),
+            "little",
+        )
+        full = b"1234.5"
+        self.assertEqual(
+            callback(vm, (buf, 32, fmt, raw_double)),
+            len(full),
+        )
+        self.assertEqual(
+            bytes(vm.memory.read(buf + i, 8) for i in range(len(full) + 1)),
+            full + b"\0",
+        )
+
+        self.assertEqual(
+            callback(vm, (buf, 5, fmt, raw_double)),
+            len(full),
+        )
+        self.assertEqual(
+            bytes(vm.memory.read(buf + i, 8) for i in range(5)),
+            b"1234\0",
+        )
+
+    def test_getline_grows_guest_buffer_and_reaches_eof(self):
+        runner = load_runner()
+        program = Program()
+        vm = program.new_vm()
+
+        path_ptr = 0xD800
+        mode_ptr = 0xD880
+        lineptr_ptr = 0xD900
+        capacity_ptr = 0xD908
+        for offset, byte in enumerate(b"/etc/test\0"):
+            vm.memory.write(path_ptr + offset, 8, byte)
+        for offset, byte in enumerate(b"r\0"):
+            vm.memory.write(mode_ptr + offset, 8, byte)
+        vm.memory.write(lineptr_ptr, 64, 0)
+        vm.memory.write(capacity_ptr, 64, 0)
+
+        content = b"first line\nsecond\n"
+        position = 0
+
+        def fake_user_syscall(vm_arg, args):
+            nonlocal position
+            self.assertIs(vm_arg, vm)
+            nr = int(args[0])
+            if nr == 56:
+                return 7
+            if nr == 63:
+                ptr = int(args[2])
+                count = int(args[3])
+                payload = content[position : position + count]
+                for index, byte in enumerate(payload):
+                    vm.memory.write(ptr + index, 8, byte)
+                position += len(payload)
+                return len(payload)
+            if nr == 57:
+                return 0
+            self.fail(f"unexpected syscall {args}")
+
+        runner.user_syscall = fake_user_syscall
+        fopen = runner._user_libc_callback("__mm_user_ext_fopen64", None)
+        getline = runner._user_libc_callback("__mm_user_ext_getline", None)
+        fclose = runner._user_libc_callback("__mm_user_ext_fclose", None)
+        self.assertIsNotNone(fopen)
+        self.assertIsNotNone(getline)
+        self.assertIsNotNone(fclose)
+        assert fopen is not None and getline is not None and fclose is not None
+
+        stream = fopen(vm, (path_ptr, mode_ptr))
+        self.assertNotEqual(stream, 0)
+
+        first_len = getline(vm, (lineptr_ptr, capacity_ptr, stream))
+        self.assertEqual(first_len, len(b"first line\n"))
+        line = vm.memory.read(lineptr_ptr, 64)
+        capacity = vm.memory.read(capacity_ptr, 64)
+        self.assertGreaterEqual(capacity, first_len + 1)
+        self.assertEqual(
+            bytes(vm.memory.read(line + i, 8) for i in range(first_len + 1)),
+            b"first line\n\0",
+        )
+
+        second_len = getline(vm, (lineptr_ptr, capacity_ptr, stream))
+        self.assertEqual(second_len, len(b"second\n"))
+        self.assertEqual(
+            bytes(vm.memory.read(line + i, 8) for i in range(second_len + 1)),
+            b"second\n\0",
+        )
+        self.assertEqual(
+            getline(vm, (lineptr_ptr, capacity_ptr, stream)),
+            (1 << 64) - 1,
+        )
+        self.assertEqual(fclose(vm, (stream,)), 0)
 
     def test_fwrite_and_setsid_use_linux_syscalls(self):
         runner = load_runner()
