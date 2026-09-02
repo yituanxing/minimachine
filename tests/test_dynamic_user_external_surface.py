@@ -131,14 +131,47 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             return (321,)
 
         runner._call_linux_function_preserving_control = fake_call
-        callback = runner._user_libc_callback("__mm_user_ext_fork", None)
-        self.assertIsNotNone(callback)
-        assert callback is not None
-        self.assertEqual(callback(vm, ()), 321)
-        self.assertEqual(seen["name"], "__se_sys_clone")
-        self.assertEqual(seen["args"], (0x4111, 0, 0, 0, 0))
-        self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
-        self.assertIsNone(getattr(vm, "pending_user_fork_continuation", None))
+        for original in ("fork", "vfork"):
+            with self.subTest(original=original):
+                callback = runner._user_libc_callback(
+                    f"__mm_user_ext_{original}",
+                    None,
+                )
+                self.assertIsNotNone(callback)
+                assert callback is not None
+                self.assertEqual(callback(vm, ()), 321)
+                self.assertEqual(seen["name"], "__se_sys_clone")
+                self.assertEqual(seen["args"], (0x4111, 0, 0, 0, 0))
+                self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
+                self.assertIsNone(
+                    getattr(vm, "pending_user_fork_continuation", None)
+                )
+
+    def test_setsid_syscall_falls_back_to_linux_sys_setsid(self):
+        runner = load_runner()
+        fn = muir.Function(
+            "sys_setsid",
+            [muir.Block("entry", [muir.Ret(muir.Imm(0))])],
+            set(),
+        )
+        expanded, _ = expand_function(fn)
+        program = Program((lower_function(expanded),))
+        vm = program.new_vm()
+        seen = {}
+
+        def fake_call(vm_arg, name, args, **kwargs):
+            self.assertIs(vm_arg, vm)
+            seen["name"] = name
+            seen["args"] = args
+            return (77,)
+
+        runner._call_linux_function_preserving_control = fake_call
+        self.assertEqual(
+            runner.user_syscall(vm, (157, 0, 0, 0, 0, 0, 0)),
+            77,
+        )
+        self.assertEqual(seen["name"], "sys_setsid")
+        self.assertEqual(seen["args"], ())
 
     def test_time_libc_wrapper_uses_linux_gettimeofday(self):
         runner = load_runner()
