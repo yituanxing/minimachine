@@ -156,6 +156,29 @@ class RuntimeTests(unittest.TestCase):
         program = executable(functions)
         self.assertEqual(program.new_vm().run_function("muladd"), (7,))
 
+    def test_llvm_ceil_and_floor_f64_runtime_helpers(self):
+        functions, _ = legalize_module(
+            """
+            declare double @llvm.ceil.f64(double)
+            declare double @llvm.floor.f64(double)
+
+            define i32 @round_integral() {
+            entry:
+              %a = call double @llvm.ceil.f64(double 2.250000e+00)
+              %b = call double @llvm.floor.f64(double 2.750000e+00)
+              %ai = fptosi double %a to i32
+              %bi = fptosi double %b to i32
+              %r = add i32 %ai, %bi
+              ret i32 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("round_integral"),
+            (5,),
+        )
+
     def test_soft_float_helpers_execute_end_to_end(self):
         functions, stats = legalize_module(
             """
