@@ -1617,6 +1617,30 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_isatty
 
+    if original == "strsep":
+        def user_strsep(vm, args):
+            if len(args) != 2:
+                raise VMError("strsep expects char**,delim")
+            stringp, delim_ptr = map(int, args)
+            current = vm.memory.read(stringp, 64)
+            if current == 0:
+                return 0
+
+            delimiters = set(read_user_cstring(vm, delim_ptr, 256))
+            cursor = current
+            while True:
+                byte = vm.memory.read(cursor, 8)
+                if byte == 0:
+                    vm.memory.write(stringp, 64, 0)
+                    return current
+                if byte in delimiters:
+                    vm.memory.write(cursor, 8, 0)
+                    vm.memory.write(stringp, 64, cursor + 1)
+                    return current
+                cursor += 1
+
+        return user_strsep
+
     if original == "strerror":
         messages = {
             0: b"Success",
