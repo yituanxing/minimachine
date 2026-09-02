@@ -179,6 +179,32 @@ class RuntimeTests(unittest.TestCase):
             (5,),
         )
 
+    def test_llvm_integer_minmax_runtime_helpers(self):
+        functions, _ = legalize_module(
+            """
+            declare i32 @llvm.smax.i32(i32, i32)
+            declare i32 @llvm.smin.i32(i32, i32)
+            declare i64 @llvm.umax.i64(i64, i64)
+            declare i64 @llvm.umin.i64(i64, i64)
+
+            define i64 @minmax() {
+            entry:
+              %a = call i32 @llvm.smax.i32(i32 -7, i32 3)
+              %b = call i32 @llvm.smin.i32(i32 -7, i32 3)
+              %c = call i64 @llvm.umax.i64(i64 9, i64 12)
+              %d = call i64 @llvm.umin.i64(i64 9, i64 12)
+              %ae = sext i32 %a to i64
+              %be = sext i32 %b to i64
+              %x = add i64 %ae, %be
+              %y = add i64 %c, %d
+              %r = add i64 %x, %y
+              ret i64 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(program.new_vm().run_function("minmax"), (17,))
+
     def test_soft_float_helpers_execute_end_to_end(self):
         functions, stats = legalize_module(
             """
