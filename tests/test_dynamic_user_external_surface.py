@@ -10,7 +10,10 @@ import unittest
 from src.minimachine import muir
 from src.minimachine.abi import expand_function
 from src.minimachine.lower_p3 import lower_function
+from src.minimachine.image import ImageObject, ModuleImage
 from src.minimachine.native_vm import NativeVM
+from src.minimachine.user_bundle import namespace_user_program
+from src.minimachine.user_image import UserProgramImage, pack_user_program
 from src.minimachine.vm import Program
 
 
@@ -28,6 +31,108 @@ def load_runner():
 
 
 class DynamicUserExternalSurfaceTests(unittest.TestCase):
+    def test_service3_isolates_exec_instances_by_linux_task(self):
+        runner = load_runner()
+
+        main = muir.Function(
+            "main",
+            [muir.Block("entry", [muir.Ret(None)])],
+            set(),
+        )
+        helper = muir.Function(
+            "helper",
+            [muir.Block("entry", [muir.Ret(None)])],
+            set(),
+        )
+        functions = []
+        for function in (main, helper):
+            expanded, _ = expand_function(function)
+            functions.append(lower_function(expanded))
+
+        base = UserProgramImage(
+            "main",
+            tuple(functions),
+            ModuleImage(
+                objects=(
+                    ImageObject(
+                        "global_counter",
+                        "i64",
+                        (7).to_bytes(8, "little"),
+                        8,
+                        None,
+                        False,
+                        (),
+                    ),
+                ),
+                aliases=(),
+                external_data=("environ",),
+                external_functions=("write",),
+                skipped_linker_metadata=(),
+            ),
+            "none",
+            (),
+        )
+        named = namespace_user_program(
+            base,
+            internal_prefix="__mm_user_",
+            external_prefix="__mm_user_ext_",
+        )
+        payload = pack_user_program(named)
+        program = Program()
+        vm = program.new_vm()
+
+        pc = 0x02000000
+        for offset, byte in enumerate(payload):
+            vm.memory.write(pc + offset, 8, byte)
+
+        def handoff(task: int, regs: int, user_sp: int):
+            vm.linux_current_task = task
+            vm.memory.write(regs + 0, 64, pc)
+            vm.memory.write(regs + 8, 64, user_sp)
+            vm.memory.write(regs + 80, 64, 1)
+            return runner.linux_ecall(vm, (3, regs))
+
+        first = handoff(0x1000, 0x03000000, 0x0E000000)
+        self.assertIs(first, runner.HOST_CONTROL_TRANSFER)
+        self.assertEqual(vm.current_function, "__mm_user_main")
+        first_global = program.symbol_addresses["__mm_user_global_counter"]
+        self.assertEqual(vm.memory.read(first_global, 64), 7)
+        vm.memory.write(first_global, 64, 99)
+
+        second = handoff(0x2000, 0x03000100, 0x0D000000)
+        self.assertIs(second, runner.HOST_CONTROL_TRANSFER)
+        second_entry = vm.current_function
+        self.assertIsNotNone(second_entry)
+        assert second_entry is not None
+        self.assertTrue(second_entry.startswith("__mm_exec_2000_"))
+        self.assertTrue(second_entry.endswith("_main"))
+
+        instances = vm.user_exec_instances
+        self.assertEqual(len(instances), 2)
+        second_instance = instances[next(
+            key for key in instances if key[0] == 0x2000
+        )]
+        namespace = second_instance["namespace"]
+        self.assertIsNotNone(namespace)
+        assert namespace is not None
+        second_global = program.symbol_addresses[
+            f"__mm_{namespace}_global_counter"
+        ]
+        self.assertNotEqual(first_global, second_global)
+        self.assertEqual(vm.memory.read(first_global, 64), 99)
+        self.assertEqual(vm.memory.read(second_global, 64), 7)
+
+        vm.memory.write(second_global, 64, 1234)
+        functions_before = len(program.functions)
+        data_end_before = program._next_data
+        third = handoff(0x2000, 0x03000200, 0x0C000000)
+        self.assertIs(third, runner.HOST_CONTROL_TRANSFER)
+        self.assertEqual(vm.current_function, second_entry)
+        self.assertEqual(len(program.functions), functions_before)
+        self.assertEqual(program._next_data, data_end_before)
+        self.assertEqual(vm.memory.read(second_global, 64), 7)
+        self.assertEqual(vm.memory.read(first_global, 64), 99)
+
     def test_runtime_registered_external_descriptor_is_live_immediately(self):
         runner = load_runner()
         program = Program()
