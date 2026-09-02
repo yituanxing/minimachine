@@ -166,6 +166,120 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             (169, seen["args"][1], 0, 0, 0, 0, 0),
         )
 
+    def test_guest_stdio_streams_share_linux_fd_state(self):
+        runner = load_runner()
+        program = Program()
+        vm = program.new_vm()
+
+        def put_cstring(address: int, payload: bytes) -> None:
+            for offset, byte in enumerate(payload + b"\0"):
+                vm.memory.write(address + offset, 8, byte)
+
+        path_ptr = 0xD600
+        mode_ptr = 0xD680
+        data_ptr = 0xD700
+        put_cstring(path_ptr, b"/tmp/script.lua")
+        put_cstring(mode_ptr, b"r")
+
+        content = b"abc"
+        position = 0
+        closed = []
+        calls = []
+
+        def fake_user_syscall(vm_arg, args):
+            nonlocal position
+            self.assertIs(vm_arg, vm)
+            calls.append(args)
+            nr = args[0]
+            if nr == 56:
+                self.assertEqual(args[1], (-100) & ((1 << 64) - 1))
+                self.assertEqual(args[2], path_ptr)
+                self.assertEqual(args[3], 0)
+                return 5
+            if nr == 63:
+                fd, ptr, count = map(int, args[1:4])
+                self.assertEqual(fd, 5)
+                payload = content[position : position + count]
+                for index, byte in enumerate(payload):
+                    vm.memory.write(ptr + index, 8, byte)
+                position += len(payload)
+                return len(payload)
+            if nr == 62:
+                fd, offset, whence = map(int, args[1:4])
+                self.assertEqual(fd, 5)
+                signed_offset = (
+                    offset - (1 << 64)
+                    if offset & (1 << 63)
+                    else offset
+                )
+                if whence == 0:
+                    position = signed_offset
+                elif whence == 1:
+                    position += signed_offset
+                elif whence == 2:
+                    position = len(content) + signed_offset
+                else:
+                    return (-22) & ((1 << 64) - 1)
+                return position
+            if nr == 57:
+                closed.append(int(args[1]))
+                return 0
+            self.fail(f"unexpected syscall {args}")
+
+        runner.user_syscall = fake_user_syscall
+
+        fopen = runner._user_libc_callback("__mm_lua54_ext_fopen64", None)
+        getc = runner._user_libc_callback("__mm_lua54_ext_getc", None)
+        ungetc = runner._user_libc_callback("__mm_lua54_ext_ungetc", None)
+        fread = runner._user_libc_callback("__mm_lua54_ext_fread", None)
+        feof = runner._user_libc_callback("__mm_lua54_ext_feof", None)
+        clearerr = runner._user_libc_callback("__mm_lua54_ext_clearerr", None)
+        ftello = runner._user_libc_callback("__mm_lua54_ext_ftello64", None)
+        fseeko = runner._user_libc_callback("__mm_lua54_ext_fseeko64", None)
+        setvbuf = runner._user_libc_callback("__mm_lua54_ext_setvbuf", None)
+        fclose = runner._user_libc_callback("__mm_lua54_ext_fclose", None)
+        callbacks = (
+            fopen,
+            getc,
+            ungetc,
+            fread,
+            feof,
+            clearerr,
+            ftello,
+            fseeko,
+            setvbuf,
+            fclose,
+        )
+        self.assertTrue(all(callback is not None for callback in callbacks))
+        assert all(callback is not None for callback in callbacks)
+
+        handle = fopen(vm, (path_ptr, mode_ptr))
+        self.assertNotEqual(handle, 0)
+        self.assertEqual(getc(vm, (handle,)), ord("a"))
+        self.assertEqual(ungetc(vm, (ord("a"), handle)), ord("a"))
+        self.assertEqual(getc(vm, (handle,)), ord("a"))
+
+        self.assertEqual(fread(vm, (data_ptr, 1, 2, handle)), 2)
+        self.assertEqual(
+            bytes(vm.memory.read(data_ptr + i, 8) for i in range(2)),
+            b"bc",
+        )
+        self.assertEqual(ftello(vm, (handle,)), 3)
+
+        self.assertEqual(fseeko(vm, (handle, 0, 0)), 0)
+        self.assertEqual(setvbuf(vm, (handle, 0, 2, 0)), 0)
+        self.assertEqual(fread(vm, (data_ptr, 1, 4, handle)), 3)
+        self.assertEqual(
+            bytes(vm.memory.read(data_ptr + i, 8) for i in range(3)),
+            b"abc",
+        )
+        self.assertEqual(feof(vm, (handle,)), 1)
+        clearerr(vm, (handle,))
+        self.assertEqual(feof(vm, (handle,)), 0)
+
+        self.assertEqual(fclose(vm, (handle,)), 0)
+        self.assertEqual(closed, [5])
+
     def test_termios_libc_wrappers_use_linux_ioctl(self):
         runner = load_runner()
         program = Program()
