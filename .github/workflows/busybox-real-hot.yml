@@ -6,6 +6,12 @@ on:
     branches: [work/native-p3-vm]
     paths:
       - scripts/run-minimachine-linux.py
+      - linux-overlay/arch/minimachine/**
+      - scripts/build-minimachine-initramfs.py
+      - scripts/check-minimachine-boot.sh
+      - .github/workflows/initramfs-build.yml
+      - .github/workflows/refresh-console-p3-cache.yml
+      - .github/workflows/busybox-multicall-cold.yml
       - .github/workflows/busybox-real-hot.yml
 
 permissions:
@@ -22,6 +28,8 @@ jobs:
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Build native VM
         run: |
@@ -29,32 +37,63 @@ jobs:
           gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
             native/p3vm.c -o build/libminimachine_p3vm.so
 
-      - name: Find latest successful real BusyBox cold checkpoint
+      - name: Find generation-matched real BusyBox cold checkpoint
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p cold
+          lowering_sha="$(git log -1 --format=%H -- \
+            src/minimachine/program_cache.py \
+            src/minimachine/llvm_text.py \
+            src/minimachine/layout.py \
+            src/minimachine/legalize.py \
+            src/minimachine/abi.py \
+            src/minimachine/lower_p3.py \
+            src/minimachine/muir.py \
+            src/minimachine/p3.py \
+            src/minimachine/verify.py \
+            src/minimachine/image.py)"
+          linux_sha="$(git log -1 --format=%H -- \
+            linux-overlay/arch/minimachine \
+            scripts/build-minimachine-initramfs.py \
+            scripts/check-minimachine-boot.sh \
+            .github/workflows/initramfs-build.yml)"
+          test -n "$lowering_sha"
+          test -n "$linux_sha"
+
           found=""
-          for run_id in $(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow busybox-multicall-cold.yml \
-            --branch work/native-p3-vm \
-            --limit 10 \
-            --json databaseId \
-            --jq '.[].databaseId'); do
-            rm -rf cold/*
-            if gh run download "$run_id" \
+          for attempt in $(seq 1 60); do
+            for run_id in $(gh run list \
               --repo "$GITHUB_REPOSITORY" \
-              --name "minimachine-busybox-real-cold-$run_id" \
-              --dir cold >/dev/null 2>&1; then
+              --workflow busybox-multicall-cold.yml \
+              --branch work/native-p3-vm \
+              --status success \
+              --limit 20 \
+              --json databaseId \
+              --jq '.[].databaseId'); do
+              rm -rf cold/*
+              if ! gh run download "$run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "minimachine-busybox-real-cold-$run_id" \
+                --dir cold >/dev/null 2>&1; then
+                continue
+              fi
               test -s cold/input-runs.env || continue
               test -s cold/busybox-real-init.cpio || continue
               test -s cold/busybox-real-kernel-execve.chk.gz || continue
-              if grep -F 'P3_REFRESH_RUN_ID=' cold/input-runs.env >/dev/null; then
+              cold_lowering="$(sed -n 's/^LOWERING_SHA=//p' cold/input-runs.env)"
+              cold_linux="$(sed -n 's/^LINUX_SHA=//p' cold/input-runs.env)"
+              if [ "$cold_lowering" = "$lowering_sha" ] && \
+                 [ "$cold_linux" = "$linux_sha" ]; then
                 found="$run_id"
                 break
               fi
+            done
+            if [ -n "$found" ]; then
+              break
             fi
+            echo "waiting for generation-matched BusyBox cold attempt=$attempt lowering=$lowering_sha linux=$linux_sha"
+            sleep 10
           done
           test -n "$found"
           echo "BUSYBOX_COLD_RUN_ID=$found" | tee build/hot-inputs.env
