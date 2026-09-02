@@ -138,11 +138,13 @@ jobs:
             echo BUSYBOX_HOT_FRONTIER=before-external-software-end
           fi
 
-      - name: Assert checkpoint compatibility
+      - name: Assert real BusyBox frontier
         run: |
           grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/busybox-hot.log
           ! grep -F 'program cache lowering fingerprint mismatch' build/busybox-hot.log
           ! grep -F 'checkpoint image fingerprint mismatch' build/busybox-hot.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-hot.log
+          grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' build/busybox-hot.log
 
       - name: Upload BusyBox hot evidence
         if: always()
