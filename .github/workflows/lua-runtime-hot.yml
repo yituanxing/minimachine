@@ -117,6 +117,12 @@ jobs:
             --initramfs prior-runtime/lua-rootfs.cpio \
             --native-vm \
             --native-report-every 25000000 \
+            --native-report-slot 1 \
+            --native-report-slot 118 \
+            --native-report-slot 119 \
+            --native-report-slot 123 \
+            --native-report-slot 126 \
+            --native-report-slot 174 \
             --checkpoint-in prior-runtime/lua-kernel-execve.chk.gz \
             --stop-on-panic \
             --max-steps 250000000 \
