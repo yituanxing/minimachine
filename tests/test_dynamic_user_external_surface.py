@@ -166,6 +166,44 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             (169, seen["args"][1], 0, 0, 0, 0, 0),
         )
 
+    def test_termios_libc_wrappers_use_linux_ioctl(self):
+        runner = load_runner()
+        program = Program()
+        vm = program.new_vm()
+        calls = []
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            calls.append(args)
+            return 0
+
+        runner.user_syscall = fake_user_syscall
+        tcgetattr = runner._user_libc_callback(
+            "__mm_user_ext_tcgetattr",
+            None,
+        )
+        tcsetattr = runner._user_libc_callback(
+            "__mm_user_ext_tcsetattr",
+            None,
+        )
+        self.assertIsNotNone(tcgetattr)
+        self.assertIsNotNone(tcsetattr)
+        assert tcgetattr is not None and tcsetattr is not None
+
+        self.assertEqual(tcgetattr(vm, (0, 0xD500)), 0)
+        self.assertEqual(tcsetattr(vm, (0, 0, 0xD500)), 0)
+        self.assertEqual(tcsetattr(vm, (0, 1, 0xD500)), 0)
+        self.assertEqual(tcsetattr(vm, (0, 2, 0xD500)), 0)
+        self.assertEqual(
+            calls,
+            [
+                (29, 0, 0x5401, 0xD500, 0, 0, 0),
+                (29, 0, 0x5402, 0xD500, 0, 0, 0),
+                (29, 0, 0x5403, 0xD500, 0, 0, 0),
+                (29, 0, 0x5404, 0xD500, 0, 0, 0),
+            ],
+        )
+
     def test_ioctl_libc_wrapper_uses_linux_syscall(self):
         runner = load_runner()
         program = Program()
