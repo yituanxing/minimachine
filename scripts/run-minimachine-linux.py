@@ -42,6 +42,7 @@ from src.minimachine.runtime import (
     helper_callback,
     install_runtime,
 )
+from src.minimachine.user_bundle import rebase_user_program_namespace
 from src.minimachine.user_image import UserImageError, unpack_user_image
 from src.minimachine.verify import verify_muir, verify_p3
 from src.minimachine.vm import HOST_CONTROL_TRANSFER, Program, VMError
@@ -3479,6 +3480,64 @@ def linux_ecall(vm, args: tuple[int, ...]):
         except UserImageError as exc:
             raise VMError(f"invalid MiniMachine user payload: {exc}") from exc
 
+        payload_hash = hashlib.sha256(payload).hexdigest()
+        instance_table = getattr(vm, "user_exec_instances", None)
+        if instance_table is None:
+            instance_table = {}
+            vm.user_exec_instances = instance_table
+        instance_key = (current_task, payload_hash)
+        instance = instance_table.get(instance_key)
+        reuse_instance = instance is not None
+        instance_namespace = (
+            str(instance["namespace"])
+            if instance is not None and instance.get("namespace")
+            else None
+        )
+
+        if instance_namespace is not None:
+            user_image = rebase_user_program_namespace(
+                user_image,
+                namespace=instance_namespace,
+            )
+        elif not reuse_instance and len(user_image.functions) > 1:
+            image_symbols = set()
+            if user_image.image is not None:
+                image_symbols.update(
+                    obj.name for obj in user_image.image.objects
+                )
+                image_symbols.update(
+                    alias.name for alias in user_image.image.aliases
+                )
+                image_symbols.update(user_image.image.external_data)
+                image_symbols.update(user_image.image.external_functions)
+            candidate_symbols = {
+                function.name for function in user_image.functions
+            } | image_symbols
+            collisions = sorted(
+                symbol
+                for symbol in candidate_symbols
+                if (
+                    symbol in vm.program.functions
+                    or symbol in vm.program.symbol_addresses
+                )
+            )
+            if collisions:
+                instance_namespace = (
+                    f"exec_{current_task:x}_{payload_hash[:12]}"
+                )
+                user_image = rebase_user_program_namespace(
+                    user_image,
+                    namespace=instance_namespace,
+                )
+                print(
+                    "BOOT_EXEC_USER_INSTANCE_NAMESPACE "
+                    f"task=0x{current_task:x} "
+                    f"payload={payload_hash[:16]} "
+                    f"namespace={instance_namespace} "
+                    f"collisions={len(collisions)}",
+                    flush=True,
+                )
+
         functions = list(user_image.functions)
         entry_name = user_image.entry
 
@@ -3503,36 +3562,67 @@ def linux_ecall(vm, args: tuple[int, ...]):
             )
 
         # Dynamic P3 userspace descriptors/globals are VM metadata, not
-        # Linux-owned RAM.  The old post-payload arena shares the NOMMU
-        # numeric address space with live Linux allocations: late VFS writes
-        # can place page-cache pages there and a subsequent P3 install would
-        # overwrite them.  Allocate from the VM synthetic heap instead.  That
-        # heap starts beyond the configured Linux physical RAM and is already
-        # proven usable as a user pointer by the hot-injection/libc paths.
+        # Linux-owned RAM. Different Linux tasks need independent instances,
+        # while a same-task exec can reuse its instance after restoring the
+        # initial data/descriptor bytes.
         kernel_program_data_end = vm.program._next_data
-        user_data_base = (int(vm.heap_next) + 15) & ~15
-        if user_data_base <= kernel_program_data_end:
-            raise VMError(
-                "MiniMachine synthetic userspace P3 arena is not above kernel "
-                f"Program data: base=0x{user_data_base:x} "
-                f"kernel_end=0x{kernel_program_data_end:x}"
+        if reuse_instance:
+            user_data_base = int(instance["data_base"])
+            user_data_end = int(instance["data_end"])
+            reset_size = user_data_end - user_data_base
+            initial_blob = bytes(
+                vm.program.initial_memory.read(user_data_base + i, 8)
+                for i in range(reset_size)
             )
-        if user_data_base >= vm.stack_top:
-            raise VMError(
-                "MiniMachine synthetic userspace P3 arena exhausted: "
-                f"base=0x{user_data_base:x} stack_top=0x{vm.stack_top:x}"
-            )
-        vm.program._next_data = user_data_base
-        print(
-            "BOOT_EXEC_USER_DATA_ARENA "
-            f"kernel_end=0x{kernel_program_data_end:x} "
-            f"base=0x{user_data_base:x} limit=0x{vm.stack_top:x} "
-            f"heap_before=0x{vm.heap_next:x} "
-            f"capacity={vm.stack_top - user_data_base}",
-            flush=True,
-        )
+            bulk_write = getattr(vm.memory, "bulk_write", None)
+            if bulk_write is not None:
+                bulk_write(user_data_base, initial_blob)
+            else:
+                for offset, byte in enumerate(initial_blob):
+                    vm.memory.write(user_data_base + offset, 8, byte)
 
-        install_user_external_surface(vm, user_image, user_envp)
+            if user_image.image is not None:
+                for symbol in user_image.image.external_data:
+                    if _user_external_original(symbol) == "environ":
+                        address = vm.program.symbol_addresses.get(symbol)
+                        if address is not None:
+                            vm.memory.write(address, 64, user_envp)
+            print(
+                "BOOT_EXEC_USER_INSTANCE_RESET "
+                f"task=0x{current_task:x} "
+                f"payload={payload_hash[:16]} "
+                f"namespace={instance_namespace or 'base'} "
+                f"base=0x{user_data_base:x} end=0x{user_data_end:x} "
+                f"bytes={reset_size}",
+                flush=True,
+            )
+        else:
+            # The old post-payload arena shares the NOMMU numeric address
+            # space with live Linux allocations. Allocate from the VM
+            # synthetic heap, which is outside guest physical RAM.
+            user_data_base = (int(vm.heap_next) + 15) & ~15
+            if user_data_base <= kernel_program_data_end:
+                raise VMError(
+                    "MiniMachine synthetic userspace P3 arena is not above kernel "
+                    f"Program data: base=0x{user_data_base:x} "
+                    f"kernel_end=0x{kernel_program_data_end:x}"
+                )
+            if user_data_base >= vm.stack_top:
+                raise VMError(
+                    "MiniMachine synthetic userspace P3 arena exhausted: "
+                    f"base=0x{user_data_base:x} stack_top=0x{vm.stack_top:x}"
+                )
+            vm.program._next_data = user_data_base
+            print(
+                "BOOT_EXEC_USER_DATA_ARENA "
+                f"kernel_end=0x{kernel_program_data_end:x} "
+                f"base=0x{user_data_base:x} limit=0x{vm.stack_top:x} "
+                f"heap_before=0x{vm.heap_next:x} "
+                f"capacity={vm.stack_top - user_data_base}",
+                flush=True,
+            )
+
+            install_user_external_surface(vm, user_image, user_envp)
         trace_user_external_descriptor(vm, "getcwd", "external-surface")
 
         registered_user_helpers = 0
@@ -3555,69 +3645,86 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 flush=True,
             )
 
-        # Preserve the collision-safe legacy behavior for single-function
-        # probes. Multi-function programs currently require a clean user
-        # symbol namespace so internal function descriptors stay coherent.
-        if len(functions) == 1:
-            function = functions[0]
-            base_name = function.name
-            suffix = 0
-            while (
-                function.name in vm.program.functions
-                or function.name in vm.program.symbol_addresses
-            ):
-                suffix += 1
-                function.name = f"__mm_user_{base_name}_{suffix}"
-            entry_name = function.name
-        else:
-            collisions = sorted(
-                function.name
-                for function in functions
-                if (
+        if not reuse_instance:
+            # Preserve the collision-safe legacy behavior for single-function
+            # probes. Multi-function programs are already rebased above when
+            # another live task owns their base namespace.
+            if len(functions) == 1:
+                function = functions[0]
+                base_name = function.name
+                suffix = 0
+                while (
                     function.name in vm.program.functions
                     or function.name in vm.program.symbol_addresses
+                ):
+                    suffix += 1
+                    function.name = f"__mm_user_{base_name}_{suffix}"
+                entry_name = function.name
+            else:
+                collisions = sorted(
+                    function.name
+                    for function in functions
+                    if (
+                        function.name in vm.program.functions
+                        or function.name in vm.program.symbol_addresses
+                    )
                 )
-            )
-            if collisions:
-                raise VMError(
-                    "MiniMachine multi-function userspace symbol collision: "
-                    + ",".join(collisions[:8])
+                if collisions:
+                    raise VMError(
+                        "MiniMachine multi-function userspace symbol collision: "
+                        + ",".join(collisions[:8])
+                    )
+
+            for function in functions:
+                verify_p3(function)
+            for function in functions:
+                vm.program.add_function(function)
+            trace_user_external_descriptor(vm, "getcwd", "functions-added")
+
+            if user_image.image is not None:
+                try:
+                    install_module_image(vm.program, user_image.image)
+                except (ImageError, VMError) as exc:
+                    raise VMError(
+                        f"cannot install MiniMachine userspace data image: {exc}"
+                    ) from exc
+                print(
+                    "BOOT_EXEC_USER_IMAGE_DATA "
+                    f"objects={len(user_image.image.objects)} "
+                    f"bytes={user_image.image.byte_size} "
+                    f"relocs={user_image.image.relocation_count}",
+                    flush=True,
                 )
-
-        for function in functions:
-            verify_p3(function)
-        for function in functions:
-            vm.program.add_function(function)
-        trace_user_external_descriptor(vm, "getcwd", "functions-added")
-
-        if user_image.image is not None:
-            try:
-                install_module_image(vm.program, user_image.image)
-            except (ImageError, VMError) as exc:
+        trace_user_external_descriptor(vm, "getcwd", "module-image")
+        if not reuse_instance:
+            user_data_end = vm.program._next_data
+            if user_data_end >= vm.stack_top:
                 raise VMError(
-                    f"cannot install MiniMachine userspace data image: {exc}"
-                ) from exc
+                    "MiniMachine userspace P3 data arena exhausted: "
+                    f"end=0x{user_data_end:x} "
+                    f"stack_top=0x{vm.stack_top:x}"
+                )
+            # Future libc malloc/realloc allocations share the same synthetic
+            # address region, so advance the VM heap past immutable P3 metadata.
+            vm.heap_next = (user_data_end + 15) & ~15
+            instance_table[instance_key] = {
+                "namespace": instance_namespace,
+                "data_base": user_data_base,
+                "data_end": user_data_end,
+                "entry": entry_name,
+            }
             print(
-                "BOOT_EXEC_USER_IMAGE_DATA "
-                f"objects={len(user_image.image.objects)} "
-                f"bytes={user_image.image.byte_size} "
-                f"relocs={user_image.image.relocation_count}",
+                "BOOT_EXEC_USER_INSTANCE_INSTALLED "
+                f"task=0x{current_task:x} "
+                f"payload={payload_hash[:16]} "
+                f"namespace={instance_namespace or 'base'} "
+                f"entry={entry_name}",
                 flush=True,
             )
-        trace_user_external_descriptor(vm, "getcwd", "module-image")
-        if vm.program._next_data >= vm.stack_top:
-            raise VMError(
-                "MiniMachine userspace P3 data arena exhausted: "
-                f"end=0x{vm.program._next_data:x} "
-                f"stack_top=0x{vm.stack_top:x}"
-            )
-        # Future libc malloc/realloc allocations share the same synthetic
-        # address region, so advance the VM heap past immutable P3 metadata.
-        vm.heap_next = (vm.program._next_data + 15) & ~15
         print(
             "BOOT_EXEC_USER_DATA_ARENA_USED "
-            f"base=0x{user_data_base:x} end=0x{vm.program._next_data:x} "
-            f"bytes={vm.program._next_data - user_data_base} "
+            f"base=0x{user_data_base:x} end=0x{user_data_end:x} "
+            f"bytes={user_data_end - user_data_base} "
             f"heap_next=0x{vm.heap_next:x} "
             f"remaining={vm.stack_top - vm.heap_next}",
             flush=True,
