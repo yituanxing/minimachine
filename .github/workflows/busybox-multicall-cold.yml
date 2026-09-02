@@ -78,8 +78,8 @@ jobs:
           . current-cache/input-run.env
           test -n "$LINUX_RUN_ID"
 
-          printf 'P3_REFRESH_RUN_ID=%s\nLINUX_RUN_ID=%s\n' \
-            "$refresh_id" "$LINUX_RUN_ID" | tee build/input-runs.env
+          printf 'LOWERING_SHA=%s\nP3_REFRESH_RUN_ID=%s\nLINUX_RUN_ID=%s\n' \
+            "$lowering_sha" "$refresh_id" "$LINUX_RUN_ID" | tee build/input-runs.env
 
           gh run download "$LINUX_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
@@ -89,18 +89,29 @@ jobs:
           test -s linux/llvm/linked.ll
           test -s linux/out/minimachine-initramfs.cpio
 
-      - name: Download latest BusyBox multicall image
+      - name: Download lowering-matched BusyBox multicall image
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          run_id="$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow busybox-multicall-bundle.yml \
-            --branch work/native-p3-vm \
-            --status success \
-            --limit 1 \
-            --json databaseId \
-            --jq '.[0].databaseId')"
+          . build/input-runs.env
+          test -n "$LOWERING_SHA"
+
+          run_id=""
+          for attempt in $(seq 1 60); do
+            run_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow busybox-multicall-bundle.yml \
+              --branch work/native-p3-vm \
+              --limit 50 \
+              --json databaseId,headSha,status,conclusion \
+              --jq ".[] | select(.headSha == \"$LOWERING_SHA\" and .status == \"completed\" and .conclusion == \"success\") | .databaseId" \
+              | head -1)"
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            echo "waiting for lowering-matched BusyBox bundle attempt=$attempt sha=$LOWERING_SHA"
+            sleep 10
+          done
           test -n "$run_id"
           echo "BUSYBOX_RUN_ID=$run_id" | tee -a build/input-runs.env
 
