@@ -2116,6 +2116,67 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_vsnprintf
 
+    if original == "putenv":
+        def user_putenv(vm, args):
+            if len(args) != 1:
+                raise VMError("putenv expects string")
+            string_ptr = int(args[0])
+            raw = read_user_cstring(vm, string_ptr, 1 << 16)
+            if not raw:
+                set_errno(vm, 22)
+                return (1 << 64) - 1
+
+            if b"=" in raw:
+                name, _value = raw.split(b"=", 1)
+                remove = False
+            else:
+                name = raw
+                remove = True
+            if not name or b"=" in name:
+                set_errno(vm, 22)
+                return (1 << 64) - 1
+
+            environ_symbol = f"{external_prefix}environ"
+            environ_addr = vm.program.symbol_addresses.get(environ_symbol)
+            if environ_addr is None:
+                set_errno(vm, 38)
+                return (1 << 64) - 1
+
+            envp = vm.memory.read(environ_addr, 64)
+            entries = []
+            match_index = None
+            prefix = name + b"="
+            if envp:
+                for index in range(4096):
+                    entry = vm.memory.read(envp + index * 8, 64)
+                    if entry == 0:
+                        break
+                    entries.append(entry)
+                    entry_raw = read_user_cstring(vm, entry, 1 << 16)
+                    if match_index is None and entry_raw.startswith(prefix):
+                        match_index = index
+                else:
+                    raise VMError("putenv environment vector is not terminated")
+
+            if remove:
+                if match_index is None:
+                    return 0
+                entries.pop(match_index)
+            elif match_index is not None:
+                entries[match_index] = string_ptr
+            else:
+                entries.append(string_ptr)
+
+            new_envp = vm.alloc_bytes((len(entries) + 1) * 8, align=8)
+            for index, entry in enumerate(entries):
+                vm.memory.write(new_envp + index * 8, 64, entry)
+            vm.memory.write(new_envp + len(entries) * 8, 64, 0)
+            vm.memory.write(environ_addr, 64, new_envp)
+            vm.user_envp = new_envp
+            return 0
+
+        return user_putenv
+
     if original == "getenv":
         def user_getenv(vm, args):
             if len(args) != 1:
