@@ -1020,6 +1020,40 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_stat
 
+    if original == "tcgetattr":
+        def user_tcgetattr(vm, args):
+            if len(args) != 2:
+                raise VMError("tcgetattr expects fd,termios")
+            fd, termios_ptr = map(int, args)
+            raw = user_syscall(
+                vm,
+                (29, fd, 0x5401, termios_ptr, 0, 0, 0),
+            )
+            return libc_linux_result(vm, raw)
+
+        return user_tcgetattr
+
+    if original == "tcsetattr":
+        def user_tcsetattr(vm, args):
+            if len(args) != 3:
+                raise VMError("tcsetattr expects fd,optional_actions,termios")
+            fd, optional_actions, termios_ptr = map(int, args)
+            request = {
+                0: 0x5402,  # TCSANOW -> TCSETS
+                1: 0x5403,  # TCSADRAIN -> TCSETSW
+                2: 0x5404,  # TCSAFLUSH -> TCSETSF
+            }.get(optional_actions)
+            if request is None:
+                set_errno(vm, 22)
+                return (1 << 64) - 1
+            raw = user_syscall(
+                vm,
+                (29, fd, request, termios_ptr, 0, 0, 0),
+            )
+            return libc_linux_result(vm, raw)
+
+        return user_tcsetattr
+
     if original == "ioctl":
         def user_ioctl(vm, args):
             if len(args) not in {2, 3}:
