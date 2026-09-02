@@ -201,6 +201,62 @@ class LegalizerTests(unittest.TestCase):
             any(type(i).__name__.lower() == "phi" for b in fn.blocks for i in b.instructions)
         )
 
+    def test_conditional_phi_backedge_is_split_before_copy(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @f(i64 %start) {
+            entry:
+              br label %loop
+            loop:
+              %i = phi i64 [ %start, %entry ], [ %next, %back ]
+              br label %back
+            back:
+              %next = add nsw i64 %i, -1
+              %done = icmp eq i64 %i, 0
+              br i1 %done, label %exit, label %loop
+            exit:
+              ret i64 %i
+            }
+            """
+        )
+        by_name = {b.label: b for b in fn.blocks}
+        back = by_name["back"]
+        self.assertIsInstance(back.instructions[-1], muir.Br)
+        self.assertFalse(
+            any(
+                isinstance(inst, muir.Mov)
+                and inst.dst == muir.Slot("i")
+                for inst in back.instructions[:-1]
+            )
+        )
+
+        edge_blocks = [
+            block
+            for block in fn.blocks
+            if block.label.startswith("__phi_back_to_loop_edge")
+        ]
+        self.assertEqual(len(edge_blocks), 1)
+        edge = edge_blocks[0]
+        self.assertTrue(
+            any(
+                isinstance(inst, muir.Mov)
+                and inst.dst == muir.Slot("i")
+                and inst.src == muir.Slot("next")
+                for inst in edge.instructions
+            )
+        )
+        self.assertIsInstance(edge.instructions[-1], muir.Br)
+        self.assertEqual(edge.instructions[-1].true_target.label, "loop")
+        self.assertEqual(edge.instructions[-1].false_target.label, "loop")
+        self.assertIn(
+            edge.label,
+            {
+                back.instructions[-1].true_target.label,
+                back.instructions[-1].false_target.label,
+            },
+        )
+        self.assertEqual(stats.phi_edge_moves, 2)
+
     def test_constant_gep_folds_into_load(self):
         fn, stats = self.lower_one(
             """
