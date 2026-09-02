@@ -2353,6 +2353,280 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_strto
 
+    if original in {"getopt_long", "getopt_long_only"}:
+        def user_getopt_long(vm, args):
+            if len(args) != 5:
+                raise VMError(
+                    f"{original} expects argc,argv,optstring,longopts,longindex"
+                )
+            argc, argv, optstring_ptr, longopts_ptr, longindex_ptr = map(
+                int, args
+            )
+            optstring = read_user_cstring(
+                vm, optstring_ptr, 4096
+            ).decode("latin1")
+            long_only = original == "getopt_long_only"
+
+            def data_address(name: str) -> int:
+                address = vm.program.symbol_addresses.get(
+                    f"{external_prefix}{name}"
+                )
+                if address is None:
+                    raise VMError(
+                        f"{original} missing userspace external data {name}"
+                    )
+                return int(address)
+
+            optarg_addr = data_address("optarg")
+            optind_addr = data_address("optind")
+            optopt_addr = data_address("optopt")
+
+            def finish(index: int, next_pos: int, result: int) -> int:
+                state["index"] = index
+                state["next"] = next_pos
+                state["optind_seen"] = index
+                vm.memory.write(optind_addr, 32, index)
+                return result & ((1 << 64) - 1)
+
+            def parse_long_options():
+                options = []
+                if not longopts_ptr:
+                    return options
+                # glibc/musl struct option on 64-bit:
+                #   const char *name; int has_arg; int *flag; int val;
+                # with natural padding -> 32 bytes.
+                for option_index in range(4096):
+                    base = longopts_ptr + option_index * 32
+                    name_ptr = vm.memory.read(base, 64)
+                    if name_ptr == 0:
+                        break
+                    name = read_user_cstring(
+                        vm, name_ptr, 4096
+                    ).decode("latin1")
+                    has_arg = vm.memory.read(base + 8, 32)
+                    flag_ptr = vm.memory.read(base + 16, 64)
+                    value = vm.memory.read(base + 24, 32)
+                    options.append(
+                        (option_index, name, has_arg, flag_ptr, value)
+                    )
+                else:
+                    raise VMError(
+                        f"{original} long option table is not terminated"
+                    )
+                return options
+
+            long_options = parse_long_options()
+            optind = int(vm.memory.read(optind_addr, 32))
+            if optind <= 0:
+                optind = 1
+
+            state = getattr(vm, "user_getopt_state", None)
+            if (
+                state is None
+                or state.get("argv") != argv
+                or state.get("optstring") != optstring_ptr
+                or state.get("longopts") != longopts_ptr
+                or state.get("long_only") != long_only
+                or state.get("argc") != argc
+                or optind == 1 and state.get("optind_seen") != 1
+            ):
+                state = {
+                    "argv": argv,
+                    "optstring": optstring_ptr,
+                    "longopts": longopts_ptr,
+                    "long_only": long_only,
+                    "argc": argc,
+                    "index": optind,
+                    "next": 0,
+                    "optind_seen": optind,
+                }
+                vm.user_getopt_state = state
+            elif state.get("index") != optind and state.get("next", 0) == 0:
+                state["index"] = optind
+
+            vm.memory.write(optarg_addr, 64, 0)
+
+            while True:
+                index = int(state["index"])
+                next_pos = int(state.get("next", 0))
+                if index >= argc:
+                    return finish(index, 0, (1 << 64) - 1)
+
+                arg_ptr = vm.memory.read(argv + index * 8, 64)
+                if not arg_ptr:
+                    return finish(index, 0, (1 << 64) - 1)
+                arg = read_user_cstring(vm, arg_ptr, 4096).decode("latin1")
+
+                if next_pos == 0:
+                    if len(arg) < 2 or arg[0] != "-" or arg == "-":
+                        return finish(index, 0, (1 << 64) - 1)
+                    if arg == "--":
+                        return finish(index + 1, 0, (1 << 64) - 1)
+
+                    is_double_dash = arg.startswith("--")
+                    long_candidate = is_double_dash
+                    if long_only and not is_double_dash:
+                        first = arg[1:2]
+                        search_start = 1 if optstring.startswith(":") else 0
+                        if (
+                            len(arg) > 2
+                            or not first
+                            or optstring.find(first, search_start) < 0
+                        ):
+                            long_candidate = True
+
+                    if long_candidate:
+                        token_start = 2 if is_double_dash else 1
+                        token = arg[token_start:]
+                        name, sep, inline_value = token.partition("=")
+                        exact = [
+                            option
+                            for option in long_options
+                            if option[1] == name
+                        ]
+                        matches = exact or [
+                            option
+                            for option in long_options
+                            if option[1].startswith(name)
+                        ]
+                        if len(matches) != 1:
+                            return finish(index + 1, 0, ord("?"))
+
+                        (
+                            option_index,
+                            option_name,
+                            has_arg,
+                            flag_ptr,
+                            value,
+                        ) = matches[0]
+                        if longindex_ptr:
+                            vm.memory.write(
+                                longindex_ptr, 32, option_index
+                            )
+                        vm.memory.write(optopt_addr, 32, 0)
+
+                        if has_arg == 0:
+                            if sep:
+                                return finish(index + 1, 0, ord("?"))
+                            index += 1
+                        elif has_arg == 1:
+                            if sep:
+                                value_offset = token_start + len(name) + 1
+                                vm.memory.write(
+                                    optarg_addr,
+                                    64,
+                                    arg_ptr + value_offset,
+                                )
+                                index += 1
+                            elif index + 1 < argc:
+                                value_ptr = vm.memory.read(
+                                    argv + (index + 1) * 8,
+                                    64,
+                                )
+                                vm.memory.write(
+                                    optarg_addr, 64, value_ptr
+                                )
+                                index += 2
+                            else:
+                                index += 1
+                                missing = (
+                                    ord(":")
+                                    if optstring.startswith(":")
+                                    else ord("?")
+                                )
+                                return finish(index, 0, missing)
+                        elif has_arg == 2:
+                            if sep:
+                                value_offset = token_start + len(name) + 1
+                                vm.memory.write(
+                                    optarg_addr,
+                                    64,
+                                    arg_ptr + value_offset,
+                                )
+                            index += 1
+                        else:
+                            raise VMError(
+                                f"{original} invalid has_arg={has_arg} "
+                                f"for --{option_name}"
+                            )
+
+                        print(
+                            "BOOT_EXEC_USER_GETOPT_LONG "
+                            f"name={option_name!r} index={option_index} "
+                            f"has_arg={has_arg} optind={index} "
+                            f"optarg=0x{vm.memory.read(optarg_addr, 64):x} "
+                            f"flag=0x{flag_ptr:x} value={value}",
+                            flush=True,
+                        )
+                        if flag_ptr:
+                            vm.memory.write(flag_ptr, 32, value)
+                            return finish(index, 0, 0)
+                        return finish(index, 0, value)
+
+                    next_pos = 1
+
+                option = arg[next_pos]
+                next_pos += 1
+                option_code = ord(option) & 0xFF
+                vm.memory.write(optopt_addr, 32, option_code)
+
+                search_start = 1 if optstring.startswith(":") else 0
+                pos = optstring.find(option, search_start)
+                if option == ":" or pos < 0:
+                    if next_pos >= len(arg):
+                        index += 1
+                        next_pos = 0
+                    return finish(index, next_pos, ord("?"))
+
+                requires_arg = (
+                    pos + 1 < len(optstring)
+                    and optstring[pos + 1] == ":"
+                )
+                optional_arg = (
+                    requires_arg
+                    and pos + 2 < len(optstring)
+                    and optstring[pos + 2] == ":"
+                )
+
+                if requires_arg:
+                    if next_pos < len(arg):
+                        vm.memory.write(
+                            optarg_addr, 64, arg_ptr + next_pos
+                        )
+                        index += 1
+                        next_pos = 0
+                    elif optional_arg:
+                        index += 1
+                        next_pos = 0
+                    elif index + 1 < argc:
+                        index += 1
+                        value_ptr = vm.memory.read(argv + index * 8, 64)
+                        vm.memory.write(optarg_addr, 64, value_ptr)
+                        index += 1
+                        next_pos = 0
+                    else:
+                        index += 1
+                        next_pos = 0
+                        missing = (
+                            ord(":")
+                            if optstring.startswith(":")
+                            else ord("?")
+                        )
+                        return finish(index, next_pos, missing)
+                elif next_pos >= len(arg):
+                    index += 1
+                    next_pos = 0
+
+                print(
+                    "BOOT_EXEC_USER_GETOPT_LONG_SHORT "
+                    f"option={option!r} optind={index} "
+                    f"optarg=0x{vm.memory.read(optarg_addr, 64):x}",
+                    flush=True,
+                )
+                return finish(index, next_pos, option_code)
+
+        return user_getopt_long
+
     if original == "getopt":
         def user_getopt(vm, args):
             if len(args) != 3:
