@@ -660,6 +660,33 @@ class RuntimeTests(unittest.TestCase):
             (1,),
         )
 
+    def test_speculative_poison_shift_can_remain_unselected(self):
+        functions, _ = legalize_module(
+            """
+            define i32 @guarded_shift(i32 %n) {
+            entry:
+              %nz = icmp ne i32 %n, 0
+              %amt = add nsw i32 %n, -1
+              %shifted = shl nuw i32 1, %amt
+              %result = select i1 %nz, i32 %shifted, i32 0
+              ret i32 %result
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("guarded_shift", (0,)),
+            (0,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function("guarded_shift", (1,)),
+            (1,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function("guarded_shift", (2,)),
+            (2,),
+        )
+
     def test_funnel_shift_intrinsics_execute_with_distinct_halves(self):
         functions, _ = legalize_module(
             """
