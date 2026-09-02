@@ -15,6 +15,10 @@ permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: lua-runtime-hot-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lua-hot:
     runs-on: ubuntu-24.04
