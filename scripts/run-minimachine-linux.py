@@ -3139,6 +3139,30 @@ def trace_user_external_descriptor(vm, original: str, stage: str) -> None:
     )
 
 
+def sync_program_initial_range(vm, start: int, end: int) -> None:
+    if end < start:
+        raise VMError(
+            f"invalid initial-memory sync range: 0x{start:x}..0x{end:x}"
+        )
+    if end == start:
+        return
+    payload = bytes(
+        vm.program.initial_memory.read(address, 8)
+        for address in range(start, end)
+    )
+    bulk_write = getattr(vm.memory, "bulk_write", None)
+    if bulk_write is not None:
+        bulk_write(start, payload)
+    else:
+        for offset, byte in enumerate(payload):
+            vm.memory.write(start + offset, 8, byte)
+    print(
+        "BOOT_EXEC_USER_INITIAL_SYNC "
+        f"start=0x{start:x} end=0x{end:x} bytes={len(payload)}",
+        flush=True,
+    )
+
+
 def install_user_external_surface(vm, user_image, envp: int) -> None:
     image = user_image.image
     if image is None:
@@ -3682,12 +3706,18 @@ def linux_ecall(vm, args: tuple[int, ...]):
             trace_user_external_descriptor(vm, "getcwd", "functions-added")
 
             if user_image.image is not None:
+                image_data_base = vm.program._next_data
                 try:
                     install_module_image(vm.program, user_image.image)
                 except (ImageError, VMError) as exc:
                     raise VMError(
                         f"cannot install MiniMachine userspace data image: {exc}"
                     ) from exc
+                sync_program_initial_range(
+                    vm,
+                    image_data_base,
+                    vm.program._next_data,
+                )
                 print(
                     "BOOT_EXEC_USER_IMAGE_DATA "
                     f"objects={len(user_image.image.objects)} "
