@@ -669,6 +669,26 @@ def helper_callback(symbol: str):
 
         return funnel
 
+    m = re.fullmatch(r"__mm_llvm_([su])(max|min)_i(8|16|32|64)", symbol)
+    if m:
+        signedness, op, bits_text = m.groups()
+        bits = int(bits_text)
+        mask = _mask(bits)
+
+        def minmax(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError(f"{symbol} expects two operands")
+            if signedness == "s":
+                a = _signed(args[0], bits)
+                b = _signed(args[1], bits)
+            else:
+                a = args[0] & mask
+                b = args[1] & mask
+            value = max(a, b) if op == "max" else min(a, b)
+            return value & mask
+
+        return minmax
+
     m = re.fullmatch(r"__mm_llvm_(cttz|ctlz|ctpop)_i(8|16|32|64)", symbol)
     if m:
         op, bits_text = m.groups()
