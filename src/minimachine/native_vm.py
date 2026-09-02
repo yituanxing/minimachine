@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 
 from . import muir, p3
+from .abi import CALLER_SP, RET_PC
 from .vm import DEFAULT_STACK_TOP, MASK64, VM, VMError
 
 MM_OP_MOV = 1
@@ -892,11 +893,23 @@ class NativeVM(VM):
                         if delta_s > 0
                         else 0.0
                     )
+                    caller_sp = self.memory.read(
+                        self.sp + CALLER_SP, 64
+                    )
+                    ret_pc = self.memory.read(self.sp + RET_PC, 64)
+                    caller_pair = self.program.code_block.get(ret_pc)
+                    caller = (
+                        f"{caller_pair[0]}:{caller_pair[1]}"
+                        if caller_pair is not None
+                        else "<host-or-root>"
+                    )
                     print(
                         "BOOT_EXEC_NATIVE_PROGRESS "
                         f"steps={self.steps} "
                         f"function={self.current_function} "
                         f"block={self.current_block} ip={self.ip} "
+                        f"sp=0x{self.sp:x} caller_sp=0x{caller_sp:x} "
+                        f"ret_pc=0x{ret_pc:x} caller={caller} "
                         f"chunk_steps={delta_steps} "
                         f"chunk_s={delta_s:.3f} "
                         f"msteps_s={msteps:.3f}",
