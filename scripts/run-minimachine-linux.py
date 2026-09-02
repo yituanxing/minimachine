@@ -1119,6 +1119,47 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return 0
         return user_fputs
 
+    if original == "fwrite":
+        def user_fwrite(vm, args):
+            if len(args) != 4:
+                raise VMError("fwrite expects ptr,size,nmemb,FILE*")
+            ptr, size, nmemb, stream = map(int, args)
+            if size == 0 or nmemb == 0:
+                return 0
+            fd = stdio_fd(vm, stream)
+            if fd < 0:
+                set_errno(vm, 9)
+                return 0
+
+            total = size * nmemb
+            written = 0
+            state = stdio_state(vm, stream)
+            while written < total:
+                raw = user_syscall(
+                    vm,
+                    (
+                        64,  # write
+                        fd,
+                        ptr + written,
+                        total - written,
+                        0,
+                        0,
+                        0,
+                    ),
+                )
+                signed = raw - (1 << 64) if raw & (1 << 63) else raw
+                if signed < 0:
+                    if state is not None:
+                        state["error"] = True
+                    set_errno(vm, -signed)
+                    break
+                if signed == 0:
+                    break
+                written += int(signed)
+            return written // size
+
+        return user_fwrite
+
     if original in {"fputc", "putc_unlocked"}:
         def user_putc(vm, args):
             if len(args) != 2:
@@ -1451,6 +1492,18 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             )
             return libc_linux_result(vm, raw)
         return user_rlimit
+
+    if original == "setsid":
+        def user_setsid(vm, args):
+            if args:
+                raise VMError("setsid expects no arguments")
+            raw = user_syscall(
+                vm,
+                (157, 0, 0, 0, 0, 0, 0),
+            )
+            return libc_linux_result(vm, raw)
+
+        return user_setsid
 
     if original in {"open", "open64"}:
         def user_open(vm, args):
@@ -3278,6 +3331,7 @@ def user_syscall(vm, args: tuple[int, ...]):
         94: ("__se_sys_exit_group", 1),
         142: ("__se_sys_reboot", 4),
         153: ("__se_sys_times", 1),
+        157: ("__se_sys_setsid", 0),
         160: ("__se_sys_newuname", 1),
         166: ("__se_sys_umask", 1),
         169: ("__se_sys_gettimeofday", 2),
