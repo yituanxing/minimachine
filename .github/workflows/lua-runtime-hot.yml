@@ -146,11 +146,13 @@ jobs:
             echo LUA_HOT_FRONTIER=before-script-output
           fi
 
-      - name: Assert checkpoint compatibility
+      - name: Assert real Lua frontier
         run: |
           grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/lua-hot.log
           ! grep -F 'program cache lowering fingerprint mismatch' build/lua-hot.log
           ! grep -F 'checkpoint image fingerprint mismatch' build/lua-hot.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/lua-hot.log
+          grep -F 'LUA_MINIMACHINE_RUNTIME' build/lua-hot.log
 
       - name: Upload Lua hot evidence
         if: always()
