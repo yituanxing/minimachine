@@ -149,9 +149,16 @@ jobs:
       - name: Assert real Lua frontier
         run: |
           grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/lua-hot.log
-          ! grep -F 'program cache lowering fingerprint mismatch' build/lua-hot.log
-          ! grep -F 'checkpoint image fingerprint mismatch' build/lua-hot.log
-          ! grep -F 'BOOT_EXEC_BLOCKED ' build/lua-hot.log
+          for pattern in \
+            'program cache lowering fingerprint mismatch' \
+            'checkpoint image fingerprint mismatch' \
+            'BOOT_EXEC_BLOCKED '; do
+            if grep -F "$pattern" build/lua-hot.log >/dev/null; then
+              echo "unexpected Lua hot failure marker: $pattern"
+              grep -F "$pattern" build/lua-hot.log | tail -1
+              exit 1
+            fi
+          done
           grep -F 'LUA_MINIMACHINE_RUNTIME' build/lua-hot.log
 
       - name: Upload Lua hot evidence
