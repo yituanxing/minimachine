@@ -139,6 +139,33 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
         self.assertIsNone(getattr(vm, "pending_user_fork_continuation", None))
 
+    def test_time_libc_wrapper_uses_linux_gettimeofday(self):
+        runner = load_runner()
+        program = Program()
+        vm = program.new_vm()
+        seen = {}
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            seen["args"] = args
+            timeval = args[1]
+            vm.memory.write(timeval, 64, 123456789)
+            vm.memory.write(timeval + 8, 64, 654321)
+            return 0
+
+        runner.user_syscall = fake_user_syscall
+        callback = runner._user_libc_callback("__mm_lua54_ext_time", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        tloc = 0xD200
+        self.assertEqual(callback(vm, (tloc,)), 123456789)
+        self.assertEqual(vm.memory.read(tloc, 64), 123456789)
+        self.assertEqual(
+            seen["args"],
+            (169, seen["args"][1], 0, 0, 0, 0, 0),
+        )
+
     def test_reboot_libc_wrapper_uses_linux_magic_syscall(self):
         runner = load_runner()
         program = Program()
