@@ -2810,10 +2810,10 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return HOST_CONTROL_TRANSFER
         return user_exit
 
-    if original == "fork":
+    if original in {"fork", "vfork"}:
         def user_fork(vm, args):
             if args:
-                raise VMError("fork expects no arguments")
+                raise VMError(f"{original} expects no arguments")
             if "__se_sys_clone" not in vm.program.functions:
                 raise VMError("Linux image is missing __se_sys_clone")
             if getattr(vm, "pending_user_fork_continuation", None) is not None:
@@ -2822,7 +2822,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             expected = vm.memory.read(vm.sp + RESULT_COUNT, 64)
             if expected != 1:
                 raise VMError(
-                    f"fork caller expects {expected} results, expected 1"
+                    f"{original} caller expects {expected} results, expected 1"
                 )
             continuation = (
                 vm.memory.read(vm.sp + CALLER_SP, 64),
@@ -3470,7 +3470,7 @@ def user_syscall(vm, args: tuple[int, ...]):
         94: ("__se_sys_exit_group", 1),
         142: ("__se_sys_reboot", 4),
         153: ("__se_sys_times", 1),
-        157: ("__se_sys_setsid", 0),
+        157: ("sys_setsid", 0),
         160: ("__se_sys_newuname", 1),
         166: ("__se_sys_umask", 1),
         169: ("__se_sys_gettimeofday", 2),
