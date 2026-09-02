@@ -2092,6 +2092,32 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_vsnprintf
 
+    if original == "time":
+        def user_time(vm, args):
+            if len(args) != 1:
+                raise VMError("time expects time_t*")
+            tloc = int(args[0])
+
+            # Implement libc time(2) through Linux's real timekeeping path.
+            # RISC-V/asm-generic has gettimeofday(2), whose tv_sec is the
+            # required time_t value. Do not substitute host wall-clock time.
+            timeval = vm.alloc_bytes(16, align=8)
+            raw = user_syscall(
+                vm,
+                (169, timeval, 0, 0, 0, 0, 0),
+            )
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+
+            seconds = vm.memory.read(timeval, 64)
+            if tloc:
+                vm.memory.write(tloc, 64, seconds)
+            return seconds
+
+        return user_time
+
     if original == "reboot":
         def user_reboot(vm, args):
             if len(args) != 1:
