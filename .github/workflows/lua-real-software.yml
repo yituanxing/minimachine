@@ -8,15 +8,17 @@ on:
       - src/minimachine/user_bundle.py
       - src/minimachine/user_image.py
       - src/minimachine/legalize.py
-      - src/minimachine/runtime.py
       - scripts/build-minimachine-user-program.py
       - scripts/build-minimachine-program-rootfs.py
-      - scripts/run-minimachine-linux.py
       - tests/test_user_namespace.py
       - .github/workflows/lua-real-software.yml
 
 permissions:
   contents: read
+
+concurrency:
+  group: lua-real-software-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lua-bundle:
