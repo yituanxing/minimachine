@@ -2922,6 +2922,92 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return HOST_CONTROL_TRANSFER
         return user_exit
 
+    if original == "execvp":
+        def user_execvp(vm, args):
+            if len(args) != 2:
+                raise VMError("execvp expects file,argv")
+            file_ptr, argv_ptr = map(int, args)
+            file_name = read_user_cstring(vm, file_ptr, 4096)
+            if not file_name:
+                set_errno(vm, 2)
+                return (1 << 64) - 1
+
+            environ_symbol = f"{external_prefix}environ"
+            environ_addr = vm.program.symbol_addresses.get(environ_symbol)
+            envp = (
+                vm.memory.read(environ_addr, 64)
+                if environ_addr is not None
+                else int(getattr(vm, "user_envp", 0) or 0)
+            )
+
+            def try_exec(path_ptr: int):
+                raw = user_syscall(
+                    vm,
+                    (221, path_ptr, argv_ptr, envp, 0, 0, 0),
+                )
+                if raw is HOST_CONTROL_TRANSFER:
+                    return HOST_CONTROL_TRANSFER, 0
+                signed = raw - (1 << 64) if raw & (1 << 63) else raw
+                return raw, -signed if -4095 <= signed < 0 else 0
+
+            if b"/" in file_name:
+                raw, error = try_exec(file_ptr)
+                if raw is HOST_CONTROL_TRANSFER:
+                    return HOST_CONTROL_TRANSFER
+                if error:
+                    set_errno(vm, error)
+                    return (1 << 64) - 1
+                return raw
+
+            path_value = None
+            if envp:
+                for index in range(4096):
+                    entry = vm.memory.read(envp + index * 8, 64)
+                    if entry == 0:
+                        break
+                    raw_entry = read_user_cstring(vm, entry, 1 << 16)
+                    if raw_entry.startswith(b"PATH="):
+                        path_value = raw_entry[5:]
+                        break
+                else:
+                    raise VMError("execvp environment vector is not terminated")
+            if path_value is None:
+                path_value = b"/bin:/usr/bin"
+
+            saw_eacces = False
+            for directory in path_value.split(b":"):
+                candidate = (
+                    file_name
+                    if not directory
+                    else directory.rstrip(b"/") + b"/" + file_name
+                )
+                candidate_ptr = vm.alloc_bytes(len(candidate) + 1, align=1)
+                bulk_write = getattr(vm.memory, "bulk_write", None)
+                if bulk_write is not None and candidate:
+                    bulk_write(candidate_ptr, candidate)
+                else:
+                    for offset, byte in enumerate(candidate):
+                        vm.memory.write(candidate_ptr + offset, 8, byte)
+                vm.memory.write(candidate_ptr + len(candidate), 8, 0)
+
+                raw, error = try_exec(candidate_ptr)
+                if raw is HOST_CONTROL_TRANSFER:
+                    return HOST_CONTROL_TRANSFER
+                if error in {2, 20}:  # ENOENT / ENOTDIR
+                    continue
+                if error == 13:  # EACCES: keep searching, but remember it.
+                    saw_eacces = True
+                    continue
+                if error:
+                    set_errno(vm, error)
+                    return (1 << 64) - 1
+                return raw
+
+            set_errno(vm, 13 if saw_eacces else 2)
+            return (1 << 64) - 1
+
+        return user_execvp
+
     if original in {"fork", "vfork"}:
         def user_fork(vm, args):
             if args:
