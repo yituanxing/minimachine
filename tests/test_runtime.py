@@ -25,6 +25,38 @@ def executable(functions):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_indirectbr_phi_executes_only_selected_trampoline(self):
+        functions, _ = legalize_module(
+            """
+            define i64 @indirect_phi(ptr %target, i64 %a) {
+            entry:
+              indirectbr ptr %target, [label %chosen, label %other]
+            chosen:
+              %v = phi i64 [ %a, %entry ]
+              ret i64 %v
+            other:
+              ret i64 99
+            }
+            """
+        )
+        program = executable(functions)
+        chosen = program.block_code[("indirect_phi", "chosen")]
+        other = program.block_code[("indirect_phi", "other")]
+        self.assertEqual(
+            program.new_vm().run_function(
+                "indirect_phi",
+                (chosen, 42),
+            ),
+            (42,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function(
+                "indirect_phi",
+                (other, 42),
+            ),
+            (99,),
+        )
+
     def test_conditional_phi_backedge_executes_selected_edge_only(self):
         functions, _ = legalize_module(
             """
