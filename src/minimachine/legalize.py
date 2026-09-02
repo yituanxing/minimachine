@@ -1867,7 +1867,7 @@ def legalize_function(
     phis_by_target: dict[str, list[tuple[muir.Slot, muir.Value, str, muir.Width]]] = defaultdict(list)
     out_blocks: dict[str, muir.Block] = {}
     extra_blocks_after: dict[str, list[str]] = defaultdict(list)
-    switch_edge_blocks: dict[tuple[str, str], list[str]] = defaultdict(list)
+    pre_split_edge_blocks: dict[tuple[str, str], list[str]] = defaultdict(list)
     used_block_labels = {b.label for b in fn.blocks}
     temp_counter = [0]
 
@@ -2434,7 +2434,7 @@ def legalize_function(
                             )
                         ],
                     )
-                    switch_edge_blocks[(block.label, default_label)].append(
+                    pre_split_edge_blocks[(block.label, default_label)].append(
                         default_edge
                     )
 
@@ -2457,7 +2457,7 @@ def legalize_function(
                                 )
                             ],
                         )
-                        switch_edge_blocks[(block.label, target_label)].append(
+                        pre_split_edge_blocks[(block.label, target_label)].append(
                             edge_label
                         )
                         case_edges.append((value, target_label, edge_label))
@@ -3226,6 +3226,7 @@ def legalize_function(
                         r"blockaddress\s*\(\s*@([-A-Za-z$._0-9]+)\s*,\s*%([-A-Za-z$._0-9]+)\s*\)",
                         address_text,
                     )
+                    dynamic_address: muir.Slot | None = None
                     if blockaddress_match is not None:
                         function_name, label = blockaddress_match.groups()
                         if function_name != fn.name:
@@ -3235,7 +3236,10 @@ def legalize_function(
                         target = muir.Target(label=label)
                     else:
                         address = _value(address_text)
-                        if isinstance(address, muir.Arbitrary) and address.kind == "undef":
+                        if (
+                            isinstance(address, muir.Arbitrary)
+                            and address.kind == "undef"
+                        ):
                             # LLVM undef may be refined independently at each
                             # use. Choose one declared valid successor rather
                             # than preserving an unconstrained pointer that
@@ -3243,6 +3247,7 @@ def legalize_function(
                             target = muir.Target(label=labels[0])
                             stats.lowered_undef_indirectbr += 1
                         elif isinstance(address, muir.Slot):
+                            dynamic_address = address
                             target = muir.Target(slot=address)
                         else:
                             raise ValueError(
@@ -3250,20 +3255,120 @@ def legalize_function(
                                 + address_text
                             )
 
-                    # LLVM indirectbr is a register jump whose destination set
-                    # is CFG metadata.  P3 already has an indirect BR target,
-                    # so semantic descent only needs an unconditional indirect
-                    # branch; invalid destinations retain LLVM's UB contract.
-                    out.append(
-                        muir.Br(
-                            muir.Width.I8,
-                            muir.Cond.EQ,
-                            muir.Imm(0),
-                            muir.Imm(0),
-                            target,
-                            target,
+                    phi_targets: list[str] = []
+                    if dynamic_address is not None:
+                        for target_label in labels:
+                            incoming = phis_by_target.get(target_label, ())
+                            if any(
+                                pred == block.label
+                                or (
+                                    pred.isdigit()
+                                    and pred not in used_block_labels
+                                    and block.label == "entry"
+                                )
+                                for _dst, _src, pred, _width in incoming
+                            ):
+                                if target_label not in phi_targets:
+                                    phi_targets.append(target_label)
+
+                    if not phi_targets:
+                        # Normal indirectbr stays a single native indirect
+                        # branch. Invalid destinations retain LLVM's UB
+                        # contract.
+                        out.append(
+                            muir.Br(
+                                muir.Width.I8,
+                                muir.Cond.EQ,
+                                muir.Imm(0),
+                                muir.Imm(0),
+                                target,
+                                target,
+                            )
                         )
-                    )
+                    else:
+                        # A PHI incoming value belongs to the selected
+                        # indirect edge, not to the predecessor as a whole.
+                        # Check only PHI-bearing targets and route matches
+                        # through tiny edge trampolines. All other declared
+                        # targets retain the native indirect branch fallback.
+                        stem = _sanitize(block.label) or "entry"
+                        edge_labels: list[tuple[str, str]] = []
+                        for index, target_label in enumerate(phi_targets):
+                            edge_label = fresh_block_label(
+                                f"__indirectbr_{stem}_phi{index}_edge"
+                            )
+                            real_target = muir.Target(label=target_label)
+                            out_blocks[edge_label] = muir.Block(
+                                edge_label,
+                                [
+                                    muir.Br(
+                                        muir.Width.I8,
+                                        muir.Cond.EQ,
+                                        muir.Imm(0),
+                                        muir.Imm(0),
+                                        real_target,
+                                        real_target,
+                                    )
+                                ],
+                            )
+                            pre_split_edge_blocks[
+                                (block.label, target_label)
+                            ].append(edge_label)
+                            edge_labels.append((target_label, edge_label))
+
+                        fallback_label = fresh_block_label(
+                            f"__indirectbr_{stem}_fallback"
+                        )
+                        out_blocks[fallback_label] = muir.Block(
+                            fallback_label,
+                            [
+                                muir.Br(
+                                    muir.Width.I8,
+                                    muir.Cond.EQ,
+                                    muir.Imm(0),
+                                    muir.Imm(0),
+                                    target,
+                                    target,
+                                )
+                            ],
+                        )
+
+                        compare_labels = [
+                            fresh_block_label(
+                                f"__indirectbr_{stem}_phi{index}_cmp"
+                            )
+                            for index in range(1, len(edge_labels))
+                        ]
+                        for index, (target_label, edge_label) in enumerate(
+                            edge_labels
+                        ):
+                            false_label = (
+                                compare_labels[index]
+                                if index < len(compare_labels)
+                                else fallback_label
+                            )
+                            branch = muir.Br(
+                                muir.Width.I64,
+                                muir.Cond.EQ,
+                                dynamic_address,
+                                muir.BlockAddr(fn.name, target_label),
+                                muir.Target(label=edge_label),
+                                muir.Target(label=false_label),
+                            )
+                            if index == 0:
+                                out.append(branch)
+                            else:
+                                compare_label = compare_labels[index - 1]
+                                out_blocks[compare_label] = muir.Block(
+                                    compare_label, [branch]
+                                )
+
+                        extra_blocks_after[block.label].extend(compare_labels)
+                        extra_blocks_after[block.label].extend(
+                            edge_label for _target, edge_label in edge_labels
+                        )
+                        extra_blocks_after[block.label].append(fallback_label)
+
                     stats.lowered_indirectbr += 1
                     continue
 
@@ -3330,7 +3435,7 @@ def legalize_function(
                     "phi",
                     f"unknown predecessor: {pred}",
                 )
-            switch_edges = switch_edge_blocks.get((resolved_pred, target))
+            switch_edges = pre_split_edge_blocks.get((resolved_pred, target))
             if switch_edges:
                 # Switch lowering has already split every selected edge.
                 for edge_pred in switch_edges:
