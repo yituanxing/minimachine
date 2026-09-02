@@ -141,9 +141,16 @@ jobs:
       - name: Assert real BusyBox frontier
         run: |
           grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/busybox-hot.log
-          ! grep -F 'program cache lowering fingerprint mismatch' build/busybox-hot.log
-          ! grep -F 'checkpoint image fingerprint mismatch' build/busybox-hot.log
-          ! grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-hot.log
+          for pattern in \
+            'program cache lowering fingerprint mismatch' \
+            'checkpoint image fingerprint mismatch' \
+            'BOOT_EXEC_BLOCKED '; do
+            if grep -F "$pattern" build/busybox-hot.log >/dev/null; then
+              echo "unexpected BusyBox hot failure marker: $pattern"
+              grep -F "$pattern" build/busybox-hot.log | tail -1
+              exit 1
+            fi
+          done
           grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' build/busybox-hot.log
 
       - name: Upload BusyBox hot evidence
