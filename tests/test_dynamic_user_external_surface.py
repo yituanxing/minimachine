@@ -210,6 +210,84 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(vm.memory.read(0xAB2000, 64), 0)
         self.assertNotIn(0x2000, vm.linux_user_fork_continuations)
 
+    def test_exit_and__exit_route_through_linux_task_exit(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+        vm.linux_current_task = 0xBEEF
+        calls = []
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            calls.append(args)
+            return runner.HOST_CONTROL_TRANSFER
+
+        runner.user_syscall = fake_user_syscall
+        for original, status in (("exit", 7), ("_exit", 9)):
+            with self.subTest(original=original):
+                callback = runner._user_libc_callback(
+                    f"__mm_user_ext_{original}",
+                    None,
+                )
+                self.assertIsNotNone(callback)
+                assert callback is not None
+                self.assertIs(
+                    callback(vm, (status,)),
+                    runner.HOST_CONTROL_TRANSFER,
+                )
+                self.assertEqual(vm._user_exit_task, 0xBEEF)
+                self.assertEqual(vm._user_exit_status, status)
+
+        self.assertEqual(
+            calls,
+            [
+                (93, 7, 0, 0, 0, 0, 0),
+                (93, 9, 0, 0, 0, 0, 0),
+            ],
+        )
+
+    def test_exiting_user_task_switch_marks_nonreturning_transfer(self):
+        runner = load_runner()
+
+        fn = muir.Function(
+            "resume_parent",
+            [muir.Block("entry", [muir.Ret(None)])],
+            set(),
+        )
+        expanded, _ = expand_function(fn)
+        program = Program((lower_function(expanded),))
+        vm = program.new_vm()
+
+        prev = 0xB100
+        next_task = 0xB200
+        resume_sp = 0xAB0000
+        result_ptr = 0xAB1000
+        resume_pc = program.block_code[("resume_parent", "entry")]
+        vm.linux_task_contexts = {
+            next_task: (resume_sp, resume_pc, result_ptr),
+        }
+        vm._preserved_call_depth = 1
+        vm._user_exit_task = prev
+        vm._user_exit_status = 23
+
+        vm.memory.write(vm.sp + runner.RESULT_COUNT, 64, 1)
+        vm.memory.write(vm.sp + runner.CALLER_SP, 64, 0xAC0000)
+        vm.memory.write(vm.sp + runner.RET_PC, 64, program.halt_code)
+        vm.memory.write(vm.sp + runner.RESULT_PTR, 64, 0xAC1000)
+
+        result = runner.linux_ecall(
+            vm,
+            (2, prev, next_task, 0, 0, 0),
+        )
+        self.assertIs(result, runner.HOST_CONTROL_TRANSFER)
+        self.assertEqual(vm.linux_current_task, next_task)
+        self.assertEqual(vm.current_function, "resume_parent")
+        self.assertEqual(vm.sp, resume_sp)
+        self.assertEqual(vm.memory.read(result_ptr, 64), prev)
+        self.assertTrue(vm._preserved_nonreturning_transfer)
+        self.assertTrue(vm.halted)
+        self.assertEqual(vm._user_exit_task, 0)
+        self.assertEqual(vm._user_exit_status, 0)
+
     def test_execvp_searches_guest_path_and_propagates_exec_transfer(self):
         runner = load_runner()
         program = Program()
