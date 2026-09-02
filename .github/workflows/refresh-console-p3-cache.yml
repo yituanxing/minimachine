@@ -7,10 +7,18 @@ on:
     paths:
       - src/minimachine/program_cache.py
       - src/minimachine/llvm_text.py
+      - src/minimachine/layout.py
       - src/minimachine/legalize.py
       - src/minimachine/abi.py
       - src/minimachine/lower_p3.py
-      - scripts/refresh-p3-cache-function.py
+      - src/minimachine/muir.py
+      - src/minimachine/p3.py
+      - src/minimachine/verify.py
+      - src/minimachine/image.py
+      - linux-overlay/arch/minimachine/**
+      - scripts/build-minimachine-initramfs.py
+      - scripts/check-minimachine-boot.sh
+      - .github/workflows/initramfs-build.yml
       - .github/workflows/refresh-console-p3-cache.yml
 
 permissions:
@@ -24,21 +32,51 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download latest qualified Linux artifact
+      - name: Download exact qualified Linux artifact
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p build
-          run_id="$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow initramfs-build.yml \
-            --branch work/native-p3-vm \
-            --status success \
-            --limit 1 \
-            --json databaseId \
-            --jq '.[0].databaseId')"
+          lowering_sha="$(git log -1 --format=%H -- \
+            src/minimachine/program_cache.py \
+            src/minimachine/llvm_text.py \
+            src/minimachine/layout.py \
+            src/minimachine/legalize.py \
+            src/minimachine/abi.py \
+            src/minimachine/lower_p3.py \
+            src/minimachine/muir.py \
+            src/minimachine/p3.py \
+            src/minimachine/verify.py \
+            src/minimachine/image.py)"
+          linux_sha="$(git log -1 --format=%H -- \
+            linux-overlay/arch/minimachine \
+            scripts/build-minimachine-initramfs.py \
+            scripts/check-minimachine-boot.sh \
+            .github/workflows/initramfs-build.yml)"
+          test -n "$lowering_sha"
+          test -n "$linux_sha"
+
+          run_id=""
+          for attempt in $(seq 1 60); do
+            run_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow initramfs-build.yml \
+              --branch work/native-p3-vm \
+              --limit 50 \
+              --json databaseId,headSha,status,conclusion \
+              --jq ".[] | select(.headSha == \"$linux_sha\" and .status == \"completed\" and .conclusion == \"success\") | .databaseId" \
+              | head -1)"
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            echo "waiting for Linux-matched initramfs attempt=$attempt sha=$linux_sha"
+            sleep 10
+          done
           test -n "$run_id"
-          echo "LINUX_RUN_ID=$run_id" | tee build/input-run.env
+
+          printf 'LOWERING_SHA=%s\nLINUX_SHA=%s\nLINUX_RUN_ID=%s\n' \
+            "$lowering_sha" "$linux_sha" "$run_id" | tee build/input-run.env
+
           gh run download "$run_id" \
             --repo "$GITHUB_REPOSITORY" \
             --name "minimachine-linux-initramfs-$run_id" \
