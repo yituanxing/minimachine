@@ -384,6 +384,7 @@ class NativeVM(VM):
         self._packed_host_codes = set(program.host_code)
         self._watch_codes: tuple[int, ...] = ()
         self.native_report_every = 0
+        self.native_report_slots: tuple[str, ...] = ()
         self._load_initial_memory(program)
         self._synced_data_end = program._next_data
 
@@ -903,13 +904,34 @@ class NativeVM(VM):
                         if caller_pair is not None
                         else "<host-or-root>"
                     )
+                    slot_parts = []
+                    linked = (
+                        self.program.functions.get(self.current_function)
+                        if self.current_function is not None
+                        else None
+                    )
+                    if linked is not None:
+                        for slot_name in self.native_report_slots:
+                            offset = linked.slot_offsets.get(slot_name)
+                            if offset is None:
+                                continue
+                            value = self.memory.read(self.sp + offset, 64)
+                            slot_parts.append(
+                                f"{slot_name}=0x{value:x}"
+                            )
+                    slot_text = (
+                        " slots=" + ",".join(slot_parts)
+                        if slot_parts
+                        else ""
+                    )
                     print(
                         "BOOT_EXEC_NATIVE_PROGRESS "
                         f"steps={self.steps} "
                         f"function={self.current_function} "
                         f"block={self.current_block} ip={self.ip} "
                         f"sp=0x{self.sp:x} caller_sp=0x{caller_sp:x} "
-                        f"ret_pc=0x{ret_pc:x} caller={caller} "
+                        f"ret_pc=0x{ret_pc:x} caller={caller}"
+                        f"{slot_text} "
                         f"chunk_steps={delta_steps} "
                         f"chunk_s={delta_s:.3f} "
                         f"msteps_s={msteps:.3f}",
