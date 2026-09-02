@@ -183,6 +183,8 @@ console_initcall(minimachine_printk_console_init);
 
 static unsigned long minimachine_irq_state;
 
+static void __noreturn minimachine_enter_userspace(struct pt_regs *regs);
+
 /*
  * Semantic user -> kernel syscall boundary.
  *
@@ -215,6 +217,22 @@ long __used minimachine_user_syscall(unsigned long nr,
 		return ksys_write((unsigned int)arg0,
 				  (const char __user *)arg1,
 				  (size_t)arg2);
+	case __NR_execve: {
+		long ret = sys_execve(
+			(const char __user *)arg0,
+			(const char __user *const __user *)arg1,
+			(const char __user *const __user *)arg2);
+
+		/*
+		 * A successful exec never returns to the old userspace syscall
+		 * continuation.  exec has already installed the new image and
+		 * start_thread() has populated current_pt_regs(); perform the same
+		 * architecture return-to-user handoff used by ret_from_fork.
+		 */
+		if (ret)
+			return ret;
+		minimachine_enter_userspace(current_pt_regs());
+	}
 	case __NR_exit:
 	case __NR_exit_group:
 		do_exit((long)arg0);
