@@ -3304,30 +3304,47 @@ def legalize_function(
 
         out_blocks[block.label] = muir.Block(block.label, out)
 
-    # Insert PHI edge copies immediately before predecessor terminators.
-    copies_by_pred: dict[str, list[tuple[muir.Slot, muir.Value, muir.Width]]] = defaultdict(list)
+    # Lower LLVM PHIs as edge-specific parallel copies.  Copies on an
+    # unconditional edge may execute immediately before its terminator.  A
+    # conditional predecessor is different: its PHI copies belong to only one
+    # selected successor and may also overwrite values used by the branch
+    # predicate.  Split such edges so the copies execute after the predicate
+    # has been evaluated and only on the chosen path.
+    copies_by_edge: dict[
+        tuple[str, str],
+        list[tuple[muir.Slot, muir.Value, muir.Width]],
+    ] = defaultdict(list)
     for target, phis in phis_by_target.items():
         for dst, src, pred, width in phis:
             resolved_pred = pred
-            if resolved_pred not in out_blocks and resolved_pred.isdigit() and "entry" in out_blocks:
+            if (
+                resolved_pred not in out_blocks
+                and resolved_pred.isdigit()
+                and "entry" in out_blocks
+            ):
                 resolved_pred = "entry"
             if resolved_pred not in out_blocks:
-                raise LegalizeError(fn.name, target, "phi", f"unknown predecessor: {pred}")
+                raise LegalizeError(
+                    fn.name,
+                    target,
+                    "phi",
+                    f"unknown predecessor: {pred}",
+                )
             switch_edges = switch_edge_blocks.get((resolved_pred, target))
             if switch_edges:
+                # Switch lowering has already split every selected edge.
                 for edge_pred in switch_edges:
-                    copies_by_pred[edge_pred].append((dst, src, width))
+                    copies_by_edge[(edge_pred, target)].append(
+                        (dst, src, width)
+                    )
             else:
-                copies_by_pred[resolved_pred].append((dst, src, width))
+                copies_by_edge[(resolved_pred, target)].append(
+                    (dst, src, width)
+                )
 
-    for pred, copies in copies_by_pred.items():
-        block = out_blocks[pred]
-        if not block.instructions:
-            raise LegalizeError(fn.name, pred, "phi", "predecessor has no terminator")
-        term = block.instructions[-1]
-        if not isinstance(term, (muir.Br, muir.Ret, muir.Trap, muir.ArchEscape)):
-            raise LegalizeError(fn.name, pred, "phi", "predecessor terminator is not lowered")
-
+    def lower_phi_copies(
+        copies: list[tuple[muir.Slot, muir.Value, muir.Width]],
+    ) -> list[muir.Instr]:
         prelude: list[muir.Instr] = []
         normalized_copies: list[
             tuple[muir.Slot, muir.Value, muir.Width]
@@ -3367,8 +3384,89 @@ def legalize_function(
         for move in moves:
             if isinstance(move.dst, muir.Slot):
                 frame_slots.add(move.dst.name)
-        block.instructions[-1:-1] = prelude + moves
         stats.phi_edge_moves += len(moves)
+        return prelude + moves
+
+    for (pred, target), copies in copies_by_edge.items():
+        block = out_blocks[pred]
+        if not block.instructions:
+            raise LegalizeError(
+                fn.name, pred, "phi", "predecessor has no terminator"
+            )
+        term = block.instructions[-1]
+        if not isinstance(
+            term,
+            (muir.Br, muir.Ret, muir.Trap, muir.ArchEscape),
+        ):
+            raise LegalizeError(
+                fn.name,
+                pred,
+                "phi",
+                "predecessor terminator is not lowered",
+            )
+
+        edge_instructions = lower_phi_copies(copies)
+
+        if not isinstance(term, muir.Br):
+            # Preserve the existing behavior for architecture escape edges.
+            # Direct LLVM branches, including all normal PHI CFG edges, use
+            # the precise edge handling below.
+            block.instructions[-1:-1] = edge_instructions
+            continue
+
+        true_match = (
+            term.true_target.is_direct()
+            and term.true_target.label == target
+        )
+        false_match = (
+            term.false_target.is_direct()
+            and term.false_target.label == target
+        )
+        if not true_match and not false_match:
+            raise LegalizeError(
+                fn.name,
+                target,
+                "phi",
+                f"predecessor {pred} does not branch to target",
+            )
+
+        if true_match and false_match:
+            # P3 represents an unconditional jump as a branch whose two
+            # targets are identical.  The selected edge is therefore known.
+            block.instructions[-1:-1] = edge_instructions
+            continue
+
+        stem = _sanitize(pred) or "entry"
+        target_stem = _sanitize(target) or "target"
+        edge_label = fresh_block_label(
+            f"__phi_{stem}_to_{target_stem}_edge"
+        )
+        real_target = muir.Target(label=target)
+        out_blocks[edge_label] = muir.Block(
+            edge_label,
+            edge_instructions
+            + [
+                muir.Br(
+                    muir.Width.I8,
+                    muir.Cond.EQ,
+                    muir.Imm(0),
+                    muir.Imm(0),
+                    real_target,
+                    real_target,
+                )
+            ],
+        )
+        extra_blocks_after[pred].append(edge_label)
+
+        split_target = muir.Target(label=edge_label)
+        block.instructions[-1] = muir.Br(
+            term.width,
+            term.cond,
+            term.a,
+            term.b,
+            split_target if true_match else term.true_target,
+            split_target if false_match else term.false_target,
+        )
 
     ordered_blocks: list[muir.Block] = []
     for text_block in fn.blocks:
