@@ -166,6 +166,28 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             (169, seen["args"][1], 0, 0, 0, 0, 0),
         )
 
+    def test_ioctl_libc_wrapper_uses_linux_syscall(self):
+        runner = load_runner()
+        program = Program()
+        vm = program.new_vm()
+        seen = {}
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            seen["args"] = args
+            return 7
+
+        runner.user_syscall = fake_user_syscall
+        callback = runner._user_libc_callback("__mm_user_ext_ioctl", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        self.assertEqual(callback(vm, (0, 0x5600, 0xD400)), 7)
+        self.assertEqual(
+            seen["args"],
+            (29, 0, 0x5600, 0xD400, 0, 0, 0),
+        )
+
     def test_reboot_libc_wrapper_uses_linux_magic_syscall(self):
         runner = load_runner()
         program = Program()
