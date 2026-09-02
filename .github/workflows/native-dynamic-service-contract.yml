@@ -8,9 +8,11 @@ on:
       - native/p3vm.c
       - src/minimachine/native_vm.py
       - src/minimachine/vm.py
+      - src/minimachine/user_bundle.py
       - scripts/run-minimachine-linux.py
       - tests/test_dynamic_user_external_surface.py
       - tests/test_user_external_namespace.py
+      - tests/test_user_namespace.py
       - .github/workflows/native-dynamic-service-contract.yml
 
 permissions:
@@ -35,4 +37,5 @@ jobs:
           python3 -m unittest \
             tests.test_dynamic_user_external_surface \
             tests.test_user_external_namespace \
+            tests.test_user_namespace \
             -v
