@@ -2092,6 +2092,35 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_vsnprintf
 
+    if original == "getenv":
+        def user_getenv(vm, args):
+            if len(args) != 1:
+                raise VMError("getenv expects name")
+            name_ptr = int(args[0])
+            name = read_user_cstring(vm, name_ptr, 4096)
+            if not name or b"=" in name:
+                return 0
+
+            environ_symbol = f"{external_prefix}environ"
+            environ_addr = vm.program.symbol_addresses.get(environ_symbol)
+            if environ_addr is None:
+                return 0
+            envp = vm.memory.read(environ_addr, 64)
+            if not envp:
+                return 0
+
+            prefix = name + b"="
+            for index in range(4096):
+                entry = vm.memory.read(envp + index * 8, 64)
+                if entry == 0:
+                    return 0
+                raw = read_user_cstring(vm, entry, 1 << 16)
+                if raw.startswith(prefix):
+                    return entry + len(prefix)
+            raise VMError("getenv environment vector is not terminated")
+
+        return user_getenv
+
     if original == "time":
         def user_time(vm, args):
             if len(args) != 1:
