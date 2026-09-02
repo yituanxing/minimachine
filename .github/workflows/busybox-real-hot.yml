@@ -1,0 +1,156 @@
+name: MiniMachine BusyBox Real Software Hot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - scripts/run-minimachine-linux.py
+      - .github/workflows/busybox-real-hot.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: busybox-real-hot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-hot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Find latest successful real BusyBox cold checkpoint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p cold
+          found=""
+          for run_id in $(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow busybox-multicall-cold.yml \
+            --branch work/native-p3-vm \
+            --limit 10 \
+            --json databaseId \
+            --jq '.[].databaseId'); do
+            rm -rf cold/*
+            if gh run download "$run_id" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "minimachine-busybox-real-cold-$run_id" \
+              --dir cold >/dev/null 2>&1; then
+              test -s cold/input-runs.env || continue
+              test -s cold/busybox-real-init.cpio || continue
+              test -s cold/busybox-real-kernel-execve.chk.gz || continue
+              if grep -F 'P3_REFRESH_RUN_ID=' cold/input-runs.env >/dev/null; then
+                found="$run_id"
+                break
+              fi
+            fi
+          done
+          test -n "$found"
+          echo "BUSYBOX_COLD_RUN_ID=$found" | tee build/hot-inputs.env
+          cat cold/input-runs.env | tee -a build/hot-inputs.env
+
+      - name: Download exact Linux, P3 cache, and BusyBox bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -a
+          . build/hot-inputs.env
+          set +a
+
+          test -n "$P3_REFRESH_RUN_ID"
+          test -n "$LINUX_RUN_ID"
+          test -n "$BUSYBOX_RUN_ID"
+
+          gh run download "$P3_REFRESH_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-p3-console-current-$P3_REFRESH_RUN_ID" \
+            --dir current-cache
+
+          gh run download "$LINUX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$LINUX_RUN_ID" \
+            --dir linux
+
+          gh run download "$BUSYBOX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-multicall-$BUSYBOX_RUN_ID" \
+            --dir busybox
+
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+          test -s linux/llvm/linked.ll
+          test -s busybox/busybox-multicall.bflt
+
+      - name: Replay real BusyBox init and shell
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+        run: |
+          set -o pipefail
+          set +e
+          {
+            echo 'echo MINIMACHINE_REAL_EXTERNAL_BEGIN'
+            echo '/bin/uname -s'
+            echo '/bin/ls /etc'
+            echo '/bin/cat /etc/inittab'
+            echo 'echo MINIMACHINE_REAL_EXTERNAL_END'
+            echo 'exit'
+          } | \
+          /usr/bin/time -f 'BUSYBOX_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 300 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/busybox-hot.log
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "BUSYBOX_HOT_STATUS=$status" | tee -a build/busybox-hot.log
+
+      - name: Report BusyBox hot frontier
+        if: always()
+        run: |
+          cat build/hot-inputs.env || true
+          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_FORK|USER_EXIT|BLOCKED|HALTED)|MINIMACHINE_REAL_|BUSYBOX_HOT_' \
+            build/busybox-hot.log | tail -700 || true
+
+          if grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-hot.log >/dev/null; then
+            echo BUSYBOX_HOT_FRONTIER=blocked
+            grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-hot.log | tail -1
+          elif grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' build/busybox-hot.log >/dev/null; then
+            echo BUSYBOX_HOT_FRONTIER=external-software-passed
+          else
+            echo BUSYBOX_HOT_FRONTIER=before-external-software-end
+          fi
+
+      - name: Assert checkpoint compatibility
+        run: |
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/busybox-hot.log
+          ! grep -F 'program cache lowering fingerprint mismatch' build/busybox-hot.log
+          ! grep -F 'checkpoint image fingerprint mismatch' build/busybox-hot.log
+
+      - name: Upload BusyBox hot evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-real-hot-${{ github.run_id }}
+          path: |
+            build/hot-inputs.env
+            build/busybox-hot.log
+          if-no-files-found: warn
+          retention-days: 7
