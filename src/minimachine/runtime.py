@@ -63,7 +63,12 @@ def _binary_integer(op: str, bits: int, a: int, b: int) -> int:
         return (a * b) & mask
     if op in {"shl", "lshr", "ashr"}:
         if b >= bits:
-            raise VMError(f"LLVM poison shift amount: {b} for i{bits}")
+            # LLVM defines an oversized shift result as poison. Poison may
+            # exist speculatively (for example in an unselected arm of a
+            # select) without making the execution undefined. P3 is a
+            # concrete machine, so choose one deterministic refinement
+            # instead of trapping at poison production time.
+            return 0
         if op == "shl":
             return (a << b) & mask
         if op == "lshr":
@@ -71,15 +76,18 @@ def _binary_integer(op: str, bits: int, a: int, b: int) -> int:
         return (_signed(a, bits) >> b) & mask
     if op in {"udiv", "urem"}:
         if b == 0:
-            raise VMError("LLVM poison unsigned division by zero")
+            # Division by zero is likewise an LLVM poison-producing
+            # operation. Concretize the poison; any later use on an
+            # actually-undefined path is unconstrained by the source IR.
+            return 0
         return (a // b if op == "udiv" else a % b) & mask
     if op in {"sdiv", "srem"}:
         sb = _signed(b, bits)
         sa = _signed(a, bits)
         if sb == 0:
-            raise VMError("LLVM poison signed division by zero")
+            return 0
         if sa == -(1 << (bits - 1)) and sb == -1:
-            raise VMError("LLVM poison signed division overflow")
+            return 0
         # LLVM signed division truncates toward zero.
         q = abs(sa) // abs(sb)
         if (sa < 0) != (sb < 0):
