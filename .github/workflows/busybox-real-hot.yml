@@ -67,7 +67,6 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --workflow busybox-multicall-cold.yml \
               --branch work/native-p3-vm \
-              --status success \
               --limit 20 \
               --json databaseId \
               --jq '.[].databaseId'); do
