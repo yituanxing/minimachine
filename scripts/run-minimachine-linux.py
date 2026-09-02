@@ -3130,71 +3130,42 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return result
         return user_reboot
 
-    if original == "_exit":
+    if original in {"exit", "_exit"}:
         def user_exit(vm, args):
             if len(args) != 1:
-                raise VMError("_exit expects status")
+                raise VMError(f"{original} expects status")
             status = int(args[0]) & 0xFF
             vm.user_exit_status = status
-            parsefile_symbol = vm.program.symbol_addresses.get(
-                "__mm_user_g_parsefile"
+            vm._user_exit_task = int(
+                getattr(vm, "linux_current_task", 0) or 0
             )
-            if parsefile_symbol is not None:
-                parsefile = vm.memory.read(parsefile_symbol, 64)
-                if parsefile:
-                    next_ptr = vm.memory.read(parsefile + 24, 64)
-                    buf_ptr = vm.memory.read(parsefile + 32, 64)
-                    preview = bytearray()
-                    if next_ptr:
-                        for index in range(48):
-                            byte = vm.memory.read(next_ptr + index, 8)
-                            if byte == 0:
-                                break
-                            preview.append(byte)
-                    print(
-                        "BOOT_EXEC_USER_PARSEFILE_EXIT "
-                        f"parsefile=0x{parsefile:x} "
-                        f"linno={vm.memory.read(parsefile + 8, 32)} "
-                        f"fd={vm.memory.read(parsefile + 12, 32)} "
-                        f"left_line={vm.memory.read(parsefile + 16, 32)} "
-                        f"left_buffer={vm.memory.read(parsefile + 20, 32)} "
-                        f"next=0x{next_ptr:x} buf=0x{buf_ptr:x} "
-                        f"consumed={next_ptr - buf_ptr if next_ptr and buf_ptr else -1} "
-                        f"lastc0={vm.memory.read(parsefile + 120, 32)} "
-                        f"lastc1={vm.memory.read(parsefile + 124, 32)} "
-                        f"unget={vm.memory.read(parsefile + 128, 32)} "
-                        f"preview={bytes(preview)!r}",
-                        flush=True,
-                    )
-            evalskip_symbol = vm.program.symbol_addresses.get(
-                "__mm_user_evalskip"
-            )
-            misc_symbol = vm.program.symbol_addresses.get(
-                "__mm_user_ash_ptr_to_globals_misc"
-            )
-            evalskip = (
-                vm.memory.read(evalskip_symbol, 8)
-                if evalskip_symbol is not None else -1
-            )
-            misc = (
-                vm.memory.read(misc_symbol, 64)
-                if misc_symbol is not None else 0
-            )
-            nflag = vm.memory.read(misc + 98, 8) if misc else -1
-            sflag = vm.memory.read(misc + 99, 8) if misc else -1
+            vm._user_exit_status = status
             print(
-                "BOOT_EXEC_USER_ASH_CONTROL_EXIT "
-                f"evalskip={evalskip} nflag={nflag} sflag={sflag} "
-                f"misc=0x{misc:x}",
+                "BOOT_EXEC_USER_EXIT_REQUEST "
+                f"kind={original} status={status} "
+                f"task=0x{vm._user_exit_task:x}",
                 flush=True,
             )
-            vm.halted = True
-            print(
-                "BOOT_EXEC_USER_EXIT "
-                f"status={status}",
-                flush=True,
+            raw = user_syscall(
+                vm,
+                (93, status, 0, 0, 0, 0, 0),
             )
-            return HOST_CONTROL_TRANSFER
+            if raw is HOST_CONTROL_TRANSFER:
+                return HOST_CONTROL_TRANSFER
+
+            # Linux do_exit() is noreturn. If the semantic syscall returns,
+            # clear the arm and report the unexpected result rather than
+            # silently halting the whole VM.
+            vm._user_exit_task = 0
+            vm._user_exit_status = 0
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+            raise VMError(
+                f"Linux exit syscall unexpectedly returned {signed}"
+            )
+
         return user_exit
 
     if original == "execvp":
@@ -3594,6 +3565,30 @@ def linux_ecall(vm, args: tuple[int, ...]):
             contexts = {}
             vm.linux_task_contexts = contexts
 
+        def arm_exit_transfer_if_needed() -> None:
+            exiting_task = int(
+                getattr(vm, "_user_exit_task", 0) or 0
+            )
+            if (
+                exiting_task
+                and exiting_task == prev
+                and getattr(vm, "_preserved_call_depth", 0)
+            ):
+                status = int(
+                    getattr(vm, "_user_exit_status", 0) or 0
+                )
+                vm._preserved_nonreturning_transfer = True
+                vm._user_exit_task = 0
+                vm._user_exit_status = 0
+                vm.halted = True
+                print(
+                    "BOOT_EXEC_USER_EXIT_SWITCH "
+                    f"prev=0x{prev:x} next=0x{next_task:x} "
+                    f"status={status} "
+                    f"depth={vm._preserved_call_depth}",
+                    flush=True,
+                )
+
         # Save where __switch_to() must continue when this task is resumed,
         # together with the system-call result slot carrying the last task.
         contexts[prev] = (
@@ -3610,6 +3605,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
             vm.sp = resume_sp
             vm.halted = False
             vm._set_code(resume_pc)
+            arm_exit_transfer_if_needed()
             return HOST_CONTROL_TRANSFER
 
         if not fresh_sp:
@@ -3668,6 +3664,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
             stack_top=shadow_top,
             result_count=0,
         )
+        arm_exit_transfer_if_needed()
         return HOST_CONTROL_TRANSFER
 
     if service == 3:
