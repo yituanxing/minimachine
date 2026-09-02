@@ -359,6 +359,30 @@ def helper_callback(symbol: str):
 
         return llvm_fabs
 
+    m = re.fullmatch(r"__mm_llvm_(ceil|floor)_f(32|64)", symbol)
+    if m:
+        op, bits_text = m.groups()
+        bits = int(bits_text)
+
+        def fp_round_integral(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects 1 argument")
+            value = _fp_decode(bits, args[0])
+
+            # LLVM's ceil/floor intrinsics follow IEEE-754 behavior:
+            # NaN/inf pass through, and signed zero must be preserved.
+            if math.isnan(value) or math.isinf(value) or value == 0.0:
+                rounded = value
+            elif op == "ceil":
+                rounded = float(math.ceil(value))
+                if rounded == 0.0 and math.copysign(1.0, value) < 0.0:
+                    rounded = -0.0
+            else:
+                rounded = float(math.floor(value))
+            return _fp_encode(bits, rounded)
+
+        return fp_round_integral
+
     m = re.fullmatch(r"__mm_llvm_fmuladd_f(32|64)", symbol)
     if m:
         bits = int(m.group(1))
