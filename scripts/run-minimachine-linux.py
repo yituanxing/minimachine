@@ -1011,6 +1011,21 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_stat
 
+    if original == "ioctl":
+        def user_ioctl(vm, args):
+            if len(args) not in {2, 3}:
+                raise VMError("ioctl expects fd,request[,arg]")
+            fd = int(args[0])
+            request = int(args[1])
+            arg = int(args[2]) if len(args) == 3 else 0
+            raw = user_syscall(
+                vm,
+                (29, fd, request, arg, 0, 0, 0),
+            )
+            return libc_linux_result(vm, raw)
+
+        return user_ioctl
+
     if original == "isatty":
         def user_isatty(vm, args):
             if len(args) != 1:
@@ -2891,6 +2906,7 @@ def user_syscall(vm, args: tuple[int, ...]):
     fallback = {
         17: ("__se_sys_getcwd", 2),
         25: ("__se_sys_fcntl", 3),
+        29: ("__se_sys_ioctl", 3),
         49: ("__se_sys_chdir", 1),
         56: ("__se_sys_openat", 4),
         57: ("__se_sys_close", 1),
