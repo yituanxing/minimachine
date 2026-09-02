@@ -7,11 +7,20 @@ on:
     paths:
       - src/minimachine/program_cache.py
       - src/minimachine/llvm_text.py
+      - src/minimachine/layout.py
       - src/minimachine/legalize.py
       - src/minimachine/abi.py
       - src/minimachine/lower_p3.py
-      - scripts/refresh-p3-cache-function.py
+      - src/minimachine/muir.py
+      - src/minimachine/p3.py
+      - src/minimachine/verify.py
+      - src/minimachine/image.py
+      - linux-overlay/arch/minimachine/**
+      - scripts/build-minimachine-initramfs.py
+      - scripts/check-minimachine-boot.sh
       - scripts/build-minimachine-busybox-rootfs.py
+      - .github/workflows/initramfs-build.yml
+      - .github/workflows/refresh-console-p3-cache.yml
       - .github/workflows/busybox-multicall-cold.yml
 
 permissions:
@@ -37,51 +46,81 @@ jobs:
           gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
             native/p3vm.c -o build/libminimachine_p3vm.so
 
-      - name: Download current-lowering Linux cache and exact image
+      - name: Download generation-matched Linux cache and exact image
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           lowering_sha="$(git log -1 --format=%H -- \
             src/minimachine/program_cache.py \
             src/minimachine/llvm_text.py \
+            src/minimachine/layout.py \
             src/minimachine/legalize.py \
             src/minimachine/abi.py \
             src/minimachine/lower_p3.py \
-            scripts/refresh-p3-cache-function.py)"
+            src/minimachine/muir.py \
+            src/minimachine/p3.py \
+            src/minimachine/verify.py \
+            src/minimachine/image.py)"
+          linux_sha="$(git log -1 --format=%H -- \
+            linux-overlay/arch/minimachine \
+            scripts/build-minimachine-initramfs.py \
+            scripts/check-minimachine-boot.sh \
+            .github/workflows/initramfs-build.yml)"
           test -n "$lowering_sha"
+          test -n "$linux_sha"
           echo "LOWERING_SHA=$lowering_sha"
+          echo "LINUX_SHA=$linux_sha"
 
           refresh_id=""
           for attempt in $(seq 1 60); do
-            refresh_id="$(gh run list \
+            for candidate_id in $(gh run list \
               --repo "$GITHUB_REPOSITORY" \
               --workflow refresh-console-p3-cache.yml \
               --branch work/native-p3-vm \
-              --limit 50 \
-              --json databaseId,headSha,status,conclusion \
-              --jq ".[] | select(.headSha == \"$lowering_sha\" and .status == \"completed\" and .conclusion == \"success\") | .databaseId" \
-              | head -1)"
+              --status success \
+              --limit 30 \
+              --json databaseId \
+              --jq '.[].databaseId'); do
+              rm -rf candidate-cache
+              if ! gh run download "$candidate_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "minimachine-linux-p3-console-current-$candidate_id" \
+                --dir candidate-cache >/dev/null 2>&1; then
+                continue
+              fi
+              test -s candidate-cache/input-run.env || continue
+              candidate_lowering="$(sed -n 's/^LOWERING_SHA=//p' candidate-cache/input-run.env)"
+              candidate_linux="$(sed -n 's/^LINUX_SHA=//p' candidate-cache/input-run.env)"
+              if [ "$candidate_lowering" = "$lowering_sha" ] && \
+                 [ "$candidate_linux" = "$linux_sha" ]; then
+                refresh_id="$candidate_id"
+                rm -rf current-cache
+                mv candidate-cache current-cache
+                break
+              fi
+            done
             if [ -n "$refresh_id" ]; then
               break
             fi
-            echo "waiting for lowering-matched P3 refresh attempt=$attempt sha=$lowering_sha"
+            echo "waiting for generation-matched P3 refresh attempt=$attempt lowering=$lowering_sha linux=$linux_sha"
             sleep 10
           done
           test -n "$refresh_id"
-          echo "LOWERING_REFRESH_RUN_ID=$refresh_id"
-
-          gh run download "$refresh_id" \
-            --repo "$GITHUB_REPOSITORY" \
-            --name "minimachine-linux-p3-console-current-$refresh_id" \
-            --dir current-cache
 
           test -s current-cache/input-run.env
           test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
           . current-cache/input-run.env
+          test "$LOWERING_SHA" = "$lowering_sha"
+          test "$LINUX_SHA" = "$linux_sha"
           test -n "$LINUX_RUN_ID"
 
-          printf 'LOWERING_SHA=%s\nP3_REFRESH_RUN_ID=%s\nLINUX_RUN_ID=%s\n' \
-            "$lowering_sha" "$refresh_id" "$LINUX_RUN_ID" | tee build/input-runs.env
+          linux_head="$(gh run view "$LINUX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json headSha --jq '.headSha')"
+          test "$linux_head" = "$linux_sha"
+
+          printf 'LOWERING_SHA=%s\nLINUX_SHA=%s\nP3_REFRESH_RUN_ID=%s\nLINUX_RUN_ID=%s\n' \
+            "$lowering_sha" "$linux_sha" "$refresh_id" "$LINUX_RUN_ID" | tee build/input-runs.env
 
           gh run download "$LINUX_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
