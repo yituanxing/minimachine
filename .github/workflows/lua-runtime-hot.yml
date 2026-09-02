@@ -6,6 +6,7 @@ on:
     branches: [work/native-p3-vm]
     paths:
       - src/minimachine/runtime.py
+      - src/minimachine/native_vm.py
       - scripts/run-minimachine-linux.py
       - tests/test_runtime.py
       - tests/test_user_external_namespace.py
