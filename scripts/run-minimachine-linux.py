@@ -1028,6 +1028,94 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_setvbuf
 
+    if original == "openlog":
+        def user_openlog(vm, args):
+            if len(args) != 3:
+                raise VMError("openlog expects ident,option,facility")
+            ident_ptr, option, facility = map(int, args)
+            ident = (
+                read_user_cstring(vm, ident_ptr, 256)
+                if ident_ptr
+                else b""
+            )
+            vm.user_syslog_state = {
+                "ident": ident,
+                "option": option,
+                "facility": facility,
+            }
+            print(
+                "BOOT_EXEC_USER_OPENLOG "
+                f"ident={ident.decode('utf-8', errors='replace')!r} "
+                f"option=0x{option:x} facility=0x{facility:x}",
+                flush=True,
+            )
+            return None
+
+        return user_openlog
+
+    if original == "closelog":
+        def user_closelog(vm, args):
+            if args:
+                raise VMError("closelog expects no arguments")
+            vm.user_syslog_state = None
+            return None
+
+        return user_closelog
+
+    if original in {"syslog", "vsyslog"}:
+        def user_syslog(vm, args):
+            if original == "syslog":
+                if len(args) < 2:
+                    raise VMError("syslog expects priority,format,...")
+                priority, fmt_ptr = map(int, args[:2])
+                values = iter(int(value) for value in args[2:])
+
+                def next_arg() -> int:
+                    try:
+                        return next(values)
+                    except StopIteration as exc:
+                        raise VMError(
+                            "syslog format consumes more arguments than supplied"
+                        ) from exc
+            else:
+                if len(args) != 3:
+                    raise VMError("vsyslog expects priority,format,va_list")
+                priority, fmt_ptr, cursor = map(int, args)
+
+                def next_arg() -> int:
+                    nonlocal cursor
+                    value = vm.memory.read(cursor, 64)
+                    cursor += 8
+                    return int(value)
+
+            payload = render_user_printf(vm, fmt_ptr, next_arg)
+            state = getattr(vm, "user_syslog_state", None) or {
+                "ident": b"",
+                "option": 0,
+                "facility": 0,
+            }
+            ident = bytes(state.get("ident", b""))
+            option = int(state.get("option", 0))
+            prefix = ident + (b": " if ident else b"")
+            line = prefix + payload
+            if not line.endswith(b"\n"):
+                line += b"\n"
+
+            # With no /dev/log endpoint in the guest rootfs, libc syslog
+            # calls are allowed to fail to deliver silently. Preserve the
+            # observable LOG_PERROR behavior by also writing to stderr.
+            if option & 0x20:  # LOG_PERROR
+                write_stdio_payload(vm, 2, line)
+            print(
+                "BOOT_EXEC_USER_SYSLOG "
+                f"priority=0x{priority:x} bytes={len(payload)} "
+                f"perror={1 if option & 0x20 else 0}",
+                flush=True,
+            )
+            return None
+
+        return user_syslog
+
     if original == "snprintf":
         def user_snprintf(vm, args):
             if len(args) < 3:
