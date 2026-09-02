@@ -25,6 +25,34 @@ def executable(functions):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_conditional_phi_backedge_executes_selected_edge_only(self):
+        functions, _ = legalize_module(
+            """
+            define i64 @phi_backedge(i64 %start) {
+            entry:
+              br label %loop
+            loop:
+              %i = phi i64 [ %start, %entry ], [ %next, %back ]
+              br label %back
+            back:
+              %next = add nsw i64 %i, -1
+              %done = icmp eq i64 %i, 0
+              br i1 %done, label %exit, label %loop
+            exit:
+              ret i64 %i
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("phi_backedge", (0,)),
+            (0,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function("phi_backedge", (3,)),
+            (0,),
+        )
+
     def test_direct_runtime_acceleration_rebinds_existing_memset(self):
         memset_fn = muir.Function(
             "memset",
