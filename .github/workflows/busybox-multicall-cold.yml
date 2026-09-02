@@ -6,12 +6,15 @@ on:
     branches: [work/native-p3-vm]
     paths:
       - scripts/build-minimachine-busybox-rootfs.py
-      - scripts/run-minimachine-linux.py
       - .github/workflows/busybox-multicall-cold.yml
 
 permissions:
   contents: read
   actions: read
+
+concurrency:
+  group: busybox-real-cold-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   multicall-cold:
