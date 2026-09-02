@@ -7,6 +7,7 @@ import os
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 import re
+import struct
 import sys
 import time
 
@@ -614,6 +615,19 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     digits = digits.rjust(precision, "0")
                 piece = prefix + digits
                 numeric = True
+            elif spec in "eEfFgG":
+                raw_bits = next_arg() & ((1 << 64) - 1)
+                value = struct.unpack(
+                    "<d", raw_bits.to_bytes(8, "little")
+                )[0]
+                format_spec = "%" + flags
+                if width:
+                    format_spec += str(width)
+                if precision is not None:
+                    format_spec += "." + str(precision)
+                format_spec += spec
+                piece = format_spec % value
+                numeric = True
             elif spec == "p":
                 value = next_arg()
                 piece = "(nil)" if value == 0 else f"0x{value:x}"
@@ -735,6 +749,100 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return handle
 
         return user_fopen
+
+    if original == "getline":
+        def user_getline(vm, args):
+            if len(args) != 3:
+                raise VMError("getline expects lineptr,n,FILE*")
+            lineptr_ptr, capacity_ptr, stream = map(int, args)
+            if lineptr_ptr == 0 or capacity_ptr == 0:
+                set_errno(vm, 22)
+                return (1 << 64) - 1
+            state = stdio_state(vm, stream)
+            if state is None:
+                set_errno(vm, 9)
+                return (1 << 64) - 1
+
+            line_ptr = vm.memory.read(lineptr_ptr, 64)
+            capacity = vm.memory.read(capacity_ptr, 64)
+            allocations = getattr(vm, "user_allocations", None)
+            if allocations is None:
+                allocations = {}
+                vm.user_allocations = allocations
+
+            def ensure_capacity(required: int) -> None:
+                nonlocal line_ptr, capacity
+                if line_ptr != 0 and capacity >= required:
+                    return
+                new_capacity = max(128, int(capacity) if capacity else 0)
+                while new_capacity < required:
+                    new_capacity *= 2
+                new_ptr = vm.alloc_bytes(new_capacity, align=16)
+                if line_ptr:
+                    copy_size = min(int(capacity), required - 1)
+                    bulk_copy = getattr(vm.memory, "bulk_copy", None)
+                    if bulk_copy is not None and copy_size:
+                        bulk_copy(new_ptr, line_ptr, copy_size)
+                    else:
+                        for index in range(copy_size):
+                            vm.memory.write(
+                                new_ptr + index,
+                                8,
+                                vm.memory.read(line_ptr + index, 8),
+                            )
+                    allocations.pop(line_ptr, None)
+                allocations[new_ptr] = new_capacity
+                line_ptr = new_ptr
+                capacity = new_capacity
+                vm.memory.write(lineptr_ptr, 64, line_ptr)
+                vm.memory.write(capacity_ptr, 64, capacity)
+
+            length = 0
+            while True:
+                pushed = state.get("ungetc")
+                if pushed is not None:
+                    state["ungetc"] = None
+                    state["eof"] = False
+                    byte = int(pushed) & 0xFF
+                else:
+                    byte_ptr = vm.alloc_bytes(1, align=1)
+                    raw = user_syscall(
+                        vm,
+                        (
+                            63,  # read
+                            int(state["fd"]),
+                            byte_ptr,
+                            1,
+                            0,
+                            0,
+                            0,
+                        ),
+                    )
+                    signed = raw - (1 << 64) if raw & (1 << 63) else raw
+                    if signed < 0:
+                        state["error"] = True
+                        set_errno(vm, -signed)
+                        if length == 0:
+                            return (1 << 64) - 1
+                        break
+                    if signed == 0:
+                        state["eof"] = True
+                        if length == 0:
+                            return (1 << 64) - 1
+                        break
+                    byte = vm.memory.read(byte_ptr, 8)
+
+                ensure_capacity(length + 2)
+                vm.memory.write(line_ptr + length, 8, byte)
+                length += 1
+                if byte == 10:
+                    break
+
+            ensure_capacity(length + 1)
+            vm.memory.write(line_ptr + length, 8, 0)
+            return length
+
+        return user_getline
 
     if original == "fclose":
         def user_fclose(vm, args):
@@ -919,6 +1027,37 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return 0
 
         return user_setvbuf
+
+    if original == "snprintf":
+        def user_snprintf(vm, args):
+            if len(args) < 3:
+                raise VMError("snprintf expects buffer,size,format,...")
+            buf, size, fmt_ptr = map(int, args[:3])
+            values = iter(int(value) for value in args[3:])
+
+            def next_arg() -> int:
+                try:
+                    return next(values)
+                except StopIteration as exc:
+                    raise VMError(
+                        "snprintf format consumes more arguments than supplied"
+                    ) from exc
+
+            payload = render_user_printf(vm, fmt_ptr, next_arg)
+            if size:
+                if buf == 0:
+                    raise VMError("snprintf received null buffer with nonzero size")
+                count = min(len(payload), size - 1)
+                bulk_write = getattr(vm.memory, "bulk_write", None)
+                if bulk_write is not None and count:
+                    bulk_write(buf, payload[:count])
+                else:
+                    for offset, byte in enumerate(payload[:count]):
+                        vm.memory.write(buf + offset, 8, byte)
+                vm.memory.write(buf + count, 8, 0)
+            return len(payload)
+
+        return user_snprintf
 
     if original in {"fprintf", "vfprintf"}:
         def user_fprintf(vm, args):
