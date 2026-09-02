@@ -166,6 +166,42 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             (169, seen["args"][1], 0, 0, 0, 0, 0),
         )
 
+    def test_fwrite_and_setsid_use_linux_syscalls(self):
+        runner = load_runner()
+        program = Program()
+        vm = program.new_vm()
+        calls = []
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            calls.append(args)
+            if args[0] == 64:
+                return int(args[3])
+            if args[0] == 157:
+                return 1
+            self.fail(f"unexpected syscall {args}")
+
+        runner.user_syscall = fake_user_syscall
+        fwrite = runner._user_libc_callback("__mm_lua54_ext_fwrite", None)
+        setsid = runner._user_libc_callback("__mm_user_ext_setsid", None)
+        self.assertIsNotNone(fwrite)
+        self.assertIsNotNone(setsid)
+        assert fwrite is not None and setsid is not None
+
+        ptr = 0xD580
+        for index, byte in enumerate(b"hello"):
+            vm.memory.write(ptr + index, 8, byte)
+
+        self.assertEqual(fwrite(vm, (ptr, 1, 5, 1)), 5)
+        self.assertEqual(setsid(vm, ()), 1)
+        self.assertEqual(
+            calls,
+            [
+                (64, 1, ptr, 5, 0, 0, 0),
+                (157, 0, 0, 0, 0, 0, 0),
+            ],
+        )
+
     def test_guest_stdio_streams_share_linux_fd_state(self):
         runner = load_runner()
         program = Program()
