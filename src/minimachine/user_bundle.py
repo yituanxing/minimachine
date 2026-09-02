@@ -212,6 +212,77 @@ def namespace_user_program(
     )
 
 
+def rebase_user_program_namespace(
+    program: UserProgramImage,
+    *,
+    namespace: str,
+) -> UserProgramImage:
+    if (
+        not namespace
+        or not all(ch.isalnum() or ch == "_" for ch in namespace)
+        or namespace[0].isdigit()
+    ):
+        raise ValueError(
+            "userspace namespace must start with a letter/underscore and "
+            "contain only letters, digits, or underscores"
+        )
+    if program.image is None:
+        raise ValueError("cannot rebase userspace namespace without module image")
+
+    external_prefixes: set[str] = set()
+    for name in (
+        *program.image.external_data,
+        *program.image.external_functions,
+    ):
+        if not name.startswith("__mm_"):
+            continue
+        marker_at = name.find("_ext_", len("__mm_"))
+        if marker_at >= 0:
+            external_prefixes.add(name[: marker_at + len("_ext_")])
+    if len(external_prefixes) != 1:
+        raise ValueError(
+            "rebasing requires exactly one existing userspace external namespace"
+        )
+
+    old_external = next(iter(external_prefixes))
+    old_internal = old_external[:-len("ext_")]
+    new_internal = f"__mm_{namespace}_"
+    new_external = f"__mm_{namespace}_ext_"
+    mapping: dict[str, str] = {}
+
+    for function in program.functions:
+        if function.name.startswith(old_internal):
+            mapping[function.name] = (
+                new_internal + function.name[len(old_internal):]
+            )
+
+    for obj in program.image.objects:
+        if obj.name.startswith(old_internal):
+            mapping[obj.name] = new_internal + obj.name[len(old_internal):]
+    for alias in program.image.aliases:
+        if alias.name.startswith(old_internal):
+            mapping[alias.name] = (
+                new_internal + alias.name[len(old_internal):]
+            )
+    for name in program.image.external_data:
+        if name.startswith(old_external):
+            mapping[name] = new_external + name[len(old_external):]
+    for name in program.image.external_functions:
+        if name.startswith(old_external):
+            mapping[name] = new_external + name[len(old_external):]
+
+    return UserProgramImage(
+        entry=mapping.get(program.entry, program.entry),
+        functions=tuple(
+            _rewrite_function(function, mapping)
+            for function in program.functions
+        ),
+        image=_rewrite_image(program.image, mapping),
+        entry_args=program.entry_args,
+        runtime_helpers=program.runtime_helpers,
+    )
+
+
 def build_user_program_from_llvm(
     text: str,
     *,
