@@ -4563,6 +4563,44 @@ def probe_linux_memory_helpers(vm) -> None:
         )
 
 
+_LINUX_SEMANTIC_STACK_BYTES = 0x01000000
+_LINUX_SEMANTIC_STACK_START_GAP = 0x40000000
+
+
+def _linux_semantic_call_stack_top(vm, task: int, depth: int) -> int:
+    stacks = getattr(vm, "linux_task_semantic_stacks", None)
+    if stacks is None:
+        stacks = {}
+        vm.linux_task_semantic_stacks = stacks
+
+    key = (int(task), int(depth))
+    top = stacks.get(key)
+    if top is not None:
+        return int(top)
+
+    next_top = getattr(vm, "linux_semantic_stack_next", None)
+    if next_top is None:
+        next_top = vm.stack_top - _LINUX_SEMANTIC_STACK_START_GAP
+    next_top = int(next_top)
+    lower = next_top - _LINUX_SEMANTIC_STACK_BYTES
+    if lower <= int(vm.heap_next):
+        raise VMError(
+            "MiniMachine Linux semantic call stacks exhausted: "
+            f"task=0x{int(task):x} depth={depth} "
+            f"next_top=0x{next_top:x} heap_next=0x{int(vm.heap_next):x}"
+        )
+
+    stacks[key] = next_top
+    vm.linux_semantic_stack_next = lower
+    print(
+        "BOOT_EXEC_TASK_SEMANTIC_STACK "
+        f"task=0x{int(task):x} depth={depth} "
+        f"top=0x{next_top:x} bottom=0x{lower:x}",
+        flush=True,
+    )
+    return next_top
+
+
 def _call_linux_function_preserving_control(
     vm,
     name: str,
@@ -4597,13 +4635,32 @@ def _call_linux_function_preserving_control(
         vm.steps,
     )
     linked = vm.program.functions[name]
-    temp_stack_top = 0x0F00_0000
+    previous_depth = int(getattr(vm, "_preserved_call_depth", 0))
+
+    # Semantic Linux calls may remain parked while the scheduler runs another
+    # task (vfork is the canonical case). A single fixed temporary P3 stack
+    # therefore corrupts the parked task as soon as the child performs its own
+    # syscall. Give every Linux task and same-task nesting level an independent
+    # persistent semantic-call stack.
+    call_task = int(
+        getattr(vm, "linux_current_task", 0)
+        or (saved_current if saved_current is not None else 0)
+    )
+    task_depths = getattr(vm, "_preserved_task_depths", None)
+    if task_depths is None:
+        task_depths = {}
+        vm._preserved_task_depths = task_depths
+    task_depth = int(task_depths.get(call_task, 0))
+    task_depths[call_task] = task_depth + 1
+
+    temp_stack_top = _linux_semantic_call_stack_top(
+        vm, call_task, task_depth
+    )
     result_words = max(1, result_count)
     total = linked.frame_size + len(args) * 8 + result_words * 8
     callee_sp = temp_stack_top - total
     result_base = callee_sp + linked.frame_size + len(args) * 8
 
-    previous_depth = int(getattr(vm, "_preserved_call_depth", 0))
     vm._preserved_call_depth = previous_depth + 1
     transfer_seen = False
 
@@ -4699,6 +4756,10 @@ def _call_linux_function_preserving_control(
             getattr(vm, "_preserved_nonreturning_transfer", False)
         )
         vm._preserved_call_depth = previous_depth
+        if task_depth == 0:
+            task_depths.pop(call_task, None)
+        else:
+            task_depths[call_task] = task_depth
 
         if transfer_seen:
             # Keep the task, P3 PC/SP, scheduler contexts, and newly installed
@@ -5404,6 +5465,10 @@ def main() -> int:
     vm.stop_after_user_handoff = args.stop_after_user_handoff
     vm.linux_task_contexts = {}
     vm.linux_task_shadow_stacks = {}
+    vm.linux_task_semantic_stacks = {}
+    vm.linux_semantic_stack_next = (
+        vm.stack_top - _LINUX_SEMANTIC_STACK_START_GAP
+    )
     # Reserve the top 16 MiB for the boot task's existing P3 stack. New
     # Linux tasks receive independent P3 continuation stacks below it.
     vm.linux_shadow_stack_next = vm.stack_top - 0x01000000
