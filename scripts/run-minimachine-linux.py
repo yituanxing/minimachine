@@ -4200,13 +4200,21 @@ def user_syscall(vm, args: tuple[int, ...]):
         else:
             target, argc = spec
             if target in vm.program.functions:
-                result, = _call_linux_function_preserving_control(
+                call_result = _call_linux_function_preserving_control(
                     vm,
                     target,
                     tuple(argv[:argc]),
                     result_count=1,
                     max_extra_steps=8_000_000,
                 )
+                if call_result is HOST_CONTROL_TRANSFER:
+                    print(
+                        "BOOT_EXEC_USER_SYSCALL_FALLBACK_TRANSFER "
+                        f"nr={nr} target={target}",
+                        flush=True,
+                    )
+                    return HOST_CONTROL_TRANSFER
+                result, = call_result
                 print(
                     "BOOT_EXEC_USER_SYSCALL_FALLBACK "
                     f"nr={nr} target={target}",
