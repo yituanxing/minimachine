@@ -13,6 +13,8 @@ _LINUX_ATTRS = (
     "linux_task_contexts",
     "linux_task_shadow_stacks",
     "linux_shadow_stack_next",
+    "linux_task_semantic_stacks",
+    "linux_semantic_stack_next",
     "linux_task_sched_class_offset",
 )
 
