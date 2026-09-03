@@ -489,6 +489,30 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             getattr(vm, "_preserved_nonreturning_transfer", True)
         )
 
+    def test_waitpid_uses_linux_wait4_and_guest_status(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+        status_ptr = 0xD340
+        seen = {}
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            seen["args"] = args
+            vm.memory.write(status_ptr, 32, 0x2A00)
+            return 14
+
+        runner.user_syscall = fake_user_syscall
+        callback = runner._user_libc_callback("__mm_user_ext_waitpid", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        self.assertEqual(callback(vm, (14, status_ptr, 0)), 14)
+        self.assertEqual(
+            seen["args"],
+            (260, 14, status_ptr, 0, 0, 0, 0),
+        )
+        self.assertEqual(vm.memory.read(status_ptr, 32), 0x2A00)
+
     def test_fork_adapts_to_nommu_vfork_clone_flags(self):
         runner = load_runner()
         fn = muir.Function(
