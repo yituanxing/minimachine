@@ -3525,6 +3525,38 @@ def install_user_external_surface(vm, user_image, envp: int) -> None:
     )
 
 
+def _arm_preserved_task_transfer(vm, task: int, *, reason: str) -> bool:
+    depth = int(getattr(vm, "_preserved_call_depth", 0))
+    if depth <= 0:
+        return False
+
+    owners = list(getattr(vm, "_preserved_call_tasks", ()))
+    if len(owners) != depth:
+        # Legacy/unit-test callers may only set the depth flag. Preserve the
+        # old all-level unwind behavior in that case.
+        stop_depth = 0
+    else:
+        stop_depth = depth
+        while stop_depth > 0 and int(owners[stop_depth - 1]) == int(task):
+            stop_depth -= 1
+        if stop_depth == depth:
+            # The active semantic call belongs to another Linux task. The
+            # current task may exec/exit while that caller is blocked; do not
+            # unwind the unrelated outer call.
+            return False
+
+    vm._preserved_nonreturning_transfer = True
+    vm._preserved_transfer_stop_depth = stop_depth
+    vm.halted = True
+    print(
+        "BOOT_EXEC_PRESERVED_CONTROL_TRANSFER "
+        f"reason={reason} task=0x{int(task):x} "
+        f"depth={depth} stop_depth={stop_depth}",
+        flush=True,
+    )
+    return True
+
+
 def linux_ecall(vm, args: tuple[int, ...]):
     # Boot-first host ABI:
     #   service 1: write(ptr, len) to the host boot console.
@@ -3592,23 +3624,23 @@ def linux_ecall(vm, args: tuple[int, ...]):
             exiting_task = int(
                 getattr(vm, "_user_exit_task", 0) or 0
             )
-            if (
-                exiting_task
-                and exiting_task == prev
-                and getattr(vm, "_preserved_call_depth", 0)
-            ):
+            if exiting_task and exiting_task == prev:
                 status = int(
                     getattr(vm, "_user_exit_status", 0) or 0
                 )
-                vm._preserved_nonreturning_transfer = True
+                armed = _arm_preserved_task_transfer(
+                    vm,
+                    prev,
+                    reason="exit",
+                )
                 vm._user_exit_task = 0
                 vm._user_exit_status = 0
-                vm.halted = True
                 print(
                     "BOOT_EXEC_USER_EXIT_SWITCH "
                     f"prev=0x{prev:x} next=0x{next_task:x} "
                     f"status={status} "
-                    f"depth={vm._preserved_call_depth}",
+                    f"depth={getattr(vm, '_preserved_call_depth', 0)} "
+                    f"scoped_transfer={1 if armed else 0}",
                     flush=True,
                 )
 
@@ -4069,18 +4101,14 @@ def linux_ecall(vm, args: tuple[int, ...]):
             result_count=0,
         )
         if getattr(vm, "_preserved_call_depth", 0):
-            # A successful exec reached the architecture return-to-user path
-            # while a semantic Linux call is nested inside userspace. Stop
-            # the nested run and unwind its host frames without restoring the
-            # pre-exec P3 continuation. The outermost preserved call clears
-            # this temporary halt and resumes the freshly installed image.
-            vm._preserved_nonreturning_transfer = True
-            vm.halted = True
-            print(
-                "BOOT_EXEC_PRESERVED_CONTROL_TRANSFER "
-                f"depth={vm._preserved_call_depth} "
-                f"task=0x{current_task:x} function={entry_name}",
-                flush=True,
+            # Exec is non-returning only for semantic calls owned by the task
+            # being replaced. If this task is running inside another task's
+            # blocking wait/vfork call, unwind only the current-task suffix;
+            # keep the outer waiter alive so its vm.run() can continue.
+            _arm_preserved_task_transfer(
+                vm,
+                current_task,
+                reason=f"exec:{entry_name}",
             )
         if getattr(vm, "stop_after_user_handoff", False):
             vm.halted = True
@@ -4685,6 +4713,21 @@ def _call_linux_function_preserving_control(
     task_depth = int(task_depths.get(call_task, 0))
     task_depths[call_task] = task_depth + 1
 
+    call_tasks = getattr(vm, "_preserved_call_tasks", None)
+    if call_tasks is None:
+        call_tasks = []
+        vm._preserved_call_tasks = call_tasks
+    if len(call_tasks) != previous_depth:
+        # Keep legacy callers that only manipulated the numeric depth usable,
+        # while making real nested semantic calls explicit from here onward.
+        if previous_depth == 0:
+            call_tasks.clear()
+        elif len(call_tasks) > previous_depth:
+            del call_tasks[previous_depth:]
+        else:
+            call_tasks.extend([call_task] * (previous_depth - len(call_tasks)))
+    call_tasks.append(call_task)
+
     temp_stack_top = _linux_semantic_call_stack_top(
         vm, call_task, task_depth
     )
@@ -4704,8 +4747,18 @@ def _call_linux_function_preserving_control(
             result_count=result_count,
         )
         vm.run(max_steps=saved[5] + max_extra_steps)
-        transfer_seen = bool(
+        transfer_stop = getattr(
+            vm, "_preserved_transfer_stop_depth", None
+        )
+        legacy_transfer = bool(
             getattr(vm, "_preserved_nonreturning_transfer", False)
+        )
+        transfer_seen = bool(
+            legacy_transfer
+            and (
+                transfer_stop is None
+                or (previous_depth + 1) > int(transfer_stop)
+            )
         )
         if transfer_seen:
             return HOST_CONTROL_TRANSFER
@@ -4784,10 +4837,22 @@ def _call_linux_function_preserving_control(
         raise
     finally:
         observed_steps = vm.steps
-        transfer_seen = transfer_seen or bool(
+        transfer_stop = getattr(
+            vm, "_preserved_transfer_stop_depth", None
+        )
+        legacy_transfer = bool(
             getattr(vm, "_preserved_nonreturning_transfer", False)
         )
+        transfer_seen = transfer_seen or bool(
+            legacy_transfer
+            and (
+                transfer_stop is None
+                or (previous_depth + 1) > int(transfer_stop)
+            )
+        )
         vm._preserved_call_depth = previous_depth
+        if call_tasks:
+            call_tasks.pop()
         if task_depth == 0:
             task_depths.pop(call_task, None)
         else:
@@ -4795,17 +4860,25 @@ def _call_linux_function_preserving_control(
 
         if transfer_seen:
             # Keep the task, P3 PC/SP, scheduler contexts, and newly installed
-            # userspace image exactly as established by service 3. Every
-            # enclosing preserved call sees the same marker and unwinds
-            # without resurrecting its pre-exec continuation.
+            # userspace image exactly as established by the control transfer.
+            # Stop unwinding at the first outer semantic call owned by another
+            # Linux task; that caller remains blocked and its vm.run() resumes.
             vm.steps = observed_steps
-            if previous_depth == 0:
+            boundary = (
+                previous_depth == 0
+                if transfer_stop is None
+                else previous_depth == int(transfer_stop)
+            )
+            if boundary:
                 vm._preserved_nonreturning_transfer = False
+                if hasattr(vm, "_preserved_transfer_stop_depth"):
+                    delattr(vm, "_preserved_transfer_stop_depth")
                 vm.halted = False
                 print(
                     "BOOT_EXEC_PRESERVED_CONTROL_RESUME "
                     f"function={vm.current_function} "
-                    f"steps={vm.steps}",
+                    f"steps={vm.steps} "
+                    f"stop_depth={previous_depth}",
                     flush=True,
                 )
         else:
