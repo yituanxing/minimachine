@@ -489,6 +489,58 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             getattr(vm, "_preserved_nonreturning_transfer", True)
         )
 
+    def test_task_scoped_transfer_stops_at_outer_waiter(self):
+        runner = load_runner()
+        fn = muir.Function(
+            "child_semantic_call",
+            [muir.Block("entry", [muir.Ret(None)])],
+            set(),
+        )
+        expanded, _ = expand_function(fn)
+        program = Program((lower_function(expanded),))
+        vm = program.new_vm()
+
+        parent = 0xB100
+        child = 0xB200
+        vm.linux_current_task = child
+        vm._preserved_call_depth = 1
+        vm._preserved_call_tasks = [parent]
+
+        def fake_run(*, max_steps):
+            self.assertGreater(max_steps, 0)
+            self.assertEqual(
+                vm._preserved_call_tasks,
+                [parent, child],
+            )
+            self.assertTrue(
+                runner._arm_preserved_task_transfer(
+                    vm,
+                    child,
+                    reason="test-child-exec",
+                )
+            )
+            self.assertEqual(vm._preserved_transfer_stop_depth, 1)
+            self.assertTrue(vm.halted)
+
+        vm.run = fake_run
+        result = runner._call_linux_function_preserving_control(
+            vm,
+            "child_semantic_call",
+            (),
+            result_count=0,
+        )
+
+        self.assertIs(result, runner.HOST_CONTROL_TRANSFER)
+        self.assertEqual(vm._preserved_call_depth, 1)
+        self.assertEqual(vm._preserved_call_tasks, [parent])
+        self.assertFalse(
+            getattr(vm, "_preserved_nonreturning_transfer", False)
+        )
+        self.assertFalse(
+            hasattr(vm, "_preserved_transfer_stop_depth")
+        )
+        self.assertFalse(vm.halted)
+
     def test_blocking_syscall_fallback_propagates_control_transfer(self):
         runner = load_runner()
         fn = muir.Function(
