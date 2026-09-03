@@ -3254,6 +3254,29 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_execvp
 
+    if original == "waitpid":
+        def user_waitpid(vm, args):
+            if len(args) != 3:
+                raise VMError("waitpid expects pid,status,options")
+            pid, status_ptr, options = map(int, args)
+            raw = user_syscall(
+                vm,
+                (
+                    260,  # wait4
+                    pid,
+                    status_ptr,
+                    options,
+                    0,  # struct rusage *
+                    0,
+                    0,
+                ),
+            )
+            if raw is HOST_CONTROL_TRANSFER:
+                return HOST_CONTROL_TRANSFER
+            return libc_linux_result(vm, raw)
+
+        return user_waitpid
+
     if original in {"fork", "vfork"}:
         def user_fork(vm, args):
             if args:
@@ -4106,6 +4129,7 @@ def user_syscall(vm, args: tuple[int, ...]):
         176: ("sys_getgid", 0),
         177: ("sys_getegid", 0),
         221: ("__se_sys_execve", 3),
+        260: ("__se_sys_wait4", 4),
     }
 
     result = None
