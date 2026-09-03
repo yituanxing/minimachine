@@ -489,6 +489,34 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             getattr(vm, "_preserved_nonreturning_transfer", True)
         )
 
+    def test_blocking_syscall_fallback_propagates_control_transfer(self):
+        runner = load_runner()
+        fn = muir.Function(
+            "__se_sys_wait4",
+            [muir.Block("entry", [muir.Ret(muir.Imm(0))])],
+            set(),
+        )
+        expanded, _ = expand_function(fn)
+        program = Program((lower_function(expanded),))
+        vm = program.new_vm()
+
+        seen = {}
+
+        def fake_call(vm_arg, name, args, **kwargs):
+            self.assertIs(vm_arg, vm)
+            seen["name"] = name
+            seen["args"] = args
+            return runner.HOST_CONTROL_TRANSFER
+
+        runner._call_linux_function_preserving_control = fake_call
+        result = runner.user_syscall(
+            vm,
+            (260, 14, 0xD340, 0, 0, 0, 0),
+        )
+        self.assertIs(result, runner.HOST_CONTROL_TRANSFER)
+        self.assertEqual(seen["name"], "__se_sys_wait4")
+        self.assertEqual(seen["args"], (14, 0xD340, 0, 0))
+
     def test_waitpid_uses_linux_wait4_and_guest_status(self):
         runner = load_runner()
         vm = Program().new_vm()
