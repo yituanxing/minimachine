@@ -245,6 +245,71 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             ],
         )
 
+    def test_semantic_linux_call_stacks_do_not_clobber_parked_tasks(self):
+        runner = load_runner()
+
+        fn = muir.Function(
+            "echo",
+            [
+                muir.Block(
+                    "entry",
+                    [muir.Ret(muir.Slot("value"))],
+                )
+            ],
+            {"value"},
+            ("value",),
+        )
+        expanded, _ = expand_function(fn)
+        program = Program((lower_function(expanded),))
+        vm = program.new_vm()
+
+        parent = 0xB100
+        child = 0xB200
+
+        vm.linux_current_task = parent
+        self.assertEqual(
+            runner._call_linux_function_preserving_control(
+                vm,
+                "echo",
+                (0x1111222233334444,),
+                result_count=1,
+            ),
+            (0x1111222233334444,),
+        )
+        parent_top = vm.linux_task_semantic_stacks[(parent, 0)]
+        parent_linked = program.functions["echo"]
+        parent_sp = (
+            parent_top
+            - parent_linked.frame_size
+            - 8  # one argument
+            - 8  # one result word
+        )
+        parent_arg = parent_sp + parent_linked.frame_size
+        self.assertEqual(
+            vm.memory.read(parent_arg, 64),
+            0x1111222233334444,
+        )
+
+        # Model the parent being parked in its semantic-call stack while the
+        # child performs another Linux call. The child must get a distinct
+        # persistent P3 stack instead of reusing the parent's arena.
+        vm.linux_current_task = child
+        self.assertEqual(
+            runner._call_linux_function_preserving_control(
+                vm,
+                "echo",
+                (0xAAAABBBBCCCCDDDD,),
+                result_count=1,
+            ),
+            (0xAAAABBBBCCCCDDDD,),
+        )
+        child_top = vm.linux_task_semantic_stacks[(child, 0)]
+        self.assertNotEqual(child_top, parent_top)
+        self.assertEqual(
+            vm.memory.read(parent_arg, 64),
+            0x1111222233334444,
+        )
+
     def test_exiting_user_task_switch_marks_nonreturning_transfer(self):
         runner = load_runner()
 
