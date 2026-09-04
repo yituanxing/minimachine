@@ -3440,6 +3440,12 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                 raise VMError("waitpid expects pid,status,options")
             pid, status_ptr, options = map(int, args)
 
+            # A CLONE_VM child shares the concrete P3 userspace stack addresses
+            # with its parent. Snapshot the waiter *before* any scheduler drive:
+            # the child may run and reuse this very ext_waitpid frame before we
+            # ever reach the real wait4 bridge.
+            waiter_stack = _snapshot_p3_call_chain(vm)
+
             # A normal CLONE_VM fork returns to the parent before the child
             # necessarily wins a scheduler slot. Keep the real Linux scheduler
             # in charge, but drive bounded schedule() rounds until service 2
@@ -3481,13 +3487,20 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     if scheduled is HOST_CONTROL_TRANSFER:
                         return HOST_CONTROL_TRANSFER
 
-            # The NOMMU child currently shares the concrete P3 userspace stack
-            # addresses with its parent. wait4 is the point where the parent
-            # stops and the child is allowed to run, so preserve the parent's
-            # live P3 call chain across that scheduling window. Restoring here,
-            # after Linux has resumed the waiter, keeps the BusyBox evaltree
-            # continuation intact without hiding kernel task/fd/VFS semantics.
-            waiter_stack = _snapshot_p3_call_chain(vm)
+            # The scheduler drive above may already have let the child reuse
+            # the parent P3 stack. Restore the original waiter frames before
+            # entering wait4, then restore the same snapshot once more after
+            # wait4 returns because Linux may schedule the child again there.
+            _restore_p3_call_chain(vm, waiter_stack)
+            if waiter_stack:
+                print(
+                    "BOOT_EXEC_USER_WAIT_PRE_RESTORE "
+                    f"frames={len(waiter_stack)} "
+                    f"bytes={sum(len(payload) for _, payload in waiter_stack)} "
+                    f"pid={pid}",
+                    flush=True,
+                )
+
             raw = user_syscall(
                 vm,
                 (

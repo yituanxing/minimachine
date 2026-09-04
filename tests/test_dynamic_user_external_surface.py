@@ -788,13 +788,24 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         vm.pending_user_fork_continuation = (0x1000, 0x2000, 0x3000)
         vm.active_user_task = 0xB91880
         vm.linux_current_task = 0xB4C000
+        vm.memory.write(vm.sp + runner.FRAME_SIZE, 64, runner.HEADER_SIZE)
+        vm.memory.write(vm.sp + runner.ARG_COUNT, 64, 0)
+        vm.memory.write(vm.sp + runner.RESULT_COUNT, 64, 1)
+        vm.memory.write(vm.sp + runner.CALLER_SP, 64, 0)
+        vm.memory.write(vm.sp + runner.RET_PC, 64, 0x1234)
+        vm.memory.write(vm.sp + runner.RESULT_PTR, 64, 0xD000)
         calls = []
 
         def fake_call(vm_arg, name, args, **kwargs):
             self.assertIs(vm_arg, vm)
             calls.append((name, args, kwargs))
-            if name == "schedule" and len(calls) == 2:
-                vm.pending_user_fork_continuation = None
+            if name == "schedule":
+                # Model a CLONE_VM child reusing the parent's ext_waitpid
+                # frame before the parent reaches wait4.
+                vm.memory.write(vm.sp + runner.RESULT_COUNT, 64, 16)
+                vm.memory.write(vm.sp + runner.RET_PC, 64, 0xDEADBEEF)
+                if len(calls) == 2:
+                    vm.pending_user_fork_continuation = None
             return ()
 
         def fake_user_syscall(vm_arg, args):
@@ -823,6 +834,8 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
                 for call in schedule_calls
             )
         )
+        self.assertEqual(vm.memory.read(vm.sp + runner.RESULT_COUNT, 64), 1)
+        self.assertEqual(vm.memory.read(vm.sp + runner.RET_PC, 64), 0x1234)
 
     def test_waitpid_replays_tracked_child_exit_when_wait4_bridge_is_unavailable(self):
         runner = load_runner()
