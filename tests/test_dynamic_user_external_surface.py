@@ -961,6 +961,51 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(seen["name"], "sys_setsid")
         self.assertEqual(seen["args"], ())
 
+    def test_qsort_orders_guest_records_through_guest_comparator(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+        base = 0xD600
+        compar = 0xD700
+        values = [7, 1, 9, 3]
+        for index, value in enumerate(values):
+            vm.memory.write(base + index * 8, 64, value)
+
+        original_call = runner._call_guest_descriptor_preserving_control
+        original_name = runner._guest_function_name_from_descriptor
+
+        def fake_name(vm_arg, descriptor):
+            self.assertIs(vm_arg, vm)
+            self.assertEqual(descriptor, compar)
+            return "guest_cmp"
+
+        def fake_call(vm_arg, descriptor, args, **kwargs):
+            self.assertIs(vm_arg, vm)
+            self.assertEqual(descriptor, compar)
+            self.assertEqual(kwargs["result_count"], 1)
+            left = vm.memory.read(args[0], 64)
+            right = vm.memory.read(args[1], 64)
+            result = -1 if left < right else (1 if left > right else 0)
+            return (result & ((1 << 64) - 1),)
+
+        runner._guest_function_name_from_descriptor = fake_name
+        runner._call_guest_descriptor_preserving_control = fake_call
+        try:
+            callback = runner._user_libc_callback(
+                "__mm_user_ext_qsort",
+                None,
+            )
+            self.assertIsNotNone(callback)
+            assert callback is not None
+            self.assertIsNone(callback(vm, (base, len(values), 8, compar)))
+        finally:
+            runner._call_guest_descriptor_preserving_control = original_call
+            runner._guest_function_name_from_descriptor = original_name
+
+        self.assertEqual(
+            [vm.memory.read(base + index * 8, 64) for index in range(len(values))],
+            sorted(values),
+        )
+
     def test_gnu_dev_helpers_round_trip_linux_dev_t_encoding(self):
         runner = load_runner()
         vm = Program().new_vm()

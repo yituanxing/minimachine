@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import os
 from dataclasses import fields, is_dataclass
+from functools import cmp_to_key
 from pathlib import Path
 import re
 import struct
@@ -1222,6 +1223,83 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             return write_stdio_payload(vm, 1, payload)
 
         return user_printf
+
+    if original == "qsort":
+        def user_qsort(vm, args):
+            if len(args) != 4:
+                raise VMError("qsort expects base,nmemb,size,compar")
+            base, nmemb, size, compar = map(int, args)
+            if nmemb <= 1 or size == 0:
+                return None
+            if size < 0 or nmemb < 0:
+                raise VMError(
+                    f"qsort received invalid dimensions nmemb={nmemb} size={size}"
+                )
+
+            bulk_read = getattr(vm.memory, "bulk_read", None)
+            bulk_write = getattr(vm.memory, "bulk_write", None)
+
+            def read_record(address: int) -> bytes:
+                if bulk_read is not None:
+                    return bytes(bulk_read(address, size))
+                return bytes(
+                    vm.memory.read(address + offset, 8)
+                    for offset in range(size)
+                )
+
+            def write_record(address: int, payload: bytes) -> None:
+                if bulk_write is not None:
+                    bulk_write(address, payload)
+                    return
+                for offset, byte in enumerate(payload):
+                    vm.memory.write(address + offset, 8, byte)
+
+            records = [
+                read_record(base + index * size)
+                for index in range(nmemb)
+            ]
+            scratch = vm.alloc_bytes(size * 2, align=8)
+            left_ptr = scratch
+            right_ptr = scratch + size
+            comparator_name = _guest_function_name_from_descriptor(vm, compar)
+            calls = 0
+
+            def compare(left: bytes, right: bytes) -> int:
+                nonlocal calls
+                write_record(left_ptr, left)
+                write_record(right_ptr, right)
+                call_result = _call_guest_descriptor_preserving_control(
+                    vm,
+                    compar,
+                    (left_ptr, right_ptr),
+                    result_count=1,
+                    max_extra_steps=500_000,
+                )
+                if call_result is HOST_CONTROL_TRANSFER:
+                    raise VMError(
+                        "qsort comparator performed a non-returning control transfer"
+                    )
+                raw, = call_result
+                calls += 1
+                raw32 = raw & 0xFFFFFFFF
+                return (
+                    raw32 - (1 << 32)
+                    if raw32 & (1 << 31)
+                    else raw32
+                )
+
+            records.sort(key=cmp_to_key(compare))
+            for index, payload in enumerate(records):
+                write_record(base + index * size, payload)
+
+            print(
+                "BOOT_EXEC_USER_QSORT "
+                f"compar={comparator_name} nmemb={nmemb} size={size} calls={calls}",
+                flush=True,
+            )
+            return None
+
+        return user_qsort
 
     if original == "bsearch":
         def user_bsearch(vm, args):
