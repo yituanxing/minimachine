@@ -4809,8 +4809,14 @@ def _call_linux_function_preserving_control(
     # therefore corrupts the parked task as soon as the child performs its own
     # syscall. Give every Linux task and same-task nesting level an independent
     # persistent semantic-call stack.
+    # A userspace host callback can remain live while Linux has scheduled a
+    # different task underneath an outer blocking semantic call. In that case
+    # linux_current_task describes the kernel continuation, not the P3 caller
+    # that owns this semantic syscall. Prefer the active userspace continuation
+    # owner so task-scoped exec/exit transfers unwind the right call suffix.
     call_task = int(
-        getattr(vm, "linux_current_task", 0)
+        saved_active_user_task
+        or getattr(vm, "linux_current_task", 0)
         or (saved_current if saved_current is not None else 0)
     )
     task_depths = getattr(vm, "_preserved_task_depths", None)

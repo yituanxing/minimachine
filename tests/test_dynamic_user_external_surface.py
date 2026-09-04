@@ -317,6 +317,42 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             ],
         )
 
+    def test_semantic_linux_call_owner_prefers_active_userspace_task(self):
+        runner = load_runner()
+
+        fn = muir.Function(
+            "echo",
+            [
+                muir.Block(
+                    "entry",
+                    [muir.Ret(muir.Slot("value"))],
+                )
+            ],
+            {"value"},
+            ("value",),
+        )
+        expanded, _ = expand_function(fn)
+        program = Program((lower_function(expanded),))
+        vm = program.new_vm()
+
+        kernel_task = 0xB4C000
+        user_task = 0xB91880
+        vm.linux_current_task = kernel_task
+        vm.active_user_task = user_task
+
+        value = 0x123456789ABCDEF0
+        self.assertEqual(
+            runner._call_linux_function_preserving_control(
+                vm,
+                "echo",
+                (value,),
+                result_count=1,
+            ),
+            (value,),
+        )
+        self.assertIn((user_task, 0), vm.linux_task_semantic_stacks)
+        self.assertNotIn((kernel_task, 0), vm.linux_task_semantic_stacks)
+
     def test_semantic_linux_call_stacks_do_not_clobber_parked_tasks(self):
         runner = load_runner()
 
