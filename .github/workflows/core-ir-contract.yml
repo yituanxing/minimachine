@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, work/checkpoint-after-kallsyms]
     paths:
+      - native/p3vm.c
       - src/minimachine/**
       - tests/**
       - .github/workflows/core-ir-contract.yml
@@ -17,5 +18,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
       - name: Run IR contract tests
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
