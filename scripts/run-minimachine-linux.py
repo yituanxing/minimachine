@@ -4234,6 +4234,10 @@ def user_syscall(vm, args: tuple[int, ...]):
                     tuple(argv[:argc]),
                     result_count=1,
                     max_extra_steps=8_000_000,
+                    # wait4 may block and schedule another Linux task. Its
+                    # task/current/context mutations are the syscall's real
+                    # semantics and must survive the semantic-call wrapper.
+                    preserve_linux_task_state=(nr == 260),
                 )
                 if call_result is HOST_CONTROL_TRANSFER:
                     print(
