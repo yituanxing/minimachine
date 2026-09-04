@@ -3555,7 +3555,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                         "__se_sys_clone",
                         (flags, 0, 0, 0, 0),
                         result_count=1,
-                        max_extra_steps=80_000_000,
+                        max_extra_steps=180_000_000,
                         preserve_linux_task_state=True,
                     )
                 except Exception:
