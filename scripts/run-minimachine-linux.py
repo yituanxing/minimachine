@@ -2791,7 +2791,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             if len(args) != 1:
                 raise VMError("gnu_dev_major expects dev")
             dev = int(args[0]) & ((1 << 64) - 1)
-            return ((dev >> 8) & 0xFFF) | ((dev >> 32) & ~0xFFF)
+            return ((dev >> 8) & 0xFFF) | ((dev >> 32) & 0xFFFFF000)
 
         return user_gnu_dev_major
 
@@ -2800,7 +2800,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             if len(args) != 1:
                 raise VMError("gnu_dev_minor expects dev")
             dev = int(args[0]) & ((1 << 64) - 1)
-            return (dev & 0xFF) | ((dev >> 12) & ~0xFF)
+            return (dev & 0xFF) | ((dev >> 12) & 0xFFFFFF00)
 
         return user_gnu_dev_minor
 
