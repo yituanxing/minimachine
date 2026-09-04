@@ -1,0 +1,76 @@
+name: Linux MiniMachine Native C Exec Hot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/legalize.py
+      - src/minimachine/checkpoint.py
+      - .github/workflows/native-c-exec-hot.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  exec-hot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build optimized native P3 VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download exact Linux with initramfs
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: replay-source
+
+      - name: Rebuild P3 save exec hotspot and continue
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'EXEC_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-out replay-source/llvm/exec-hot-p3-cache.pkl.gz \
+            --initramfs replay-source/out/minimachine-initramfs.cpio \
+            --native-vm \
+            --native-boot-phases-only \
+            --native-report-every 50000000 \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --checkpoint-out replay-source/llvm/kernel-execve-hot.chk.gz \
+            --checkpoint-on-error \
+            --stop-after-user-handoff \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee replay-source/llvm/native-c-exec-hot.log
+
+      - name: Summarize
+        if: always()
+        run: |
+          grep -E 'BOOT_EXEC_(CHECKPOINT_SAVED|MILESTONE|INITRAMFS_COPY|USER_HANDOFF|USER_HANDOFF_STOP|BLOCKED|HALTED|NATIVE_PROGRESS)|EXEC_HOT_WALL' \
+            replay-source/llvm/native-c-exec-hot.log | tail -240 || true
+
+      - name: Upload exec hotspot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-native-exec-hot-${{ github.run_id }}
+          path: |
+            replay-source/llvm/kernel-execve-hot.chk.gz
+            replay-source/llvm/exec-hot-p3-cache.pkl.gz
+            replay-source/llvm/native-c-exec-hot.log
+          if-no-files-found: ignore
+          retention-days: 7

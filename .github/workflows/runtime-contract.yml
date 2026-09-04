@@ -1,0 +1,22 @@
+name: MiniMachine Runtime Contract
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/runtime.py
+      - tests/test_runtime.py
+      - .github/workflows/runtime-contract.yml
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run runtime contracts
+        run: python3 -m unittest tests.test_runtime -v

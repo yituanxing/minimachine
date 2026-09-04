@@ -1,0 +1,20 @@
+name: LLVM is.constant Guard Regression
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/legalize.py
+      - tests/test_legalizer.py
+      - .github/workflows/llvm-is-constant-guard-regression.yml
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run focused legalizer regression
+        run: |
+          python3 -m unittest             tests.test_legalizer.LegalizerTests.test_llvm_is_constant_compiletime_assert_guard_folds_only_guard             -v

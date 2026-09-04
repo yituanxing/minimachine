@@ -1,0 +1,48 @@
+name: Linux Syscall Surface Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/linux-syscall-surface-probe.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: exact
+      - name: Probe syscall symbols and definitions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          text=Path("exact/llvm/linked.ll").read_text()
+          symbols=[
+              "sys_call_table","ksys_write","ksys_read","ksys_execve",
+              "__se_sys_write","__se_sys_read","__se_sys_execve",
+              "__do_sys_write","__do_sys_read","do_syscall",
+              "syscall_enter_from_user_mode","syscall_exit_to_user_mode",
+              "invoke_syscall","do_el0_svc","do_syscall_64",
+          ]
+          for sym in symbols:
+              defs=re.findall(rf'^(define .*@{re.escape(sym)}\(|@{re.escape(sym)}\s*=.*)$',text,re.M)
+              refs=len(re.findall(rf'@{re.escape(sym)}\b',text))
+              print("SYSCALL_SURFACE",sym,"refs",refs,"defs",len(defs))
+              for d in defs[:3]:
+                  print("  DEF",d[:400])
+          for m in re.finditer(r'^@([^ ]*sys_call[^ ]*)\s*=.*$',text,re.M):
+              print("SYSCALL_GLOBAL",m.group(0)[:500])
+          PY

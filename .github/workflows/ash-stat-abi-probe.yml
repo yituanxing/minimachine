@@ -1,0 +1,65 @@
+name: MiniMachine Ash Stat ABI Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/ash-stat-abi-probe.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install RISC-V libc headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross qemu-user
+
+      - name: Download exact frozen Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33295701837
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33295701837
+          path: exact
+
+      - name: Probe Linux stat wrappers and libc layout
+        run: |
+          set -o pipefail
+          grep -E '^define .*@(.*newfstatat|.*fstat|.*statx)' exact/llvm/linked.ll \
+            | head -80 | tee build-stat-symbols.txt || true
+
+          cat > /tmp/stat-layout.c <<'EOF'
+          #include <stddef.h>
+          #include <stdio.h>
+          #include <sys/stat.h>
+          int main(void) {
+            printf("STAT_SIZE=%zu\n", sizeof(struct stat));
+            printf("STAT_OFF_DEV=%zu\n", offsetof(struct stat, st_dev));
+            printf("STAT_OFF_INO=%zu\n", offsetof(struct stat, st_ino));
+            printf("STAT_OFF_MODE=%zu\n", offsetof(struct stat, st_mode));
+            printf("STAT_OFF_NLINK=%zu\n", offsetof(struct stat, st_nlink));
+            printf("STAT_OFF_UID=%zu\n", offsetof(struct stat, st_uid));
+            printf("STAT_OFF_GID=%zu\n", offsetof(struct stat, st_gid));
+            printf("STAT_OFF_RDEV=%zu\n", offsetof(struct stat, st_rdev));
+            printf("STAT_OFF_SIZE=%zu\n", offsetof(struct stat, st_size));
+            printf("STAT_OFF_BLKSIZE=%zu\n", offsetof(struct stat, st_blksize));
+            printf("STAT_OFF_BLOCKS=%zu\n", offsetof(struct stat, st_blocks));
+            printf("STAT_OFF_ATIM=%zu\n", offsetof(struct stat, st_atim));
+            printf("STAT_OFF_MTIM=%zu\n", offsetof(struct stat, st_mtim));
+            printf("STAT_OFF_CTIM=%zu\n", offsetof(struct stat, st_ctim));
+            return 0;
+          }
+          EOF
+          riscv64-linux-gnu-gcc -static /tmp/stat-layout.c -o /tmp/stat-layout
+          qemu-riscv64 /tmp/stat-layout | tee build-stat-layout.txt

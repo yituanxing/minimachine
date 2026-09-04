@@ -1,0 +1,41 @@
+name: MiniMachine Native Dynamic Service Contract
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - native/p3vm.c
+      - src/minimachine/native_vm.py
+      - src/minimachine/vm.py
+      - src/minimachine/user_bundle.py
+      - scripts/run-minimachine-linux.py
+      - tests/test_dynamic_user_external_surface.py
+      - tests/test_user_external_namespace.py
+      - tests/test_user_namespace.py
+      - .github/workflows/native-dynamic-service-contract.yml
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared             native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Run dynamic userspace external contract
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 -m unittest \
+            tests.test_dynamic_user_external_surface \
+            tests.test_user_external_namespace \
+            tests.test_user_namespace \
+            -v

@@ -7,7 +7,10 @@
  * service problem and will be split into focused files after first boot.
  */
 
+#include <linux/console.h>
 #include <linux/delay.h>
+#include <linux/uaccess.h>
+#include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/kernel.h>
@@ -22,13 +25,21 @@
 #include <linux/seq_file.h>
 #include <linux/screen_info.h>
 #include <linux/string.h>
+#include <linux/syscalls.h>
 
 #include <asm/page.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
 #include <asm/sections.h>
+#include <asm/unistd.h>
 
-#define MINIMACHINE_BOOT_RAM_SIZE (32UL * 1024 * 1024)
+/*
+ * Keep enough NOMMU RAM for a normal static BusyBox image to coexist with
+ * its initramfs file during exec.  The defconfig carrier is ~9 MiB and the
+ * flat loader needs a second text/stack allocation before the old file pages
+ * can be reclaimed.
+ */
+#define MINIMACHINE_BOOT_RAM_SIZE (64UL * 1024 * 1024)
 
 extern char _end[];
 
@@ -69,7 +80,166 @@ static __always_inline void minimachine_boot_console(const char *text,
 	asm volatile("ecall" : : "r"(1UL), "r"(text), "r"(len) : "memory");
 }
 
+#define MINIMACHINE_CONSOLE_MAJOR 240
+#define MINIMACHINE_CONSOLE_CHUNK 256
+
+static char minimachine_console_buffer[MINIMACHINE_CONSOLE_CHUNK];
+
+static ssize_t minimachine_console_write(struct file *file,
+					 const char __user *buffer,
+					 size_t count, loff_t *ppos)
+{
+	size_t done = 0;
+
+	(void)file;
+	(void)ppos;
+	while (done < count) {
+		size_t chunk = min_t(size_t, count - done,
+				     sizeof(minimachine_console_buffer));
+
+		if (copy_from_user(minimachine_console_buffer,
+				   buffer + done, chunk))
+			return done ? (ssize_t)done : -EFAULT;
+		minimachine_boot_console(minimachine_console_buffer, chunk);
+		done += chunk;
+	}
+	return (ssize_t)done;
+}
+
+static ssize_t minimachine_console_read(struct file *file,
+					char __user *buffer,
+					size_t count, loff_t *ppos)
+{
+	unsigned long got;
+	size_t chunk;
+
+	(void)file;
+	(void)ppos;
+	if (!count)
+		return 0;
+
+	chunk = min_t(size_t, count, sizeof(minimachine_console_buffer));
+	/*
+	 * Service 4 is host input.  The VM copies at most chunk bytes into the
+	 * kernel buffer and returns the byte count.  Linux still owns the file
+	 * descriptor, read syscall, and user-copy semantics.
+	 */
+	asm volatile("ecall"
+		     : "=r"(got)
+		     : "r"(4UL),
+		       "r"((unsigned long)minimachine_console_buffer),
+		       "r"((unsigned long)chunk)
+		     : "memory");
+
+	if (got > chunk)
+		return -EIO;
+	if (!got)
+		return 0;
+	if (copy_to_user(buffer, minimachine_console_buffer, got))
+		return -EFAULT;
+	return (ssize_t)got;
+}
+
+static const struct file_operations minimachine_console_fops = {
+	.read = minimachine_console_read,
+	.write = minimachine_console_write,
+	.llseek = no_llseek,
+};
+
+static int __init minimachine_console_device_init(void)
+{
+	int ret;
+
+	ret = register_chrdev(MINIMACHINE_CONSOLE_MAJOR,
+			      "minimachine-console",
+			      &minimachine_console_fops);
+	if (ret < 0)
+		return ret;
+	return 0;
+}
+device_initcall(minimachine_console_device_init);
+
+static void minimachine_printk_write(struct console *console,
+				     const char *text,
+				     unsigned int len)
+{
+	(void)console;
+	minimachine_boot_console(text, len);
+}
+
+static struct console minimachine_printk_console = {
+	.name = "ttyMM",
+	.write = minimachine_printk_write,
+	.flags = CON_PRINTBUFFER | CON_ENABLED,
+	.index = 0,
+};
+
+static int __init minimachine_printk_console_init(void)
+{
+	register_console(&minimachine_printk_console);
+	return 0;
+}
+console_initcall(minimachine_printk_console_init);
+
 static unsigned long minimachine_irq_state;
+
+static void __noreturn minimachine_enter_userspace(struct pt_regs *regs);
+
+/*
+ * Semantic user -> kernel syscall boundary.
+ *
+ * User P3 code traps through the MiniMachine host transport, which then
+ * invokes this architecture entry.  Keep Linux fd/VFS semantics on the
+ * kernel side instead of implementing userspace I/O in the host.
+ *
+ * Stage 1 intentionally exposes only the calls required to prove an
+ * interactive userspace prompt.  Process/exec syscalls are added after the
+ * read/write/exit path is validated end-to-end.
+ */
+long __used minimachine_user_syscall(unsigned long nr,
+				     unsigned long arg0,
+				     unsigned long arg1,
+				     unsigned long arg2,
+				     unsigned long arg3,
+				     unsigned long arg4,
+				     unsigned long arg5)
+{
+	(void)arg3;
+	(void)arg4;
+	(void)arg5;
+
+	switch (nr) {
+	case __NR_read:
+		return ksys_read((unsigned int)arg0,
+				 (char __user *)arg1,
+				 (size_t)arg2);
+	case __NR_write:
+		return ksys_write((unsigned int)arg0,
+				  (const char __user *)arg1,
+				  (size_t)arg2);
+	case __NR_execve: {
+		long ret = sys_execve(
+			(const char __user *)arg0,
+			(const char __user *const __user *)arg1,
+			(const char __user *const __user *)arg2);
+
+		/*
+		 * A successful exec never returns to the old userspace syscall
+		 * continuation.  exec has already installed the new image and
+		 * start_thread() has populated current_pt_regs(); perform the same
+		 * architecture return-to-user handoff used by ret_from_fork.
+		 */
+		if (ret)
+			return ret;
+		minimachine_enter_userspace(current_pt_regs());
+	}
+	case __NR_exit:
+	case __NR_exit_group:
+		do_exit((long)arg0);
+	default:
+		return -ENOSYS;
+	}
+}
 
 unsigned long minimachine_irq_save_flags(void)
 {
@@ -204,18 +374,48 @@ static unsigned long minimachine_context_switch(struct task_struct *prev,
 	return last;
 }
 
+static void __noreturn minimachine_enter_userspace(struct pt_regs *regs)
+{
+	/*
+	 * Service 3 is the architecture-neutral return-to-user transfer.  Linux
+	 * must have completed exec and populated pt_regs via start_thread()
+	 * before this path is reachable.  The host VM then owns execution of the
+	 * loaded MiniMachine user image and future syscall trap/return cycles.
+	 */
+	asm volatile("ecall"
+		     :
+		     : "r"(3UL), "r"((unsigned long)regs)
+		     : "memory");
+
+	panic("MiniMachine: user-mode handoff returned");
+}
+
 void __noreturn minimachine_ret_from_fork(struct task_struct *prev,
 					  unsigned long fn_addr,
 					  unsigned long arg)
 {
 	int (*fn)(void *) = (int (*)(void *))fn_addr;
-	int ret;
+	struct pt_regs *regs;
+	int ret = 0;
 
 	schedule_tail(prev);
-	if (!fn)
-		panic("MiniMachine: first-run task has no kernel entry");
 
-	ret = fn((void *)arg);
+	/*
+	 * Kernel-thread children enter with args->fn populated.  User children
+	 * instead inherit pt_regs in copy_thread() and reach this trampoline with
+	 * fn_addr == 0, exactly like a conventional ret_from_fork path before the
+	 * final return-to-user transition.
+	 */
+	if (fn)
+		ret = fn((void *)arg);
+
+	regs = current_pt_regs();
+	if (user_mode(regs))
+		minimachine_enter_userspace(regs);
+
+	if (!fn)
+		panic("MiniMachine: user child lost user-mode pt_regs");
+
 	do_exit(ret);
 }
 
@@ -237,14 +437,29 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 {
 	struct pt_regs *regs = task_pt_regs(p);
 
-	memset(regs, 0, sizeof(*regs));
-	regs->sp = args->stack;
-	regs->pc = args->fn ? (unsigned long)args->fn : 0;
-	regs->args[0] = (unsigned long)args->fn_arg;
-	regs->status = MINIMACHINE_STATUS_IRQ_ENABLE;
+	if (args->fn) {
+		memset(regs, 0, sizeof(*regs));
+		regs->sp = args->stack;
+		regs->pc = (unsigned long)args->fn;
+		regs->args[0] = (unsigned long)args->fn_arg;
+		regs->status = MINIMACHINE_STATUS_IRQ_ENABLE;
+		p->thread.resume_pc = regs->pc;
+	} else {
+		/*
+		 * User vfork/clone children inherit the parent's syscall frame.
+		 * The child observes a zero return value; an explicit clone stack,
+		 * when supplied, replaces the inherited userspace SP.
+		 */
+		*regs = *current_pt_regs();
+		regs->result = 0;
+		if (args->stack)
+			regs->sp = args->stack;
+		regs->status |=
+			MINIMACHINE_STATUS_USER | MINIMACHINE_STATUS_IRQ_ENABLE;
+		p->thread.resume_pc = 0;
+	}
 
 	p->thread.kernel_sp = (unsigned long)regs;
-	p->thread.resume_pc = regs->pc;
 	return 0;
 }
 

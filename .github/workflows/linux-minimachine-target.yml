@@ -2,7 +2,7 @@ name: Linux MiniMachine Target Gate
 
 on:
   push:
-    branches: [main]
+    branches: [main, work/native-p3-vm]
     paths:
       - configs/linux-6.6.143-minimachine.env
       - linux-overlay/arch/minimachine/**

@@ -1,0 +1,38 @@
+name: MiniMachine Installed Initcall Table Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/installed-initcall-table-probe.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download exact initramfs artifact
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: exact
+
+      - name: Dump installed initcall table
+        run: |
+          set -o pipefail
+          python3 scripts/run-minimachine-linux.py exact/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in exact/llvm/linux-initramfs-p3-cache.pkl.gz \
+            --initramfs exact/out/minimachine-initramfs.cpio \
+            --probe-initcall-table \
+            2>&1 | tee initcall-table.log

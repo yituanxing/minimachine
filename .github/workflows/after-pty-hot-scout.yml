@@ -1,0 +1,95 @@
+name: Linux MiniMachine After PTY Hot Scout
+
+on:
+  push:
+    branches: [work/checkpoint-after-kallsyms]
+    paths:
+      - .github/workflows/after-pty-hot-scout.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: minimachine-after-pty-hot-scout
+  cancel-in-progress: true
+
+jobs:
+  scout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download after-PTY checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33257496633
+          github-token: ${{ github.token }}
+          name: minimachine-blake2s-scout2-33257496633
+          path: scout1-source
+
+      - name: Download P3 program cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33249488447
+          github-token: ${{ github.token }}
+          name: minimachine-double-hot-33249488447
+          path: p3-cache-source
+
+      - name: Find matching Linux LLVM artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(
+            gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/linux-minimachine-boot.yml/runs?status=completed&per_page=30"               --jq '.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main") | .id' |
+              head -n 1
+          )"
+          test -n "$run_id"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download linked Linux LLVM image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: minimachine-linux-boot-*
+          path: replay-source
+          merge-multiple: true
+
+      - name: Prepare hot inputs
+        run: |
+          checkpoint="$(find scout1-source -name 'blake2s-scout2.chk.gz' -print -quit)"
+          cache="$(find p3-cache-source -name 'linux-p3-cache.pkl.gz' -print -quit)"
+          test -n "$checkpoint"
+          test -n "$cache"
+          cp "$checkpoint" replay-source/llvm/scout1.chk.gz
+          cp "$cache" replay-source/llvm/linux-p3-cache.pkl.gz
+
+      - name: Continue 20M steps through BLAKE2s selftest
+        run: |
+          set +e
+          set -o pipefail
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/scout1.chk.gz             --checkpoint-initcall blake2s_mod_init             --checkpoint-out replay-source/llvm/after-pty-scout.chk.gz             --checkpoint-function prepare_namespace             --checkpoint-function-hit 1             --stop-after-checkpoint             --checkpoint-at-limit             --max-steps 20000000             --progress-every 0             2>&1 | tee replay-source/llvm/blake2s-scout2.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "BLAKE2S_SCOUT2_STATUS $status"
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED' replay-source/llvm/after-pty-scout.log
+          test -s replay-source/llvm/after-pty-scout.chk.gz
+          tail -n 180 replay-source/llvm/after-pty-scout.log
+
+      - name: Upload scout checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-after-pty-scout-${{ github.run_id }}
+          path: |
+            replay-source/llvm/after-pty-scout.log
+            replay-source/llvm/after-pty-scout.chk.gz
+          if-no-files-found: ignore
+          retention-days: 14

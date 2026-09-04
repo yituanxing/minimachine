@@ -1,0 +1,133 @@
+name: MiniMachine Real BusyBox Census
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  busybox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      BUSYBOX_VERSION: "1.37.0"
+      BUSYBOX_SHA256: "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install BusyBox and LLVM dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git ca-certificates \
+            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross qemu-user \
+            clang-18 llvm-18 lld-18
+          clang-18 --version
+          riscv64-linux-gnu-gcc --version | head -1
+          qemu-riscv64 --version | head -1
+
+      - name: Fetch pinned upstream BusyBox
+        run: |
+          mkdir -p build
+          tarball="busybox-${BUSYBOX_VERSION}.tar.bz2"
+          curl -fL --retry 5 --retry-delay 2 \
+            -o "build/$tarball" \
+            "https://busybox.net/downloads/$tarball"
+          echo "${BUSYBOX_SHA256}  build/$tarball" | sha256sum -c -
+          tar -xjf "build/$tarball" -C build
+          mv "build/busybox-${BUSYBOX_VERSION}" build/busybox
+          printf 'version=%s\nsha256=%s\n' \
+            "$BUSYBOX_VERSION" "$BUSYBOX_SHA256" | tee build/busybox.commit
+
+      - name: Build normal static RISC-V BusyBox baseline
+        working-directory: build/busybox
+        run: |
+          make defconfig
+          sed -ri 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/' .config
+          sed -ri 's/^CONFIG_SHA1_HWACCEL=y$/# CONFIG_SHA1_HWACCEL is not set/' .config
+          sed -ri 's/^CONFIG_SHA256_HWACCEL=y$/# CONFIG_SHA256_HWACCEL is not set/' .config
+          sed -ri 's/^CONFIG_TC=y$/# CONFIG_TC is not set/' .config
+          make oldconfig
+          cp .config ../busybox-defconfig-static.config
+          /usr/bin/time -f 'BUSYBOX_GCC_BUILD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            make -j2 CROSS_COMPILE=riscv64-linux-gnu- V=0
+          file busybox
+          riscv64-linux-gnu-readelf -h busybox | tee ../busybox-readelf.txt
+          qemu-riscv64 ./busybox echo BUSYBOX_BASELINE_OK | tee ../busybox-baseline.txt
+          printf 'echo BUSYBOX_ASH_OK\nexit\n' | \
+            qemu-riscv64 ./busybox ash | tee ../busybox-ash.txt
+          grep -Fx 'BUSYBOX_BASELINE_OK' ../busybox-baseline.txt
+          grep -Fx 'BUSYBOX_ASH_OK' ../busybox-ash.txt
+
+      - name: Rebuild BusyBox objects as RISC-V LLVM bitcode
+        working-directory: build/busybox
+        run: |
+          make clean
+          set +e
+          /usr/bin/time -f 'BUSYBOX_CLANG_BUILD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            make -j2 V=1 \
+              CC='clang-18 --target=riscv64-linux-gnu --sysroot=/usr/riscv64-linux-gnu --gcc-toolchain=/usr -flto' \
+              HOSTCC=gcc \
+              2>&1 | tee ../busybox-clang-build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "BUSYBOX_CLANG_BUILD_STATUS=$status" | tee -a ../busybox-clang-build.log
+
+          mkdir -p ../busybox-bc
+          : > ../busybox-bc/index.tsv
+          count=0
+          while IFS= read -r -d '' obj; do
+            if llvm-dis-18 "$obj" -o /dev/null >/dev/null 2>&1; then
+              out="../busybox-bc/$(printf '%05d' "$count").bc"
+              cp "$obj" "$out"
+              printf '%s\t%s\n' "$(basename "$out")" "$obj" >> ../busybox-bc/index.tsv
+              count=$((count + 1))
+            fi
+          done < <(find . -type f -name '*.o' -print0)
+
+          echo "BUSYBOX_BITCODE_OBJECTS=$count" | tee ../busybox-bitcode-count.txt
+          test "$count" -gt 0
+
+      - name: Run MiniMachine BusyBox LLVM to P3 census
+        run: |
+          /usr/bin/time -f 'BUSYBOX_P3_CENSUS_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 scripts/abi_bc.py build/busybox-bc \
+              --llvm-major 18 \
+              --json build/busybox-p3-census.json \
+              2>&1 | tee build/busybox-p3-census.log
+          grep -F 'ABI_SUMMARY ' build/busybox-p3-census.log
+          grep -F 'RUNTIME_EXECUTABLE ' build/busybox-p3-census.log
+          grep -F 'GLOBAL_SURFACE ' build/busybox-p3-census.log
+          grep -E '^(UNRESOLVED_HELPER|UNRESOLVED_SYS|ESCAPE_GROUP) ' \
+            build/busybox-p3-census.log | head -80 || true
+
+      - name: Summarize real BusyBox gate
+        run: |
+          echo '=== upstream baseline ==='
+          cat build/busybox-baseline.txt
+          cat build/busybox-ash.txt
+          echo '=== bitcode objects ==='
+          cat build/busybox-bitcode-count.txt
+          echo '=== MiniMachine census ==='
+          grep -E '^(ABI_SUMMARY|RUNTIME_EXECUTABLE|GLOBAL_SURFACE|DECL_SURFACE|BUSYBOX_P3_CENSUS_WALL=)' \
+            build/busybox-p3-census.log || true
+
+      - name: Upload BusyBox census
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-census-${{ github.run_id }}
+          path: |
+            build/busybox.commit
+            build/busybox-defconfig-static.config
+            build/busybox-readelf.txt
+            build/busybox-baseline.txt
+            build/busybox-ash.txt
+            build/busybox-clang-build.log
+            build/busybox-bitcode-count.txt
+            build/busybox-bc/index.tsv
+            build/busybox-p3-census.json
+            build/busybox-p3-census.log
+          if-no-files-found: ignore
+          retention-days: 14

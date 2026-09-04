@@ -1,0 +1,45 @@
+name: P3 Syscall Function Census
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/p3-syscall-function-census.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  census:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33294699007
+          github-token: ${{ github.token }}
+          name: minimachine-native-exec-hot-33294699007
+          path: hot
+      - name: List syscall-like P3 functions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from src.minimachine.program_cache import load_program_cache
+          from src.minimachine.checkpoint import image_fingerprint
+          # cache identity is checked only when an image hash is supplied.
+          # Inspect names directly from the trusted exact run artifact.
+          import gzip,pickle
+          with gzip.open("hot/exec-hot-p3-cache.pkl.gz","rb") as f:
+              obj=pickle.load(f)
+          program=obj["cache"].program
+          keys=sorted(program.functions)
+          needles=("ksys_","__se_sys_","__do_sys_","sys_","do_execve","kernel_execve","vfs_","filp_open")
+          hits=[k for k in keys if any(n in k for n in needles)]
+          print("P3_SYSCALL_FUNCTION_COUNT",len(hits))
+          for k in hits[:1200]:
+              print("P3_SYSCALL_FUNCTION",k)
+          PY

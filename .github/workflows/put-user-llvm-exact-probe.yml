@@ -1,0 +1,53 @@
+name: MiniMachine Put User LLVM Exact Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/put-user-llvm-exact-probe.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download exact image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: exact
+      - name: Extract exact LLVM function
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          text=Path("exact/llvm/linked.ll").read_text()
+          target="@__put_user_fn.5658("
+          start=-1
+          for pos,line in enumerate(text.splitlines(keepends=True)):
+              if line.startswith("define ") and target in line:
+                  start=sum(len(x) for x in text.splitlines(keepends=True)[:pos])
+                  break
+          if start < 0:
+              raise SystemExit("target definition missing")
+          depth=0
+          end=None
+          for i in range(start,len(text)):
+              if text[i]=="{": depth+=1
+              elif text[i]=="}":
+                  depth-=1
+                  if depth==0:
+                      end=i+1
+                      break
+          print("PUT_USER_LLVM_BEGIN")
+          print(text[start:end])
+          print("PUT_USER_LLVM_END")
+          PY

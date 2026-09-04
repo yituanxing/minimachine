@@ -1,0 +1,88 @@
+name: MiniMachine BusyBox Defconfig Exec Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/busybox-defconfig-exec-probe.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download 64 MiB Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33346013400
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33346013400
+          path: linux
+
+      - name: Download full defconfig BusyBox
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33313986393
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-bundle-33313986393
+          path: defconfig
+
+      - name: Download 64 MiB defconfig exec checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33347411445
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-defconfig-cold-33347411445
+          path: cold
+
+      - name: Rebuild exact defconfig initramfs
+        run: |
+          python3 scripts/build-minimachine-initramfs.py \
+            build/busybox-defconfig.cpio \
+            --init-image defconfig/busybox-ash.bflt
+          test -s cold/busybox-defconfig-kernel-execve.chk.gz
+
+      - name: Probe exact /init exec errno
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'DEFCFG_EXEC_PROBE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in linux/llvm/linux-initramfs-p3-cache.pkl.gz \
+            --initramfs build/busybox-defconfig.cpio \
+            --native-vm \
+            --checkpoint-in cold/busybox-defconfig-kernel-execve.chk.gz \
+            --probe-run-init-after-checkpoint \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/defconfig-exec-probe.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/defconfig-exec-probe.log
+          grep -F 'BOOT_EXEC_INIT_EXEC_PROBE path=/init ' build/defconfig-exec-probe.log
+
+      - name: Upload probe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-defconfig-exec-probe-${{ github.run_id }}
+          path: build/defconfig-exec-probe.log
+          if-no-files-found: warn
+          retention-days: 7

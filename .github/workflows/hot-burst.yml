@@ -1,0 +1,110 @@
+name: Linux MiniMachine Hot Burst
+
+on:
+  push:
+    branches: [work/checkpoint-after-kallsyms]
+    paths:
+      - .github/workflows/hot-burst.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: minimachine-hot-burst
+  cancel-in-progress: true
+
+jobs:
+  burst:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download 592M checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33259338414
+          github-token: ${{ github.token }}
+          name: minimachine-blake2s-fast-33259338414
+          path: checkpoint-source
+
+      - name: Download P3 program cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33249488447
+          github-token: ${{ github.token }}
+          name: minimachine-double-hot-33249488447
+          path: p3-cache-source
+
+      - name: Find matching Linux LLVM artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(
+            gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/linux-minimachine-boot.yml/runs?status=completed&per_page=30"               --jq '.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main") | .id' |
+              head -n 1
+          )"
+          test -n "$run_id"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download linked Linux LLVM image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: minimachine-linux-boot-*
+          path: replay-source
+          merge-multiple: true
+
+      - name: Prepare burst inputs
+        run: |
+          checkpoint="$(find checkpoint-source -name 'blake2s-fast-next.chk.gz' -print -quit)"
+          cache="$(find p3-cache-source -name 'linux-p3-cache.pkl.gz' -print -quit)"
+          test -n "$checkpoint"
+          test -n "$cache"
+          cp "$checkpoint" replay-source/llvm/hot-current.chk.gz
+          cp "$cache" replay-source/llvm/linux-p3-cache.pkl.gz
+
+      - name: Roll three 40M slices
+        run: |
+          set -o pipefail
+          : > replay-source/llvm/hot-burst-summary.log
+          for slice in 1 2 3; do
+            echo "HOT_BURST_SLICE_BEGIN $slice" | tee -a replay-source/llvm/hot-burst-summary.log
+            rm -f replay-source/llvm/hot-next.chk.gz replay-source/llvm/hot-slice.log
+            set +e
+            python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll               --linker-contract configs/linux-6.6.143-minimachine-linker.json               --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz               --checkpoint-in replay-source/llvm/hot-current.chk.gz               --checkpoint-out replay-source/llvm/hot-next.chk.gz               --checkpoint-function prepare_namespace               --checkpoint-function-hit 1               --stop-after-checkpoint               --checkpoint-at-limit               --checkpoint-on-error               --max-steps 40000000               --progress-every 0               2>&1 | tee replay-source/llvm/hot-slice.log
+            status=${PIPESTATUS[0]}
+            set -e
+            grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|CHECKPOINT_SAVED|CHECKPOINT_FUNCTION_PROGRESS|BLOCKED|HALTED|INITCALL_ENTER)' replay-source/llvm/hot-slice.log | tail -n 80 | tee -a replay-source/llvm/hot-burst-summary.log || true
+            echo "HOT_BURST_SLICE_STATUS $slice $status" | tee -a replay-source/llvm/hot-burst-summary.log
+            test -s replay-source/llvm/hot-next.chk.gz || break
+            cp replay-source/llvm/hot-next.chk.gz replay-source/llvm/hot-current.chk.gz
+            if grep -F 'reason=error' replay-source/llvm/hot-slice.log >/dev/null; then
+              echo "HOT_BURST_STOP reason=error slice=$slice" | tee -a replay-source/llvm/hot-burst-summary.log
+              break
+            fi
+            if grep -E 'BOOT_EXEC_CHECKPOINT_FUNCTION_PROGRESS function=prepare_namespace hits=[1-9]' replay-source/llvm/hot-slice.log >/dev/null; then
+              echo "HOT_BURST_STOP reason=prepare_namespace slice=$slice" | tee -a replay-source/llvm/hot-burst-summary.log
+              break
+            fi
+          done
+
+      - name: Upload burst checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-hot-burst-${{ github.run_id }}
+          path: |
+            replay-source/llvm/hot-burst-summary.log
+            replay-source/llvm/hot-current.chk.gz
+            replay-source/llvm/hot-next.chk.gz
+            replay-source/llvm/hot-slice.log
+          if-no-files-found: ignore
+          retention-days: 14

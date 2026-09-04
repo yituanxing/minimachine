@@ -1,0 +1,108 @@
+name: MiniMachine Echo Parser Refresh
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/shell-echo-parser-refresh.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  echo-refresh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download console Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33295701837
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33295701837
+          path: console
+
+      - name: Download echo checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33296957158
+          github-token: ${{ github.token }}
+          name: minimachine-shell-echo-33296957158
+          path: echo
+
+      - name: Rebuild current P3 and restore echo checkpoint
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          printf 'hello\n' | \
+          /usr/bin/time -f 'ECHO_REFRESH_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          python3 scripts/run-minimachine-linux.py console/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-out build/console-current-p3-cache.pkl.gz \
+            --initramfs echo/mmsh-echo.cpio \
+            --native-vm \
+            --checkpoint-in echo/mmsh-echo-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/echo-refresh.log
+
+      - name: Assert parser fix and incremental userspace pack
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path("build/echo-refresh.log").read_text(errors="replace")
+          required = [
+              "BOOT_EXEC_CHECKPOINT_RESTORED",
+              "BOOT_EXEC_HOST_INPUT requested=128 returned=6",
+              "data=68656c6c6f0a",
+              "BOOT_EXEC_USER_READ_BUFFER ptr=0x640c90 result=6 data=68656c6c6f0a",
+              "BOOT_EXEC_NATIVE_APPEND_PACK ",
+              "BOOT_EXEC_NATIVE_APPEND functions=1",
+              "BOOT_EXEC_HALTED",
+              "ECHO_REFRESH_WALL=",
+          ]
+          for marker in required:
+              if marker not in text:
+                  raise SystemExit(f"missing marker: {marker}")
+          if "ptr=0x40 data=68656c6c6f0a" in text:
+              raise SystemExit("inline-asm ptrtoint regression still maps console buffer to 0x40")
+          full_packs = [
+              line for line in text.splitlines()
+              if "BOOT_EXEC_NATIVE_PACK " in line
+          ]
+          append_packs = [
+              line for line in text.splitlines()
+              if "BOOT_EXEC_NATIVE_APPEND_PACK " in line
+          ]
+          if len(full_packs) != 1:
+              raise SystemExit(f"expected exactly one kernel full pack, got {len(full_packs)}")
+          if len(append_packs) != 1:
+              raise SystemExit(f"expected exactly one userspace append pack, got {len(append_packs)}")
+          print("ECHO_PARSER_REFRESH_ASSERT_PASS")
+          for line in full_packs + append_packs:
+              print(line)
+          PY
+
+      - name: Upload refreshed P3 and echo trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-console-current-p3-${{ github.run_id }}
+          path: |
+            build/console-current-p3-cache.pkl.gz
+            build/echo-refresh.log
+          if-no-files-found: ignore
+          retention-days: 7

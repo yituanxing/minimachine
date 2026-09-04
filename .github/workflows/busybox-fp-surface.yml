@@ -1,0 +1,115 @@
+name: MiniMachine BusyBox FP Surface
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/busybox-fp-surface.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  surface:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CARRIER_RUN: "33300177445"
+      CARRIER_NAME: "minimachine-busybox-bitcode-33300177445"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-18
+
+      - name: Download frozen BusyBox carrier
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/carrier
+          gh run download "$CARRIER_RUN" \
+            --repo "${{ github.repository }}" \
+            --name "$CARRIER_NAME" \
+            --dir build/carrier
+          test "$(cat build/carrier/busybox-bitcode-count.txt)" = "BUSYBOX_BITCODE_OBJECTS=571"
+
+      - name: Census floating-point IR
+        run: |
+          python3 - <<'PY'
+          from collections import Counter, defaultdict
+          from pathlib import Path
+          import re
+          import subprocess
+
+          root = Path("build/carrier")
+          index = {}
+          for line in (root / "busybox-bc/index.tsv").read_text().splitlines():
+              name, path = line.split("\t", 1)
+              index[name] = path
+
+          op_re = re.compile(
+              r"^\s*(?:%[-A-Za-z$._0-9]+\s*=\s*)?"
+              r"(fadd|fsub|fmul|fdiv|frem|fneg|fcmp|"
+              r"uitofp|sitofp|fptoui|fptosi|fptrunc|fpext)\b"
+          )
+          type_re = re.compile(r"\b(half|float|double|fp128)\b")
+          op_counts = Counter()
+          op_types = Counter()
+          files = defaultdict(Counter)
+          samples = {}
+
+          for bc in sorted((root / "busybox-bc").glob("*.bc")):
+              p = subprocess.run(
+                  ["llvm-dis-18", str(bc), "-o", "-"],
+                  check=True,
+                  text=True,
+                  stdout=subprocess.PIPE,
+              )
+              for line in p.stdout.splitlines():
+                  m = op_re.match(line)
+                  if not m:
+                      continue
+                  op = m.group(1)
+                  ty = ",".join(sorted(set(type_re.findall(line)))) or "none"
+                  op_counts[op] += 1
+                  op_types[(op, ty)] += 1
+                  files[bc.name][op] += 1
+                  samples.setdefault((op, ty), line.strip())
+
+          print("FP_SURFACE total_sites=" + str(sum(op_counts.values())))
+          for op, n in sorted(op_counts.items()):
+              print(f"FP_OPCODE {op} sites={n}")
+          for (op, ty), n in sorted(op_types.items()):
+              print(f"FP_TYPE {op} type={ty} sites={n} sample={samples[(op, ty)]}")
+          for name in sorted(files):
+              detail = ",".join(f"{op}:{n}" for op, n in sorted(files[name].items()))
+              print(f"FP_FILE {name} source={index.get(name,'?')} {detail}")
+          PY
+
+      - name: Census whole-program optimized LTO
+        run: |
+          mkdir -p build/whole
+          cp build/carrier/whole-lto/busybox_unstripped.0.4.opt.bc \
+            build/whole/busybox.bc
+          /usr/bin/time -f 'BUSYBOX_WHOLE_CENSUS_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 scripts/abi_bc.py build/whole \
+              --llvm-major 18 \
+              --json build/busybox-whole-census.json \
+              2>&1 | tee build/busybox-whole-census.log || true
+          grep -E '^(ABI_SUMMARY|RUNTIME_EXECUTABLE|GLOBAL_SURFACE|DECL_SURFACE|UNRESOLVED_HELPER|UNRESOLVED_SYS|ESCAPE_GROUP)' \
+            build/busybox-whole-census.log | head -120 || true
+
+      - name: Upload FP surface
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-fp-surface-${{ github.run_id }}
+          path: |
+            build/busybox-whole-census.json
+            build/busybox-whole-census.log
+          if-no-files-found: ignore
+          retention-days: 14

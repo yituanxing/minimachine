@@ -1,0 +1,250 @@
+name: MiniMachine Lua Runtime Hot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/runtime.py
+      - src/minimachine/native_vm.py
+      - src/minimachine/user_bundle.py
+      - scripts/run-minimachine-linux.py
+      - linux-overlay/arch/minimachine/**
+      - scripts/build-minimachine-initramfs.py
+      - scripts/check-minimachine-boot.sh
+      - .github/workflows/initramfs-build.yml
+      - .github/workflows/refresh-console-p3-cache.yml
+      - .github/workflows/lua-runtime-hot.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: lua-runtime-hot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lua-hot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download generation-matched Linux P3 cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build
+          lowering_sha="$(git log -1 --format=%H -- \
+            src/minimachine/program_cache.py \
+            src/minimachine/llvm_text.py \
+            src/minimachine/layout.py \
+            src/minimachine/legalize.py \
+            src/minimachine/abi.py \
+            src/minimachine/lower_p3.py \
+            src/minimachine/muir.py \
+            src/minimachine/p3.py \
+            src/minimachine/verify.py \
+            src/minimachine/image.py)"
+          linux_sha="$(git log -1 --format=%H -- \
+            linux-overlay/arch/minimachine \
+            scripts/build-minimachine-initramfs.py \
+            scripts/check-minimachine-boot.sh \
+            .github/workflows/initramfs-build.yml)"
+          test -n "$lowering_sha"
+          test -n "$linux_sha"
+
+          refresh_id=""
+          for candidate_id in $(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow refresh-console-p3-cache.yml \
+            --branch work/native-p3-vm \
+            --status success \
+            --limit 30 \
+            --json databaseId \
+            --jq '.[].databaseId'); do
+            rm -rf candidate-cache
+            if ! gh run download "$candidate_id" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "minimachine-linux-p3-console-current-$candidate_id" \
+              --dir candidate-cache >/dev/null 2>&1; then
+              continue
+            fi
+            test -s candidate-cache/input-run.env || continue
+            candidate_lowering="$(sed -n 's/^LOWERING_SHA=//p' candidate-cache/input-run.env)"
+            candidate_linux="$(sed -n 's/^LINUX_SHA=//p' candidate-cache/input-run.env)"
+            if [ "$candidate_lowering" = "$lowering_sha" ] && \
+               [ "$candidate_linux" = "$linux_sha" ]; then
+              refresh_id="$candidate_id"
+              rm -rf current-cache
+              mv candidate-cache current-cache
+              break
+            fi
+          done
+          test -n "$refresh_id"
+
+          . current-cache/input-run.env
+          test "$LOWERING_SHA" = "$lowering_sha"
+          test "$LINUX_SHA" = "$linux_sha"
+          test -n "$LINUX_RUN_ID"
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+
+          gh run download "$LINUX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$LINUX_RUN_ID" \
+            --dir linux
+          test -s linux/llvm/linked.ll
+
+          printf 'LOWERING_SHA=%s\nLINUX_SHA=%s\nP3_REFRESH_RUN_ID=%s\nLINUX_RUN_ID=%s\n' \
+            "$lowering_sha" "$linux_sha" "$refresh_id" "$LINUX_RUN_ID" \
+            | tee build/hot-inputs.env
+
+      - name: Find linked-image-compatible Lua exec checkpoint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prior-runtime prior-bundle
+          linked_sha="$(python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          text = Path("linux/llvm/linked.ll").read_text()
+          print(hashlib.sha256(text.encode("utf-8")).hexdigest())
+          PY
+          )"
+          test -n "$linked_sha"
+          echo "LUA_LINKED_IMAGE_SHA256=$linked_sha" | tee -a build/hot-inputs.env
+
+          found=""
+          for attempt in $(seq 1 60); do
+            for run_id in $(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow lua-real-software.yml \
+              --branch work/native-p3-vm \
+              --limit 20 \
+              --json databaseId \
+              --jq '.[].databaseId'); do
+              rm -rf prior-runtime/* prior-bundle/*
+              if ! gh run download "$run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "minimachine-lua54-runtime-$run_id" \
+                --dir prior-runtime >/dev/null 2>&1; then
+                continue
+              fi
+              if ! gh run download "$run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "minimachine-lua54-$run_id" \
+                --dir prior-bundle >/dev/null 2>&1; then
+                continue
+              fi
+              test -s prior-runtime/lua-kernel-execve.chk.gz || continue
+              test -s prior-runtime/lua-rootfs.cpio || continue
+              test -s prior-bundle/lua54.bflt || continue
+
+              read -r checkpoint_image checkpoint_rootfs < <(python3 - <<'PY'
+          import gzip
+          import pickle
+          with gzip.open("prior-runtime/lua-kernel-execve.chk.gz", "rb") as handle:
+              payload = pickle.load(handle)
+          print(payload.get("image_sha256", ""), payload.get("initramfs_sha256", ""))
+          PY
+              )
+              rootfs_sha="$(sha256sum prior-runtime/lua-rootfs.cpio | awk '{print $1}')"
+              if [ "$checkpoint_image" = "$linked_sha" ] && \
+                 [ "$checkpoint_rootfs" = "$rootfs_sha" ]; then
+                found="$run_id"
+                break
+              fi
+            done
+            if [ -n "$found" ]; then
+              break
+            fi
+            echo "waiting for linked-image-compatible Lua checkpoint attempt=$attempt image=$linked_sha"
+            sleep 10
+          done
+          test -n "$found"
+          echo "LUA_CHECKPOINT_RUN_ID=$found" | tee -a build/hot-inputs.env
+          ls -lh \
+            prior-runtime/lua-kernel-execve.chk.gz \
+            prior-runtime/lua-rootfs.cpio \
+            prior-bundle/lua54.bflt
+
+      - name: Replay real Lua from exec checkpoint
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/prior-bundle/lua54.bflt
+        run: |
+          set -o pipefail
+          set +e
+          /usr/bin/time -f 'LUA_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 240 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs prior-runtime/lua-rootfs.cpio \
+            --native-vm \
+            --native-report-every 25000000 \
+            --native-report-slot 1 \
+            --native-report-slot 118 \
+            --native-report-slot 119 \
+            --native-report-slot 123 \
+            --native-report-slot 126 \
+            --native-report-slot 174 \
+            --checkpoint-in prior-runtime/lua-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 250000000 \
+            --progress-every 0 \
+            2>&1 | tee build/lua-hot.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "LUA_HOT_STATUS=$status" | tee -a build/lua-hot.log
+
+      - name: Report Lua hot frontier
+        if: always()
+        run: |
+          cat build/hot-inputs.env || true
+          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|NATIVE_PROGRESS|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_EXIT|BLOCKED|HALTED)|LUA_' \
+            build/lua-hot.log | tail -700 || true
+
+          if grep -F 'BOOT_EXEC_BLOCKED ' build/lua-hot.log >/dev/null; then
+            echo LUA_HOT_FRONTIER=blocked
+            grep -F 'BOOT_EXEC_BLOCKED ' build/lua-hot.log | tail -1
+          elif grep -F 'LUA_MINIMACHINE_RUNTIME' build/lua-hot.log >/dev/null; then
+            echo LUA_HOT_FRONTIER=script-output-reached
+          else
+            echo LUA_HOT_FRONTIER=before-script-output
+          fi
+
+      - name: Assert real Lua frontier
+        run: |
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/lua-hot.log
+          for pattern in \
+            'program cache lowering fingerprint mismatch' \
+            'checkpoint image fingerprint mismatch' \
+            'BOOT_EXEC_BLOCKED '; do
+            if grep -F "$pattern" build/lua-hot.log >/dev/null; then
+              echo "unexpected Lua hot failure marker: $pattern"
+              grep -F "$pattern" build/lua-hot.log | tail -1
+              exit 1
+            fi
+          done
+          grep -F 'LUA_MINIMACHINE_RUNTIME' build/lua-hot.log
+
+      - name: Upload Lua hot evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-lua54-hot-${{ github.run_id }}
+          path: |
+            build/hot-inputs.env
+            build/lua-hot.log
+          if-no-files-found: warn
+          retention-days: 7

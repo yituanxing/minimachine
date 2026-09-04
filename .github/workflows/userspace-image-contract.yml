@@ -1,0 +1,21 @@
+name: MiniMachine Userspace Image Contract
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/user_image.py
+      - tests/test_user_image.py
+      - .github/workflows/userspace-image-contract.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run userspace image contract
+        run: python3 -m unittest tests.test_user_image -v

@@ -1,0 +1,190 @@
+name: MiniMachine BusyBox Ash First
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/busybox-ash-first.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ash:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      BUSYBOX_VERSION: "1.37.0"
+      BUSYBOX_SHA256: "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates \
+            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross qemu-user \
+            clang-18 llvm-18 lld-18
+          mkdir -p build
+
+      - name: Fetch pinned BusyBox
+        run: |
+          tarball="busybox-${BUSYBOX_VERSION}.tar.bz2"
+          curl -fL --retry 5 --retry-delay 2 \
+            -o "build/$tarball" \
+            "https://busybox.net/downloads/$tarball"
+          echo "${BUSYBOX_SHA256}  build/$tarball" | sha256sum -c -
+          tar -xjf "build/$tarball" -C build
+          mv "build/busybox-${BUSYBOX_VERSION}" build/busybox
+
+      - name: Configure ash-first BusyBox
+        run: |
+          cat > build/ash-first.fragment <<'EOF'
+          CONFIG_STATIC=y
+          CONFIG_BUSYBOX=y
+          CONFIG_ASH=y
+          CONFIG_SH_IS_ASH=y
+          CONFIG_BASH_IS_NONE=y
+          CONFIG_ASH_OPTIMIZE_FOR_SIZE=y
+          CONFIG_ASH_INTERNAL_GLOB=y
+          CONFIG_ASH_ECHO=y
+          CONFIG_ASH_PRINTF=y
+          CONFIG_ASH_TEST=y
+          CONFIG_ASH_BASH_COMPAT=n
+          CONFIG_ASH_JOB_CONTROL=n
+          CONFIG_ASH_ALIAS=n
+          CONFIG_ASH_RANDOM_SUPPORT=n
+          CONFIG_ASH_EXPAND_PRMT=n
+          CONFIG_ASH_IDLE_TIMEOUT=n
+          CONFIG_ASH_MAIL=n
+          CONFIG_ASH_HELP=n
+          CONFIG_ASH_GETOPTS=n
+          CONFIG_ASH_CMDCMD=n
+          CONFIG_FEATURE_SH_MATH=n
+          CONFIG_FEATURE_SH_EXTRA_QUIET=y
+          CONFIG_FEATURE_SH_STANDALONE=n
+          CONFIG_FEATURE_SH_NOFORK=n
+          CONFIG_FEATURE_SH_READ_FRAC=n
+          CONFIG_FEATURE_SH_HISTFILESIZE=n
+          CONFIG_FEATURE_SH_EMBEDDED_SCRIPTS=n
+          CONFIG_FEATURE_EDITING=n
+          EOF
+          cd build/busybox
+          KCONFIG_ALLCONFIG="$PWD/../ash-first.fragment" make allnoconfig
+          sed -ri 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/' .config
+          sed -ri 's/^CONFIG_PIE=y$/# CONFIG_PIE is not set/' .config
+          yes "" | make oldconfig >/dev/null
+          cp .config ../busybox-ash-first.config
+          grep -E '^(CONFIG_(STATIC|ASH|SH_IS_ASH|ASH_ECHO)=|# CONFIG_(ASH_JOB_CONTROL|FEATURE_SH_MATH|PIE))' .config || true
+          grep -Fx 'CONFIG_STATIC=y' .config
+
+      - name: Build and prove normal RISC-V ash
+        working-directory: build/busybox
+        run: |
+          /usr/bin/time -f 'ASH_GCC_BUILD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            make -j2 CROSS_COMPILE=riscv64-linux-gnu- V=0
+          file busybox
+          qemu-riscv64 ./busybox -c 'echo BUSYBOX_MINIMAL_ASH_OK' \
+            | tee ../ash-qemu.log
+          grep -Fx 'BUSYBOX_MINIMAL_ASH_OK' ../ash-qemu.log
+
+      - name: Build ash-first whole LTO carrier
+        working-directory: build/busybox
+        run: |
+          make clean
+          /usr/bin/time -f 'ASH_CLANG_BUILD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            make -j2 V=0 SKIP_STRIP=y \
+              CC='clang-18 --target=riscv64-linux-gnu --sysroot=/usr/riscv64-linux-gnu --gcc-toolchain=/usr -flto' \
+              HOSTCC=gcc \
+              CONFIG_EXTRA_LDFLAGS='-fuse-ld=lld -Wl,--save-temps'
+          test -f busybox_unstripped.0.4.opt.bc
+          cp busybox_unstripped.0.4.opt.bc ../busybox-ash-first.bc
+          llvm-dis-18 busybox_unstripped.0.4.opt.bc \
+            -o ../busybox-ash-first.ll
+          wc -c ../busybox-ash-first.bc ../busybox-ash-first.ll
+
+      - name: Build MiniMachine ash-first bundle
+        run: |
+          /usr/bin/time -f 'ASH_BUNDLE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 scripts/build-minimachine-busybox.py \
+              build/busybox-ash-first.ll \
+              build/busybox-ash-first.bflt \
+              --entry ash_main \
+              --entry-args linux-main \
+              --stack-size 0x40000 \
+              --report build/busybox-ash-first.json \
+              2>&1 | tee build/busybox-ash-first-bundle.log
+          cat build/busybox-ash-first.json
+          python3 scripts/build-minimachine-initramfs.py \
+            build/busybox-ash-first.cpio \
+            --init-image build/busybox-ash-first.bflt \
+            --init-output build/busybox-ash-first-copy.bflt
+
+      - name: Build native VM
+        run: |
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download exact Linux carrier
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: exact
+
+      - name: Download kernel_execve hotspot
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33294699007
+          github-token: ${{ github.token }}
+          name: minimachine-native-exec-hot-33294699007
+          path: hot
+
+      - name: Hot-inject real BusyBox and run ash
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          printf 'echo BUSYBOX_MINIMACHINE_HELLO\nexit\n' | \
+          /usr/bin/time -f 'ASH_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          python3 scripts/run-minimachine-linux.py exact/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in hot/exec-hot-p3-cache.pkl.gz \
+            --initramfs exact/out/minimachine-initramfs.cpio \
+            --native-vm \
+            --checkpoint-in hot/kernel-execve-hot.chk.gz \
+            --inject-init build/busybox-ash-first.bflt \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/busybox-ash-first-run.log
+
+      - name: Summarize first real ash run
+        if: always()
+        run: |
+          grep -E 'BOOT_EXEC_(CHECKPOINT_RESTORED|ROOTFS_INJECTED|ROOTFS_UNPACKED|USER_RUNTIME|USER_IMAGE_DATA|USER_ARGS|USER_HANDOFF|NATIVE_APPEND_PACK|NATIVE_APPEND|NATIVE_DATA_APPEND|NATIVE_HOST_APPEND|USER_SYSCALL|HOST_INPUT|HALTED|BLOCKED)|BUSYBOX_MINIMACHINE_HELLO|ASH_HOT_WALL' \
+            build/busybox-ash-first-run.log | tail -240 || true
+
+      - name: Upload ash-first evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-ash-first-${{ github.run_id }}
+          path: |
+            build/busybox-ash-first.config
+            build/ash-qemu.log
+            build/busybox-ash-first.bc
+            build/busybox-ash-first.bflt
+            build/busybox-ash-first.cpio
+            build/busybox-ash-first.json
+            build/busybox-ash-first-bundle.log
+            build/busybox-ash-first-run.log
+          if-no-files-found: ignore
+          retention-days: 14

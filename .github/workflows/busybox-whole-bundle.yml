@@ -1,0 +1,96 @@
+name: MiniMachine BusyBox Whole Bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/user_image.py
+      - src/minimachine/user_bundle.py
+      - scripts/build-minimachine-busybox.py
+      - tests/test_user_bundle.py
+      - .github/workflows/busybox-whole-bundle.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CARRIER_RUN: "33300177445"
+      CARRIER_NAME: "minimachine-busybox-bitcode-33300177445"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-18
+
+      - name: Run bundle contracts
+        run: |
+          python3 -m unittest \
+            tests.test_user_image \
+            tests.test_user_bundle \
+            tests.test_runtime \
+            -v
+
+      - name: Download frozen whole-LTO carrier
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/carrier
+          gh run download "$CARRIER_RUN" \
+            --repo "${{ github.repository }}" \
+            --name "$CARRIER_NAME" \
+            --dir build/carrier
+          llvm-dis-18 \
+            build/carrier/whole-lto/busybox_unstripped.0.4.opt.bc \
+            -o build/busybox-whole.ll
+
+      - name: Build namespaced BusyBox ash image
+        run: |
+          /usr/bin/time -f 'BUSYBOX_BUNDLE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 scripts/build-minimachine-busybox.py \
+              build/busybox-whole.ll \
+              build/busybox-ash.bflt \
+              --entry ash_main \
+              --entry-args linux-main \
+              --stack-size 0x80000 \
+              --report build/busybox-bundle.json \
+              2>&1 | tee build/busybox-bundle.log
+          grep -F 'BUSYBOX_BUNDLE ' build/busybox-bundle.log
+          grep -E '^BUSYBOX_EXTERNAL_(FUNCTION|DATA) ' \
+            build/busybox-bundle.log | sort || true
+
+      - name: Summarize payload
+        run: |
+          cat build/busybox-bundle.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path("build/busybox-bundle.json").read_text())
+          print(
+              "BUSYBOX_BUNDLE_GATE "
+              f"functions={r['functions']} "
+              f"external_functions={len(r['external_functions'])} "
+              f"external_data={len(r['external_data'])} "
+              f"payload={r['compressed_payload_bytes']} "
+              f"under16m={int(r['payload_under_16m'])}"
+          )
+          PY
+
+      - name: Upload BusyBox bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-bundle-${{ github.run_id }}
+          path: |
+            build/busybox-ash.bflt
+            build/busybox-bundle.json
+            build/busybox-bundle.log
+          if-no-files-found: ignore
+          retention-days: 14

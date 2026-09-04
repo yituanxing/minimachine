@@ -1,0 +1,118 @@
+name: MiniMachine Refresh Console P3 Cache
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/program_cache.py
+      - src/minimachine/llvm_text.py
+      - src/minimachine/layout.py
+      - src/minimachine/legalize.py
+      - src/minimachine/abi.py
+      - src/minimachine/lower_p3.py
+      - src/minimachine/muir.py
+      - src/minimachine/p3.py
+      - src/minimachine/verify.py
+      - src/minimachine/image.py
+      - linux-overlay/arch/minimachine/**
+      - scripts/build-minimachine-initramfs.py
+      - scripts/check-minimachine-boot.sh
+      - .github/workflows/initramfs-build.yml
+      - .github/workflows/refresh-console-p3-cache.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download exact qualified Linux artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build
+          lowering_sha="$(git log -1 --format=%H -- \
+            src/minimachine/program_cache.py \
+            src/minimachine/llvm_text.py \
+            src/minimachine/layout.py \
+            src/minimachine/legalize.py \
+            src/minimachine/abi.py \
+            src/minimachine/lower_p3.py \
+            src/minimachine/muir.py \
+            src/minimachine/p3.py \
+            src/minimachine/verify.py \
+            src/minimachine/image.py)"
+          linux_sha="$(git log -1 --format=%H -- \
+            linux-overlay/arch/minimachine \
+            scripts/build-minimachine-initramfs.py \
+            scripts/check-minimachine-boot.sh \
+            .github/workflows/initramfs-build.yml)"
+          test -n "$lowering_sha"
+          test -n "$linux_sha"
+
+          run_id=""
+          for attempt in $(seq 1 60); do
+            run_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow initramfs-build.yml \
+              --branch work/native-p3-vm \
+              --limit 50 \
+              --json databaseId,headSha,status,conclusion \
+              --jq ".[] | select(.headSha == \"$linux_sha\" and .status == \"completed\" and .conclusion == \"success\") | .databaseId" \
+              | head -1)"
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            echo "waiting for Linux-matched initramfs attempt=$attempt sha=$linux_sha"
+            sleep 10
+          done
+          test -n "$run_id"
+
+          printf 'LOWERING_SHA=%s\nLINUX_SHA=%s\nLINUX_RUN_ID=%s\n' \
+            "$lowering_sha" "$linux_sha" "$run_id" | tee build/input-run.env
+
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$run_id" \
+            --dir exact
+          test -s exact/llvm/linked.ll
+          test -s exact/out/minimachine-initramfs.cpio
+
+      - name: Build full current-lowering P3 cache
+        run: |
+          mkdir -p build
+          test -s exact/out/minimachine-initramfs.cpio
+          set +e
+          python3 scripts/run-minimachine-linux.py \
+            exact/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --initramfs exact/out/minimachine-initramfs.cpio \
+            --program-cache-out build/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --probe-kallsyms start_kernel \
+            --max-steps 1 \
+            2>&1 | tee build/full-refresh.log
+          status=${PIPESTATUS[0]}
+          set -e
+          grep -F 'BOOT_EXEC_PROGRAM_CACHE_SAVED path=build/linux-initramfs-p3-cache-full-current.pkl.gz' build/full-refresh.log
+          test -s build/linux-initramfs-p3-cache-full-current.pkl.gz
+          if [ "$status" -ne 0 ]; then
+            grep -F 'BOOT_EXEC_BLOCKED stage=kallsyms-probe error=step limit exceeded: 1' build/full-refresh.log
+          fi
+
+      - name: Upload refreshed cache
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-linux-p3-console-current-${{ github.run_id }}
+          path: |
+            build/input-run.env
+            build/linux-initramfs-p3-cache-full-current.pkl.gz
+            build/full-refresh.log
+          retention-days: 14

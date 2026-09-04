@@ -1,0 +1,192 @@
+name: MiniMachine BusyBox Setpwd Inspect
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/busybox-setpwd-inspect.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frozen BusyBox multicall image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33347461389
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-multicall-33347461389
+          path: busybox
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Reproduce BusyBox dynamic install without Linux
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 - <<'PY'
+          from importlib.util import module_from_spec, spec_from_file_location
+          from pathlib import Path
+          import struct
+          import sys
+
+          from src.minimachine.image import install_module_image
+          from src.minimachine.native_vm import NativeVM, MM_V_MEM, MM_V_IMM
+          from src.minimachine.runtime import helper_callback
+          from src.minimachine.user_image import BFLT_HEADER_SIZE, unpack_user_image
+          from src.minimachine.vm import Program
+
+          spec = spec_from_file_location(
+              "run_minimachine_linux_setpwd_inspect",
+              Path("scripts/run-minimachine-linux.py"),
+          )
+          assert spec is not None and spec.loader is not None
+          runner = module_from_spec(spec)
+          sys.modules[spec.name] = runner
+          spec.loader.exec_module(runner)
+
+          image = Path("busybox/busybox-multicall.bflt").read_bytes()
+          fields = struct.unpack(">4s15I", image[:BFLT_HEADER_SIZE])
+          data_start = fields[3]
+          user_image = unpack_user_image(image[BFLT_HEADER_SIZE:data_start])
+
+          program = Program()
+          vm = NativeVM(program)
+          runner.install_user_external_surface(vm, user_image, 0)
+          symbol = "__mm_user_ext_getcwd"
+          descriptor = program.symbol_addresses[symbol]
+
+          def show(stage):
+              print(
+                  "DYNAMIC_GETCWD "
+                  f"stage={stage} descriptor=0x{descriptor:x} "
+                  f"initial_entry=0x{program.initial_memory.read(descriptor,64):x} "
+                  f"live_entry=0x{vm.memory.read(descriptor,64):x} "
+                  f"initial_frame={program.initial_memory.read(descriptor+8,64)} "
+                  f"live_frame={vm.memory.read(descriptor+8,64)}"
+              )
+
+          show("externals")
+
+          for helper in user_image.runtime_helpers:
+              if helper in program.symbol_addresses:
+                  continue
+              callback = helper_callback(helper)
+              if callback is None:
+                  raise RuntimeError(f"unsupported helper {helper}")
+              program.register_service(helper, callback)
+
+          for function in user_image.functions:
+              program.add_function(function)
+          show("functions")
+
+          if user_image.image is not None:
+              install_module_image(program, user_image.image)
+          show("module-image")
+
+          vm._ensure_program_current()
+          show("native-sync")
+
+          code = program.block_code[("__mm_user_setpwd", "25")]
+          found = False
+          for insts, blocks in vm._extra_packed:
+              for block in blocks:
+                  if int(block.code) != code:
+                      continue
+                  found = True
+                  print(
+                      "DYNAMIC_SETPWD_BLOCK "
+                      f"code=0x{code:x} first={int(block.first)} count={int(block.count)}"
+                  )
+                  first = insts[int(block.first)]
+                  print(
+                      "DYNAMIC_SETPWD_IP0 "
+                      f"src_kind={int(first.src.kind)} "
+                      f"base_kind={int(first.src.base_kind)} "
+                      f"base_value=0x{int(first.src.base_value):x} "
+                      f"offset={int(first.src.offset)} "
+                      f"expected_descriptor=0x{descriptor:x}"
+                  )
+                  if int(first.src.kind) != MM_V_MEM:
+                      raise RuntimeError("setpwd ip0 is not a memory descriptor load")
+                  if int(first.src.base_kind) != MM_V_IMM:
+                      raise RuntimeError("setpwd getcwd descriptor base is unresolved")
+                  if int(first.src.base_value) != descriptor:
+                      raise RuntimeError(
+                          f"packed getcwd descriptor mismatch: "
+                          f"0x{int(first.src.base_value):x} != 0x{descriptor:x}"
+                      )
+                  break
+              if found:
+                  break
+          if not found:
+              raise RuntimeError("setpwd block 25 not found in appended native segment")
+          if vm.memory.read(descriptor, 64) == 0:
+              raise RuntimeError("getcwd descriptor entry is zero after native sync")
+          print("DYNAMIC_SETPWD_INSTALL_PASS")
+          PY
+
+      - name: Inspect setpwd P3 and external surface
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          from src.minimachine.user_image import BFLT_HEADER_SIZE, unpack_user_image
+
+          image = Path("busybox/busybox-multicall.bflt").read_bytes()
+          fields = struct.unpack(">4s15I", image[:BFLT_HEADER_SIZE])
+          data_start = fields[3]
+          program = unpack_user_image(image[BFLT_HEADER_SIZE:data_start])
+
+          print(
+              "SETpwd_IMAGE "
+              f"entry={program.entry} functions={len(program.functions)} "
+              f"externals={len(program.image.external_functions if program.image else ())}"
+          )
+          for name in (
+              "__mm_user_setpwd",
+              "__mm_user_getpwd",
+              "__mm_user_setvar",
+              "__mm_user_ckstrdup",
+          ):
+              fn = next((x for x in program.functions if x.name == name), None)
+              print(f"SETPWD_FUNCTION name={name} found={int(fn is not None)}")
+              if fn is None:
+                  continue
+              for bi, block in enumerate(fn.blocks):
+                  print(
+                      f"SETPWD_BLOCK function={name} index={bi} "
+                      f"label={block.label} instructions={len(block.instructions)}"
+                  )
+                  for ii, inst in enumerate(block.instructions):
+                      print(
+                          f"SETPWD_INST function={name} block={bi} "
+                          f"ip={ii} repr={inst!r}"
+                      )
+
+          if program.image is not None:
+              for ext in program.image.external_functions:
+                  if any(x in ext for x in ("getcwd", "free", "strdup", "malloc")):
+                      print(f"SETPWD_EXTERNAL {ext}")
+              for obj in program.image.objects:
+                  if any(x in obj.name for x in ("getcwd", "setpwd", "getpwd")):
+                      print(
+                          f"SETPWD_OBJECT name={obj.name} bytes={len(obj.data)} "
+                          f"relocs={len(obj.relocations)}"
+                      )
+                      for reloc in obj.relocations:
+                          print(f"SETPWD_RELOC object={obj.name} reloc={reloc!r}")
+          PY

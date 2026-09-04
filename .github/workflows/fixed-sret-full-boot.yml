@@ -1,0 +1,96 @@
+name: MiniMachine Fixed Sret Full Boot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/fixed-sret-full-boot.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  fixed-sret:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native P3 VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download exact default Linux initramfs image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: exact
+
+      - name: Regenerate P3 cache with fixed formal-argument parser
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'FIXED_CACHE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          python3 scripts/run-minimachine-linux.py exact/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --initramfs exact/out/minimachine-initramfs.cpio \
+            --program-cache-out fixed-linux-p3-cache.pkl.gz \
+            --probe-kallsyms start_kernel \
+            --max-steps 600000 \
+            2>&1 | tee fixed-cache-build.log
+
+      - name: Verify fixed build_open_how ABI shape
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from src.minimachine.llvm_text import parse_module
+
+          ll = Path("exact/llvm/linked.ll").read_text()
+          functions = {fn.name: fn for fn in parse_module(ll)}
+          fn = functions["build_open_how"]
+          print("FIXED_BUILD_OPEN_HOW_ARGS", fn.args)
+          assert len(fn.args) == 3, fn.args
+          assert all("struct." not in arg for arg in fn.args), fn.args
+          PY
+
+      - name: Full native boot with fixed cache
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'FIXED_FULL_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          python3 scripts/run-minimachine-linux.py exact/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in fixed-linux-p3-cache.pkl.gz \
+            --initramfs exact/out/minimachine-initramfs.cpio \
+            --native-vm \
+            --native-boot-phases-only \
+            --native-report-every 50000000 \
+            --stop-after-user-handoff \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee fixed-native-full.log
+
+      - name: Summarize result
+        if: always()
+        run: |
+          grep -E 'FIXED_|BOOT_EXEC_(NATIVE_PROGRESS|MILESTONE|INITRAMFS_NAME|INITRAMFS_COPY|INITRAMFS_RESET|INITRAMFS_UNPACK_ENTER|USER_HANDOFF|USER_HANDOFF_STOP|PANIC_ENTER|BLOCKED|HALTED|STAGE)' \
+            fixed-cache-build.log fixed-native-full.log 2>/dev/null || true
+
+      - name: Upload fixed cache and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-fixed-sret-${{ github.run_id }}
+          path: |
+            fixed-linux-p3-cache.pkl.gz
+            fixed-cache-build.log
+            fixed-native-full.log
+          if-no-files-found: ignore
+          retention-days: 14

@@ -1,0 +1,100 @@
+name: MiniMachine BusyBox Bitcode Carrier
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/busybox-bitcode-carrier.yml
+
+permissions:
+  contents: read
+
+jobs:
+  carrier:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      BUSYBOX_VERSION: "1.37.0"
+      BUSYBOX_SHA256: "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install carrier dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates \
+            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross \
+            clang-18 llvm-18 lld-18
+
+      - name: Fetch and configure pinned BusyBox
+        run: |
+          mkdir -p build
+          tarball="busybox-${BUSYBOX_VERSION}.tar.bz2"
+          curl -fL --retry 5 --retry-delay 2 \
+            -o "build/$tarball" \
+            "https://busybox.net/downloads/$tarball"
+          echo "${BUSYBOX_SHA256}  build/$tarball" | sha256sum -c -
+          tar -xjf "build/$tarball" -C build
+          mv "build/busybox-${BUSYBOX_VERSION}" build/busybox
+          cd build/busybox
+          make defconfig
+          sed -ri 's/^# CONFIG_STATIC is not set$/CONFIG_STATIC=y/' .config
+          sed -ri 's/^CONFIG_SHA1_HWACCEL=y$/# CONFIG_SHA1_HWACCEL is not set/' .config
+          sed -ri 's/^CONFIG_SHA256_HWACCEL=y$/# CONFIG_SHA256_HWACCEL is not set/' .config
+          sed -ri 's/^CONFIG_TC=y$/# CONFIG_TC is not set/' .config
+          make oldconfig
+          cp .config ../busybox-carrier.config
+
+      - name: Build RISC-V LLVM bitcode carrier
+        working-directory: build/busybox
+        run: |
+          set +e
+          /usr/bin/time -f 'BUSYBOX_CARRIER_BUILD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            make -j2 V=1 SKIP_STRIP=y \
+              CC='clang-18 --target=riscv64-linux-gnu --sysroot=/usr/riscv64-linux-gnu --gcc-toolchain=/usr -flto' \
+              HOSTCC=gcc \
+              CONFIG_EXTRA_LDFLAGS='-fuse-ld=lld -Wl,--save-temps' \
+              2>&1 | tee ../busybox-carrier-build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "BUSYBOX_CARRIER_BUILD_STATUS=$status" | tee -a ../busybox-carrier-build.log
+
+          mkdir -p ../busybox-bc
+          : > ../busybox-bc/index.tsv
+          count=0
+          while IFS= read -r -d '' obj; do
+            if llvm-dis-18 "$obj" -o /dev/null >/dev/null 2>&1; then
+              out="../busybox-bc/$(printf '%05d' "$count").bc"
+              cp "$obj" "$out"
+              printf '%s\t%s\n' "$(basename "$out")" "$obj" >> ../busybox-bc/index.tsv
+              count=$((count + 1))
+            fi
+          done < <(find . -type f -name '*.o' -print0)
+          echo "BUSYBOX_BITCODE_OBJECTS=$count" | tee ../busybox-bitcode-count.txt
+          test "$count" -eq 571
+
+          mkdir -p ../whole-lto
+          find . -maxdepth 2 -type f \
+            \( -name 'busybox_unstripped*.bc' -o -name '*.preopt.bc' -o -name '*.opt.bc' \) \
+            -print -exec cp '{}' ../whole-lto/ \; || true
+          echo "WHOLE_LTO_FILES=$(find ../whole-lto -type f | wc -l)" \
+            | tee ../whole-lto-count.txt
+          find ../whole-lto -type f -printf '%f %s\n' | sort \
+            | tee ../whole-lto-files.txt
+
+      - name: Upload frozen BusyBox bitcode
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-bitcode-${{ github.run_id }}
+          path: |
+            build/busybox-carrier.config
+            build/busybox-carrier-build.log
+            build/busybox-bitcode-count.txt
+            build/busybox-bc/
+            build/whole-lto/
+            build/whole-lto-count.txt
+            build/whole-lto-files.txt
+          if-no-files-found: error
+          retention-days: 30

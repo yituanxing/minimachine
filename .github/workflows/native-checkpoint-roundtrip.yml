@@ -1,0 +1,273 @@
+name: Native Checkpoint Round Trip
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - native/p3vm.c
+      - src/minimachine/native_vm.py
+      - src/minimachine/checkpoint.py
+      - .github/workflows/native-checkpoint-roundtrip.yml
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared native/p3vm.c -o build/libminimachine_p3vm.so
+      - name: Native instruction ABI contract
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 - <<'PY'
+          import ctypes
+          from src.minimachine.native_vm import CInst, COperand
+          print(
+              "NATIVE_INST_LAYOUT "
+              f"operand_bytes={ctypes.sizeof(COperand)} "
+              f"inst_bytes={ctypes.sizeof(CInst)}"
+          )
+          assert ctypes.sizeof(COperand) == 32
+          assert ctypes.sizeof(CInst) == 200
+          PY
+
+      - name: Checkpoint unit contracts
+        run: python3 -m unittest tests.test_checkpoint -v
+
+      - name: Native checkpoint save restore
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from src.minimachine import muir
+          from src.minimachine.abi import expand_function
+          from src.minimachine.lower_p3 import lower_function
+          from src.minimachine.vm import Program
+          from src.minimachine.native_vm import NativeVM
+          from src.minimachine.checkpoint import save_checkpoint, load_checkpoint
+
+          fn = muir.Function(
+              "idle",
+              [muir.Block("entry", [muir.Ret(muir.Imm(0))])],
+              set(),
+              (),
+          )
+          expanded, _ = expand_function(fn)
+          program = Program([lower_function(expanded)])
+          vm = NativeVM(program)
+          vm.enter_function("idle", (), stack_top=0x0f000000, result_count=1)
+          vm.memory.write(0x12345000, 64, 0x1122334455667788)
+          vm.memory.write(0x90001008, 32, 0xaabbccdd)
+          vm.steps = 123456
+          print("CP_STAGE before_count", flush=True)
+          count = int(vm._lib.mm_vm_mem_page_count(vm._handle))
+          print("CP_STAGE page_count", count, flush=True)
+          print("CP_STAGE before_snapshot", flush=True)
+          snap = vm.memory.snapshot_pages()
+          print(
+              "CP_STAGE snapshot_ok",
+              len(snap["page_nos"]), len(snap["data"]),
+              flush=True,
+          )
+          print("CP_STAGE before_direct_restore", flush=True)
+          vm.memory.restore_pages(snap)
+          print("CP_STAGE direct_restore_ok", flush=True)
+          assert vm.memory.read(0x12345000, 64) == 0x1122334455667788
+          assert vm.memory.read(0x90001008, 32) == 0xaabbccdd
+
+          path = Path("/tmp/native.chk.gz")
+          print("CP_STAGE before_save", flush=True)
+          save_checkpoint(vm, path, image_sha256="native-roundtrip")
+          print("CP_STAGE save_ok", path.stat().st_size, flush=True)
+
+          vm.memory.write(0x12345000, 64, 0)
+          vm.memory.write(0x90001008, 32, 0)
+          vm.steps = 1
+          print("CP_STAGE before_load", flush=True)
+          load_checkpoint(vm, path, image_sha256="native-roundtrip")
+          print("CP_STAGE load_ok", flush=True)
+
+          assert vm.memory.read(0x12345000, 64) == 0x1122334455667788
+          assert vm.memory.read(0x90001008, 32) == 0xaabbccdd
+          assert vm.steps == 123456
+          print("NATIVE_CHECKPOINT_ROUNDTRIP PASS", path.stat().st_size)
+          PY
+
+      - name: Native append-only program segment
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 - <<'PY'
+          from src.minimachine import muir
+          from src.minimachine.abi import expand_function
+          from src.minimachine.lower_p3 import lower_function
+          from src.minimachine.vm import Program
+          from src.minimachine.native_vm import NativeVM
+
+          def machine(fn):
+              expanded, _ = expand_function(fn)
+              return lower_function(expanded)
+
+          base = muir.Function(
+              "base",
+              [muir.Block("entry", [muir.Ret(muir.Imm(1))])],
+              set(),
+              (),
+          )
+          dynamic = muir.Function(
+              "dynamic",
+              [
+                  muir.Block(
+                      "entry",
+                      [
+                          muir.Br(
+                              muir.Width.I64,
+                              muir.Cond.EQ,
+                              muir.Slot("x"),
+                              muir.Imm(0),
+                              muir.Target(label="zero"),
+                              muir.Target(label="nonzero"),
+                          )
+                      ],
+                  ),
+                  muir.Block("zero", [muir.Ret(muir.Imm(7))]),
+                  muir.Block("nonzero", [muir.Ret(muir.Imm(9))]),
+              ],
+              {"x"},
+              ("x",),
+          )
+
+          program = Program([machine(base)])
+          vm = NativeVM(program)
+          assert vm.run_function("base", ()) == (1,)
+
+          program.add_function(machine(dynamic))
+          assert vm.run_function("dynamic", (0,)) == (7,)
+          assert vm.run_function("dynamic", (1,)) == (9,)
+          assert vm.run_function("base", ()) == (1,)
+          assert len(vm._extra_packed) == 1
+          print("NATIVE_PROGRAM_SEGMENT_APPEND PASS")
+          PY
+
+      - name: Native append-only host service
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 - <<'PY'
+          from src.minimachine import muir
+          from src.minimachine.abi import expand_function
+          from src.minimachine.lower_p3 import lower_function
+          from src.minimachine.vm import Program
+          from src.minimachine.native_vm import NativeVM
+
+          def machine(fn):
+              expanded, _ = expand_function(fn)
+              return lower_function(expanded)
+
+          base = muir.Function(
+              "base_host",
+              [muir.Block("entry", [muir.Ret(muir.Imm(1))])],
+              set(),
+              (),
+          )
+          dynamic = muir.Function(
+              "dynamic_host",
+              [
+                  muir.Block(
+                      "entry",
+                      [
+                          muir.Helper(
+                              "dynamic_service",
+                              (muir.Slot("x"),),
+                              muir.Slot("out"),
+                          ),
+                          muir.Ret(muir.Slot("out")),
+                      ],
+                  )
+              ],
+              {"x", "out"},
+              ("x",),
+          )
+
+          program = Program([machine(base)])
+          vm = NativeVM(program)
+          assert vm.run_function("base_host", ()) == (1,)
+
+          program.register_service(
+              "dynamic_service",
+              lambda _vm, args: args[0] + 41,
+          )
+          program.add_function(machine(dynamic))
+          assert vm.run_function("dynamic_host", (1,)) == (42,)
+          assert vm.run_function("base_host", ()) == (1,)
+          assert len(vm._extra_packed) == 1
+          assert "dynamic_service" in vm.program.host_services
+          print("NATIVE_HOST_SERVICE_APPEND PASS")
+          PY
+
+      - name: Native append-only global data
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 - <<'PY'
+          from src.minimachine import muir
+          from src.minimachine.abi import expand_function
+          from src.minimachine.lower_p3 import lower_function
+          from src.minimachine.vm import Program
+          from src.minimachine.native_vm import NativeVM
+
+          def machine(fn):
+              expanded, _ = expand_function(fn)
+              return lower_function(expanded)
+
+          base = muir.Function(
+              "base_data",
+              [muir.Block("entry", [muir.Ret(muir.Imm(1))])],
+              set(),
+              (),
+          )
+          reader = muir.Function(
+              "read_dynamic_data",
+              [
+                  muir.Block(
+                      "entry",
+                      [
+                          muir.Mov(
+                              muir.Width.I8,
+                              muir.Slot("out"),
+                              muir.Mem(
+                                  muir.Address(
+                                      muir.Symbol("dynamic_message"),
+                                      0,
+                                  ),
+                                  muir.Width.I8,
+                              ),
+                          ),
+                          muir.Ret(muir.Slot("out")),
+                      ],
+                  )
+              ],
+              {"out"},
+              (),
+          )
+
+          program = Program([machine(base)])
+          vm = NativeVM(program)
+          assert vm.run_function("base_data", ()) == (1,)
+
+          program.define_data_symbol(
+              "dynamic_message",
+              b"hello\0",
+              align=1,
+          )
+          program.add_function(machine(reader))
+          assert vm.run_function("read_dynamic_data", ()) == (ord("h"),)
+          assert vm.run_function("base_data", ()) == (1,)
+          print("NATIVE_PROGRAM_DATA_APPEND PASS")
+          PY

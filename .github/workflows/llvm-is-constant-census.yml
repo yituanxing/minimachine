@@ -1,0 +1,49 @@
+name: MiniMachine LLVM is.constant Census
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/llvm-is-constant-census.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  census:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download exact image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: exact
+      - name: Census llvm.is.constant
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          text=Path("exact/llvm/linked.ll").read_text()
+          lines=text.splitlines()
+          uses=[]
+          current=None
+          for i,line in enumerate(lines):
+              if line.startswith("define "):
+                  m=re.search(r'@([-A-Za-z$._0-9]+)\(',line)
+                  current=m.group(1) if m else None
+              if "llvm.is.constant" in line and not line.startswith("declare "):
+                  uses.append((i,current,line))
+          print("IS_CONSTANT_USE_COUNT",len(uses))
+          for i,fn,line in uses:
+              print(f"USE line={i+1} function={fn} text={line.strip()}")
+              lo=max(0,i-4); hi=min(len(lines),i+8)
+              for j in range(lo,hi):
+                  print(f"  {j+1}: {lines[j]}")
+          PY

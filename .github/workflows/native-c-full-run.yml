@@ -1,0 +1,112 @@
+name: Linux MiniMachine Native C Full Boot
+
+on:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/llvm_text.py
+      - native/**
+      - src/minimachine/native_vm.py
+      - .github/workflows/native-c-full-run.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  native-full:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build optimized native P3 VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared native/p3vm.c -o build/libminimachine_p3vm.so
+          ls -lh build/libminimachine_p3vm.so
+
+      - name: Download default Linux with initramfs
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: replay-source
+
+      - name: Run full Linux boot from start_kernel
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'NATIVE_FULL_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-out replay-source/llvm/linux-initramfs-p3-cache-fixed.pkl.gz \
+            --initramfs replay-source/out/minimachine-initramfs.cpio \
+            --native-vm \
+            --native-boot-phases-only \
+            --native-report-every 50000000 \
+            --stop-after-user-handoff \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee replay-source/llvm/native-c-full.log
+
+      - name: Summarize phase timing
+        if: always()
+        run: |
+          python3 - <<'PY' | tee replay-source/llvm/native-c-full-summary.txt
+          from pathlib import Path
+          import re
+
+          path = Path("replay-source/llvm/native-c-full.log")
+          text = path.read_text(errors="replace") if path.exists() else ""
+          print("NATIVE_FULL_SUMMARY")
+          for line in text.splitlines():
+              if (
+                  "BOOT_EXEC_NATIVE_PACK " in line
+                  or "BOOT_EXEC_STAGE " in line
+                  or "BOOT_EXEC_USER_HANDOFF " in line
+                  or "BOOT_EXEC_USER_HANDOFF_STOP " in line
+                  or "BOOT_EXEC_HALTED " in line
+                  or "BOOT_EXEC_BLOCKED " in line
+                  or "NATIVE_FULL_WALL=" in line
+              ):
+                  print(line)
+
+          wanted = {
+              "console_init",
+              "rest_init",
+              "kernel_init",
+              "kernel_init_freeable",
+              "do_basic_setup",
+              "do_initcalls",
+              "free_initmem",
+              "prepare_namespace",
+              "init_post",
+              "run_init_process",
+              "try_to_run_init_process",
+              "kernel_execve",
+          }
+          print("NATIVE_FULL_PHASES")
+          for line in text.splitlines():
+              if "BOOT_EXEC_MILESTONE " not in line:
+                  continue
+              m = re.search(r"function=([^ ]+)", line)
+              if m and m.group(1) in wanted:
+                  print(line)
+          PY
+
+      - name: Upload native full result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-native-c-full-${{ github.run_id }}
+          path: |
+            replay-source/llvm/native-c-full.log
+            replay-source/llvm/native-c-full-summary.txt
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,0 +1,99 @@
+name: Linux MiniMachine BLAKE2s Fast Hot Continue
+
+on:
+  push:
+    branches: [work/checkpoint-after-kallsyms]
+    paths:
+      - .github/workflows/blake2s-fast-hot.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: minimachine-blake2s-fast-hot
+  cancel-in-progress: true
+
+jobs:
+  continue:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 13
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download prepare_namespace checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33261446210
+          github-token: ${{ github.token }}
+          name: minimachine-blake2s-fast-33261446210
+          path: checkpoint-source
+
+      - name: Download P3 program cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33249488447
+          github-token: ${{ github.token }}
+          name: minimachine-double-hot-33249488447
+          path: p3-cache-source
+
+      - name: Find matching Linux LLVM artifact
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(
+            gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/linux-minimachine-boot.yml/runs?status=completed&per_page=30"               --jq '.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main") | .id' |
+              head -n 1
+          )"
+          test -n "$run_id"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download linked Linux LLVM image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          pattern: minimachine-linux-boot-*
+          path: replay-source
+          merge-multiple: true
+
+      - name: Prepare double-hot inputs
+        run: |
+          checkpoint="$(find checkpoint-source -name 'blake2s-fast-next.chk.gz' -print -quit)"
+          cache="$(find p3-cache-source -name 'linux-p3-cache.pkl.gz' -print -quit)"
+          test -n "$checkpoint"
+          test -n "$cache"
+          cp "$checkpoint" replay-source/llvm/hot-prepare-namespace.chk.gz
+          cp "$cache" replay-source/llvm/linux-p3-cache.pkl.gz
+
+      - name: Continue from prepare_namespace toward run_init_process
+        run: |
+          set +e
+          set -o pipefail
+          start=$(date +%s)
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in replay-source/llvm/linux-p3-cache.pkl.gz             --checkpoint-in replay-source/llvm/hot-prepare-namespace.chk.gz             --checkpoint-initcall blake2s_mod_init             --checkpoint-out replay-source/llvm/blake2s-fast-next.chk.gz             --checkpoint-function run_init_process             --checkpoint-function-hit 1             --stop-after-checkpoint             --checkpoint-at-limit             --max-steps 80000000             --progress-every 0             2>&1 | tee replay-source/llvm/blake2s-fast.log
+          status=${PIPESTATUS[0]}
+          end=$(date +%s)
+          set -e
+          echo "BLAKE2S_FAST_STATUS $status"
+          echo "BLAKE2S_FAST_SECONDS $((end-start))"
+          grep -F 'BOOT_EXEC_FAST_RUNTIME' replay-source/llvm/blake2s-fast.log | grep -F 'ror32'
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED' replay-source/llvm/blake2s-fast.log
+          test -s replay-source/llvm/blake2s-fast-next.chk.gz
+          tail -n 220 replay-source/llvm/blake2s-fast.log
+
+      - name: Upload fast checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-blake2s-fast-${{ github.run_id }}
+          path: |
+            replay-source/llvm/blake2s-fast.log
+            replay-source/llvm/blake2s-fast-next.chk.gz
+          if-no-files-found: ignore
+          retention-days: 14

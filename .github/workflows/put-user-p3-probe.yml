@@ -1,0 +1,98 @@
+name: MiniMachine Put User P3 Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/put-user-p3-probe.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download exact image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: exact
+
+      - name: Download fixed P3 cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33293453553
+          github-token: ${{ github.token }}
+          name: minimachine-fixed-sret-33293453553
+          path: fixed
+
+      - name: Inspect put_user function and unresolved operands
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from src.minimachine.checkpoint import image_fingerprint
+          from src.minimachine.program_cache import load_program_cache
+          from src.minimachine import muir, p3
+
+          ll=Path("exact/llvm/linked.ll").read_text()
+          c=load_program_cache(Path("fixed/fixed-linux-p3-cache.pkl.gz"), image_sha256=image_fingerprint(ll))
+          program=c.program
+          target="__put_user_fn.5658"
+          print("LLVM_TARGET_BEGIN", target)
+          active=False
+          for line in ll.splitlines():
+              if not active and line.startswith("define ") and f"@{target}(" in line:
+                  active=True
+              if active:
+                  print(line)
+                  if line.strip()=="}":
+                      break
+          print("LLVM_TARGET_END", target)
+          names=[n for n in program.functions if n.startswith("__put_user_fn")]
+          print("PUT_USER_FUNCTIONS", names)
+          fn=program.functions[target].function
+          print("TARGET", target, "blocks", len(fn.blocks), "frame_slots", len(fn.frame_slots))
+
+          def values(inst):
+              out=[]
+              for attr in ("dst","src","a","b"):
+                  if hasattr(inst,attr):
+                      out.append((attr,getattr(inst,attr)))
+              if isinstance(inst,p3.Br):
+                  out += [("t",inst.true_target),("f",inst.false_target)]
+              return out
+
+          def check_value(v):
+              vals=[]
+              if isinstance(v,p3.Mem):
+                  vals.append(v.address.base)
+              elif isinstance(v,muir.Target):
+                  if v.symbol is not None: vals.append(muir.Symbol(v.symbol))
+                  if v.address is not None: vals.append(v.address.base)
+              else:
+                  vals.append(v)
+              for x in vals:
+                  if isinstance(x,muir.Symbol):
+                      ok=x.name in program.symbol_addresses
+                      print("SYMBOL",x.name,"resolved",int(ok),"addr",hex(program.symbol_addresses.get(x.name,0)))
+                  elif isinstance(x,muir.Reloc):
+                      ok=x.symbol in program.symbol_addresses
+                      print("RELOC",x.symbol,"addend",x.addend,"resolved",int(ok),"addr",hex(program.symbol_addresses.get(x.symbol,0)))
+
+          for block in fn.blocks:
+              print("BLOCK",block.label)
+              for i,inst in enumerate(block.instructions):
+                  print(i,repr(inst))
+                  for _,v in values(inst):
+                      check_value(v)
+          PY

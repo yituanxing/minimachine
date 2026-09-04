@@ -1,0 +1,68 @@
+name: Native Exec Hot Restore
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/checkpoint.py
+      - .github/workflows/native-exec-hot-restore.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  restore:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared native/p3vm.c -o build/libminimachine_p3vm.so
+      - name: Download exact Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: exact
+      - name: Download exec hotspot
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33294699007
+          github-token: ${{ github.token }}
+          name: minimachine-native-exec-hot-33294699007
+          path: hot
+      - name: Restore at kernel_execve and reach userspace
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'HOT_RESTORE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          python3 scripts/run-minimachine-linux.py exact/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in hot/exec-hot-p3-cache.pkl.gz \
+            --initramfs exact/out/minimachine-initramfs.cpio \
+            --native-vm \
+            --checkpoint-in hot/kernel-execve-hot.chk.gz \
+            --stop-after-user-handoff \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee hot/hot-restore.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED' hot/hot-restore.log
+          grep -F 'BOOT_EXEC_USER_HANDOFF ' hot/hot-restore.log
+          grep -F 'BOOT_EXEC_USER_HANDOFF_STOP' hot/hot-restore.log
+          grep -F 'HOT_RESTORE_WALL=' hot/hot-restore.log
+      - name: Upload restore log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-native-hot-restore-${{ github.run_id }}
+          path: hot/hot-restore.log
+          retention-days: 7

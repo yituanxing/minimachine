@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 import re
+import struct
 
 from . import muir
 from .llvm_text import TextBlock, TextFunction, TextInst, parse_module
@@ -64,6 +65,8 @@ class LegalizeStats:
     lowered_indirectbr: int = 0
     lowered_undef_indirectbr: int = 0
     lowered_switch: int = 0
+    lowered_float_ops: int = 0
+    lowered_float_casts: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -102,6 +105,8 @@ class LegalizeStats:
             "lowered_indirectbr": self.lowered_indirectbr,
             "lowered_undef_indirectbr": self.lowered_undef_indirectbr,
             "lowered_switch": self.lowered_switch,
+            "lowered_float_ops": self.lowered_float_ops,
+            "lowered_float_casts": self.lowered_float_casts,
         }
 
 
@@ -142,10 +147,20 @@ def _storage_width(bits: int) -> muir.Width:
     raise ValueError(f"integer width exceeds one MiniMachine slot: i{bits}")
 
 
+_FP_BITS = {
+    "half": 16,
+    "float": 32,
+    "double": 64,
+}
+
+
 def _first_width(text: str, *, default_pointer: bool = False) -> muir.Width:
     m = _INT_TYPE_RE.search(text)
     if m:
         return _storage_width(int(m.group(1)))
+    for ty, bits in _FP_BITS.items():
+        if re.search(rf"\b{ty}\b", text):
+            return _storage_width(bits)
     if default_pointer and re.search(r"\bptr\b", text):
         return muir.Width.I64
     raise ValueError(f"cannot determine supported width from: {text}")
@@ -171,6 +186,74 @@ def _value(segment: str) -> muir.Value:
     if token in {"false", "null"}:
         return muir.Imm(0)
     return muir.Imm(int(token))
+
+
+def _fp_constant_bits(ty: str, text: str) -> int:
+    bits = _FP_BITS.get(ty)
+    if bits not in {32, 64}:
+        raise ValueError(f"unsupported floating type: {ty}")
+    raw = text.strip()
+
+    if raw.startswith(("0x", "0X")):
+        encoded = int(raw[2:], 16)
+        if bits == 64:
+            return encoded & ((1 << 64) - 1)
+        digits = raw[2:]
+        if len(digits) <= 8:
+            return encoded & 0xFFFFFFFF
+        if len(digits) > 16:
+            raise ValueError(f"unsupported float hexadecimal constant: {raw}")
+        # LLVM commonly prints float hexadecimal literals in the exact
+        # double-width notation accepted by the assembler. Decode that exact
+        # double value, then round it once to binary32.
+        value = struct.unpack(">d", encoded.to_bytes(8, "big"))[0]
+        return int.from_bytes(struct.pack(">f", value), "big")
+
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"cannot parse floating constant {ty} {raw}") from exc
+
+    fmt = ">f" if bits == 32 else ">d"
+    try:
+        packed = struct.pack(fmt, value)
+    except OverflowError:
+        packed = struct.pack(
+            fmt,
+            float("-inf") if value < 0 else float("inf"),
+        )
+    return int.from_bytes(packed, "big")
+
+
+def _fp_value(ty: str, text: str) -> muir.Value:
+    raw = text.strip()
+    raw = re.sub(
+        r"^(?:(?:noundef|inreg)\s+|nofpclass\([^)]*\)\s+)+",
+        "",
+        raw,
+    )
+    if re.search(r"\bpoison\b", raw):
+        return muir.Arbitrary("poison")
+    if re.search(r"\bundef\b", raw):
+        return muir.Arbitrary("undef")
+    locals_ = _LOCAL_RE.findall(raw)
+    if locals_:
+        return _slot(locals_[-1])
+    symbols = re.findall(r"@[-A-Za-z$._0-9]+", raw)
+    if symbols:
+        return muir.Symbol(symbols[-1][1:])
+    return muir.Imm(_fp_constant_bits(ty, raw))
+
+
+def _call_scalar_value(segment: str, layout: DataLayout) -> muir.Value:
+    if "getelementptr" in segment:
+        pos = segment.find("getelementptr")
+        return _const_gep_value(segment[pos:], layout)
+    fm = re.search(r"\b(half|float|double)\b\s+(.+)$", segment)
+    if fm:
+        ty, value_text = fm.groups()
+        return _fp_value(ty, value_text)
+    return _value(segment)
 
 
 def _strip_memory_qualifiers(text: str) -> str:
@@ -267,17 +350,24 @@ def _parse_icmp(
 
 def _parse_switch(inst: TextInst):
     text = re.sub(r"\s+", " ", inst.text.strip())
-    m = re.fullmatch(
-        r"switch\s+i(\d+)\s+(.+?),\s*label\s+%([-A-Za-z$._0-9]+)\s*\[(.*)\]",
+    m = re.match(
+        r"switch\s+i(\d+)\s+(.+?),\s*label\s+%([-A-Za-z$._0-9]+)\s*\[",
         text,
     )
     if not m:
         raise ValueError(f"cannot parse switch: {inst.text}")
 
+    case_close = text.find("]", m.end())
+    if case_close < 0:
+        raise ValueError(f"unterminated switch cases: {inst.text}")
+    trailing = text[case_close + 1 :].strip()
+    if trailing and not trailing.startswith(","):
+        raise ValueError(f"cannot parse switch metadata: {inst.text}")
+
     bits = int(m.group(1))
     selector = _value(m.group(2))
     default = m.group(3)
-    case_body = m.group(4).strip()
+    case_body = text[m.end() : case_close].strip()
     cases: list[tuple[int, str]] = []
 
     if case_body:
@@ -372,6 +462,67 @@ def _fusable_icmp_results(
             ):
                 fused.add(cond)
     return fused
+
+
+def _compiletime_is_constant_guards(
+    fn: TextFunction,
+    uses: Counter[str],
+) -> dict[str, int]:
+    """Fold llvm.is.constant only when it guards a pure compile-time assert.
+
+    Linux uses __builtin_constant_p in helpers such as __put_user_fn to make
+    invalid source usages fail at build time, then separately keeps a runtime
+    switch that validates the actual width.  The textual LLVM can retain the
+    llvm.is.constant query after the optimization stage that would normally
+    discharge it.  MiniMachine cannot reconstruct compiler provenance at
+    runtime, so only this structurally compile-time-only guard is folded.
+    """
+
+    blocks = {block.label: block for block in fn.blocks}
+
+    def is_compiletime_assert_block(label: str) -> bool:
+        block = blocks.get(label)
+        if block is None:
+            return False
+        has_assert = any(
+            inst.opcode == "call" and "@__compiletime_assert_" in inst.text
+            for inst in block.instructions
+        )
+        has_unreachable = any(
+            inst.opcode == "unreachable" for inst in block.instructions
+        )
+        return has_assert and has_unreachable
+
+    forced: dict[str, int] = {}
+    for block in fn.blocks:
+        instructions = block.instructions
+        for index, inst in enumerate(instructions[:-1]):
+            if (
+                inst.opcode != "call"
+                or inst.result is None
+                or "llvm.is.constant." not in inst.text
+                or uses[inst.result] != 1
+            ):
+                continue
+            branch = instructions[index + 1]
+            if branch.opcode != "br":
+                continue
+            m = re.fullmatch(
+                rf"br\s+i1\s+{re.escape(inst.result)}\s*,\s*"
+                r"label\s+%([-A-Za-z$._0-9]+)\s*,\s*"
+                r"label\s+%([-A-Za-z$._0-9]+)",
+                re.sub(r"\s+", " ", branch.text.strip()),
+            )
+            if not m:
+                continue
+            true_label, false_label = m.groups()
+            true_assert = is_compiletime_assert_block(true_label)
+            false_assert = is_compiletime_assert_block(false_label)
+            if false_assert and not true_assert:
+                forced[inst.result] = 1
+            elif true_assert and not false_assert:
+                forced[inst.result] = 0
+    return forced
 
 
 def _split_top_commas(text: str) -> list[str]:
@@ -477,7 +628,17 @@ def _const_scalar_value(text: str, layout: DataLayout) -> muir.Value:
 
 
 def _parse_phi(inst: TextInst, layout: DataLayout):
-    width = _first_width(inst.text, default_pointer=True)
+    phi_text = inst.text.strip()
+    # The PHI result type is the leading type after "phi".  Do not infer it
+    # by scanning the entire instruction: pointer PHIs may contain typed
+    # constant-expression GEPs such as "[7 x i8]", and treating that nested
+    # i8 as the PHI width truncates the pointer on predecessor edge copies.
+    if re.match(r"phi\s+ptr(?:\s+addrspace\(\d+\))?\b", phi_text):
+        width = muir.Width.I64
+    else:
+        width = _first_width(inst.text, default_pointer=True)
+    fp_match = re.match(r"phi\s+(half|float|double)\b", phi_text)
+    fp_ty = fp_match.group(1) if fp_match else None
     incoming=[]
     text=inst.text
     stack=[]
@@ -503,6 +664,8 @@ def _parse_phi(inst: TextInst, layout: DataLayout):
                         value=_DeferredIcmp(
                             pred, bits, lhs_text, rhs_text
                         )
+                    elif fp_ty is not None:
+                        value=_fp_value(fp_ty, value_text)
                     else:
                         value=_value(value_text)
                     incoming.append((value, parts[1][1:]))
@@ -519,6 +682,8 @@ def _scalar_size(ty: str) -> int | None:
         return int(m.group(1)) // 8
     if ty == "ptr":
         return 8
+    if ty in _FP_BITS:
+        return _FP_BITS[ty] // 8
     m = re.fullmatch(r"\[(\d+)\s+x\s+i(8|16|32|64)\]", ty)
     if m:
         return int(m.group(1)) * (int(m.group(2)) // 8)
@@ -622,11 +787,7 @@ def _call_args(text: str, callee_end: int, layout: DataLayout) -> tuple[muir.Val
         if c == "," and depth == 0:
             segment = "".join(part).strip()
             if segment:
-                if "getelementptr" in segment:
-                    pos = segment.find("getelementptr")
-                    args.append(_const_gep_value(segment[pos:], layout))
-                else:
-                    args.append(_value(segment))
+                args.append(_call_scalar_value(segment, layout))
             part = []
         else:
             part.append(c)
@@ -1097,11 +1258,11 @@ def _inline_asm_args(text: str, layout: DataLayout) -> tuple[muir.Value, ...]:
         return ()
     args = []
     for segment in _split_top_commas(body):
-        if "getelementptr" in segment:
-            pos = segment.find("getelementptr")
-            args.append(_const_gep_value(segment[pos:], layout))
-        else:
-            args.append(_value(segment))
+        try:
+            _ty, value_text = _split_typed_value(segment)
+        except ValueError:
+            value_text = segment.strip()
+        args.append(_const_scalar_value(value_text, layout))
     return tuple(args)
 
 
@@ -1699,13 +1860,14 @@ def legalize_function(
     load_store_address_uses = _load_store_address_uses(fn)
     defs = _result_defs(fn)
     fusable_icmps = _fusable_icmp_results(fn, uses, defs)
+    compiletime_is_constant_guards = _compiletime_is_constant_guards(fn, uses)
     frame_slots = {arg[1:] for arg in fn.args}
     aliases: dict[str, muir.Address] = {}
     aggregate_results: dict[str, tuple[tuple[muir.Slot, muir.Width], ...]] = {}
     phis_by_target: dict[str, list[tuple[muir.Slot, muir.Value, str, muir.Width]]] = defaultdict(list)
     out_blocks: dict[str, muir.Block] = {}
     extra_blocks_after: dict[str, list[str]] = defaultdict(list)
-    switch_edge_blocks: dict[tuple[str, str], list[str]] = defaultdict(list)
+    pre_split_edge_blocks: dict[tuple[str, str], list[str]] = defaultdict(list)
     used_block_labels = {b.label for b in fn.blocks}
     temp_counter = [0]
 
@@ -1933,10 +2095,14 @@ def legalize_function(
                         else:
                             stats.folded_gep_mem += 1
 
-                    if ty=="ptr" or re.fullmatch(r"i\d+",ty):
+                    if ty=="ptr" or re.fullmatch(r"i\d+",ty) or ty in _FP_BITS:
                         if ty=="ptr":
                             width=muir.Width.I64
                             out.append(muir.Mov(width,result,muir.Mem(addr,width)))
+                        elif ty in _FP_BITS:
+                            bits = _FP_BITS[ty]
+                            width = _storage_width(bits)
+                            out.append(muir.Mov(width, result, muir.Mem(addr, width)))
                         else:
                             bits=int(ty[1:])
                             if bits in {1,8,16,32,64}:
@@ -1988,6 +2154,8 @@ def legalize_function(
                         raise ValueError(f"cannot parse store pointer: {inst.text}")
                     if value_text.startswith("getelementptr"):
                         src = _const_gep_value(value_text, layout)
+                    elif ty in _FP_BITS:
+                        src = _fp_value(ty, value_text)
                     else:
                         src = _value(value_text)
                     ptr_text=pm.group(1).strip()
@@ -2004,10 +2172,14 @@ def legalize_function(
                         else:
                             stats.folded_gep_mem += 1
 
-                    if ty=="ptr" or re.fullmatch(r"i\d+",ty):
+                    if ty=="ptr" or re.fullmatch(r"i\d+",ty) or ty in _FP_BITS:
                         if ty=="ptr":
                             width=muir.Width.I64
                             out.append(muir.Mov(width,muir.Mem(addr,width),src))
+                        elif ty in _FP_BITS:
+                            bits = _FP_BITS[ty]
+                            width = _storage_width(bits)
+                            out.append(muir.Mov(width, muir.Mem(addr, width), src))
                         else:
                             bits=int(ty[1:])
                             if bits in {1,8,16,32,64}:
@@ -2044,6 +2216,169 @@ def legalize_function(
                                 None,
                             )
                         )
+                    continue
+
+
+                if op in {"fadd", "fsub", "fmul", "fdiv"}:
+                    m = re.match(
+                        rf"{op}(?:\s+[A-Za-z]+)*\s+(half|float|double)\s+(.+)$",
+                        inst.text,
+                    )
+                    if not m or result is None:
+                        raise ValueError(f"cannot parse floating op {op}: {inst.text}")
+                    ty, body = m.groups()
+                    bits = _FP_BITS[ty]
+                    if bits not in {32, 64}:
+                        raise ValueError(f"unsupported floating width: {ty}")
+                    operands = _split_top_commas(body)
+                    if len(operands) != 2:
+                        raise ValueError(
+                            f"cannot parse floating operands {op}: {inst.text}"
+                        )
+                    lhs = _fp_value(ty, operands[0])
+                    rhs = _fp_value(ty, operands[1])
+                    stats.temporary_helpers += 1
+                    stats.lowered_float_ops += 1
+                    out.append(
+                        muir.Helper(
+                            f"__mm_{op}_{bits}",
+                            (lhs, rhs),
+                            result,
+                        )
+                    )
+                    continue
+
+                if op == "fneg":
+                    m = re.match(
+                        r"fneg(?:\s+[A-Za-z]+)*\s+(half|float|double)\s+(.+)$",
+                        inst.text,
+                    )
+                    if not m or result is None:
+                        raise ValueError(f"cannot parse fneg: {inst.text}")
+                    ty, value_text = m.groups()
+                    bits = _FP_BITS[ty]
+                    if bits not in {32, 64}:
+                        raise ValueError(f"unsupported floating width: {ty}")
+                    stats.temporary_helpers += 1
+                    stats.lowered_float_ops += 1
+                    out.append(
+                        muir.Helper(
+                            f"__mm_fneg_{bits}",
+                            (_fp_value(ty, value_text),),
+                            result,
+                        )
+                    )
+                    continue
+
+                if op == "fcmp":
+                    predicates = (
+                        "false|oeq|ogt|oge|olt|ole|one|ord|"
+                        "ueq|ugt|uge|ult|ule|une|uno|true"
+                    )
+                    m = re.match(
+                        rf"fcmp(?:\s+[A-Za-z]+)*\s+({predicates})\s+"
+                        r"(half|float|double)\s+(.+)$",
+                        inst.text,
+                    )
+                    if not m or result is None:
+                        raise ValueError(f"cannot parse fcmp: {inst.text}")
+                    pred, ty, body = m.groups()
+                    bits = _FP_BITS[ty]
+                    if bits not in {32, 64}:
+                        raise ValueError(f"unsupported floating width: {ty}")
+                    operands = _split_top_commas(body)
+                    if len(operands) != 2:
+                        raise ValueError(f"cannot parse fcmp operands: {inst.text}")
+                    stats.temporary_helpers += 1
+                    stats.lowered_float_ops += 1
+                    out.append(
+                        muir.Helper(
+                            f"__mm_fcmp_{pred}_{bits}",
+                            (
+                                _fp_value(ty, operands[0]),
+                                _fp_value(ty, operands[1]),
+                            ),
+                            result,
+                        )
+                    )
+                    continue
+
+                if op in {"sitofp", "uitofp"}:
+                    m = re.match(
+                        rf"{op}\s+i(\d+)\s+(.+?)\s+to\s+(half|float|double)$",
+                        inst.text,
+                    )
+                    if not m or result is None:
+                        raise ValueError(f"cannot parse {op}: {inst.text}")
+                    src_bits = int(m.group(1))
+                    value_text = m.group(2)
+                    dst_ty = m.group(3)
+                    dst_bits = _FP_BITS[dst_ty]
+                    if src_bits > 64 or dst_bits not in {32, 64}:
+                        raise ValueError(
+                            f"unsupported {op} width i{src_bits}->{dst_ty}"
+                        )
+                    stats.temporary_helpers += 1
+                    stats.lowered_float_casts += 1
+                    out.append(
+                        muir.Helper(
+                            f"__mm_{op}_{src_bits}_{dst_bits}",
+                            (_value(value_text),),
+                            result,
+                        )
+                    )
+                    continue
+
+                if op in {"fptosi", "fptoui"}:
+                    m = re.match(
+                        rf"{op}\s+(half|float|double)\s+(.+?)\s+to\s+i(\d+)$",
+                        inst.text,
+                    )
+                    if not m or result is None:
+                        raise ValueError(f"cannot parse {op}: {inst.text}")
+                    src_ty = m.group(1)
+                    value_text = m.group(2)
+                    dst_bits = int(m.group(3))
+                    src_bits = _FP_BITS[src_ty]
+                    if src_bits not in {32, 64} or dst_bits > 64:
+                        raise ValueError(
+                            f"unsupported {op} width {src_ty}->i{dst_bits}"
+                        )
+                    stats.temporary_helpers += 1
+                    stats.lowered_float_casts += 1
+                    out.append(
+                        muir.Helper(
+                            f"__mm_{op}_{src_bits}_{dst_bits}",
+                            (_fp_value(src_ty, value_text),),
+                            result,
+                        )
+                    )
+                    continue
+
+                if op in {"fpext", "fptrunc"}:
+                    m = re.match(
+                        rf"{op}\s+(half|float|double)\s+(.+?)\s+to\s+"
+                        r"(half|float|double)$",
+                        inst.text,
+                    )
+                    if not m or result is None:
+                        raise ValueError(f"cannot parse {op}: {inst.text}")
+                    src_ty, value_text, dst_ty = m.groups()
+                    src_bits = _FP_BITS[src_ty]
+                    dst_bits = _FP_BITS[dst_ty]
+                    if src_bits not in {32, 64} or dst_bits not in {32, 64}:
+                        raise ValueError(
+                            f"unsupported {op} width {src_ty}->{dst_ty}"
+                        )
+                    stats.temporary_helpers += 1
+                    stats.lowered_float_casts += 1
+                    out.append(
+                        muir.Helper(
+                            f"__mm_{op}_{src_bits}_{dst_bits}",
+                            (_fp_value(src_ty, value_text),),
+                            result,
+                        )
+                    )
                     continue
 
 
@@ -2099,7 +2434,7 @@ def legalize_function(
                             )
                         ],
                     )
-                    switch_edge_blocks[(block.label, default_label)].append(
+                    pre_split_edge_blocks[(block.label, default_label)].append(
                         default_edge
                     )
 
@@ -2122,7 +2457,7 @@ def legalize_function(
                                 )
                             ],
                         )
-                        switch_edge_blocks[(block.label, target_label)].append(
+                        pre_split_edge_blocks[(block.label, target_label)].append(
                             edge_label
                         )
                         case_edges.append((value, target_label, edge_label))
@@ -2366,8 +2701,23 @@ def legalize_function(
                         raise ValueError(f"cannot parse select condition: {inst.text}")
                     cond=_value(cm.group(1))
                     try:
-                        tv=_value(parts[1])
-                        fv=_value(parts[2])
+                        fp_select = re.match(
+                            r"(half|float|double)\s+(.+)$",
+                            parts[1].strip(),
+                        )
+                        if fp_select is not None:
+                            select_ty = fp_select.group(1)
+                            tv = _fp_value(select_ty, fp_select.group(2))
+                            fv_match = re.match(
+                                rf"{select_ty}\s+(.+)$",
+                                parts[2].strip(),
+                            )
+                            if fv_match is None:
+                                raise ValueError("floating select type mismatch")
+                            fv = _fp_value(select_ty, fv_match.group(1))
+                        else:
+                            tv=_value(parts[1])
+                            fv=_value(parts[2])
                     except ValueError as e:
                         raise ValueError(f"cannot parse select values: {inst.text}") from e
                     type_text = re.sub(
@@ -2432,6 +2782,25 @@ def legalize_function(
                     if (
                         kind == "direct"
                         and symbol is not None
+                        and symbol.startswith("llvm.is.constant.")
+                        and inst.result in compiletime_is_constant_guards
+                    ):
+                        if result is None:
+                            raise ValueError("llvm.is.constant guard has no result")
+                        out.append(
+                            muir.Mov(
+                                muir.Width.I8,
+                                result,
+                                muir.Imm(
+                                    compiletime_is_constant_guards[inst.result]
+                                ),
+                            )
+                        )
+                        continue
+
+                    if (
+                        kind == "direct"
+                        and symbol is not None
                         and symbol.startswith("llvm.read_register.")
                         and result is not None
                     ):
@@ -2471,13 +2840,24 @@ def legalize_function(
                             # reordering, so no runtime instruction is required.
                             stats.dropped_compiler_barriers += 1
                             continue
-                        if result is not None and template is not None and not template.strip():
-                            constraints = _inline_asm_constraints(inst.text)
-                            args = _inline_asm_args(inst.text, layout)
-                            if constraints == "=r,0" and len(args) == 1:
-                                stats.lowered_identity_asm += 1
-                                out.append(muir.Mov(muir.Width.I64, result, args[0]))
-                                continue
+                        if result is not None and template is not None:
+                            normalized_identity = _normalize_inline_asm(template)
+                            if normalized_identity in {
+                                "",
+                                "# forget that p points to const",
+                            }:
+                                constraints = _inline_asm_constraints(inst.text)
+                                args = _inline_asm_args(inst.text, layout)
+                                if constraints == "=r,0" and len(args) == 1:
+                                    stats.lowered_identity_asm += 1
+                                    out.append(
+                                        muir.Mov(
+                                            muir.Width.I64,
+                                            result,
+                                            args[0],
+                                        )
+                                    )
+                                    continue
                         if result is not None and template is not None and _normalize_inline_asm(template) == "div $0, $0, zero":
                             constraints = _inline_asm_constraints(inst.text)
                             args = _inline_asm_args(inst.text, layout)
@@ -2714,7 +3094,22 @@ def legalize_function(
                         out.append(muir.Ret(None))
                     else:
                         try:
-                            out.append(muir.Ret(_value(inst.text)))
+                            body = inst.text[len("ret "):].strip()
+                            fp_ret = re.match(
+                                r"(half|float|double)\s+(.+)$",
+                                body,
+                            )
+                            if fp_ret is not None:
+                                out.append(
+                                    muir.Ret(
+                                        _fp_value(
+                                            fp_ret.group(1),
+                                            fp_ret.group(2),
+                                        )
+                                    )
+                                )
+                            else:
+                                out.append(muir.Ret(_value(inst.text)))
                         except ValueError as e:
                             raise ValueError(f"cannot parse ret: {inst.text}") from e
                     continue
@@ -2831,6 +3226,7 @@ def legalize_function(
                         r"blockaddress\s*\(\s*@([-A-Za-z$._0-9]+)\s*,\s*%([-A-Za-z$._0-9]+)\s*\)",
                         address_text,
                     )
+                    dynamic_address: muir.Slot | None = None
                     if blockaddress_match is not None:
                         function_name, label = blockaddress_match.groups()
                         if function_name != fn.name:
@@ -2840,7 +3236,10 @@ def legalize_function(
                         target = muir.Target(label=label)
                     else:
                         address = _value(address_text)
-                        if isinstance(address, muir.Arbitrary) and address.kind == "undef":
+                        if (
+                            isinstance(address, muir.Arbitrary)
+                            and address.kind == "undef"
+                        ):
                             # LLVM undef may be refined independently at each
                             # use. Choose one declared valid successor rather
                             # than preserving an unconstrained pointer that
@@ -2848,6 +3247,7 @@ def legalize_function(
                             target = muir.Target(label=labels[0])
                             stats.lowered_undef_indirectbr += 1
                         elif isinstance(address, muir.Slot):
+                            dynamic_address = address
                             target = muir.Target(slot=address)
                         else:
                             raise ValueError(
@@ -2855,20 +3255,120 @@ def legalize_function(
                                 + address_text
                             )
 
-                    # LLVM indirectbr is a register jump whose destination set
-                    # is CFG metadata.  P3 already has an indirect BR target,
-                    # so semantic descent only needs an unconditional indirect
-                    # branch; invalid destinations retain LLVM's UB contract.
-                    out.append(
-                        muir.Br(
-                            muir.Width.I8,
-                            muir.Cond.EQ,
-                            muir.Imm(0),
-                            muir.Imm(0),
-                            target,
-                            target,
+                    phi_targets: list[str] = []
+                    if dynamic_address is not None:
+                        for target_label in labels:
+                            incoming = phis_by_target.get(target_label, ())
+                            if any(
+                                pred == block.label
+                                or (
+                                    pred.isdigit()
+                                    and pred not in used_block_labels
+                                    and block.label == "entry"
+                                )
+                                for _dst, _src, pred, _width in incoming
+                            ):
+                                if target_label not in phi_targets:
+                                    phi_targets.append(target_label)
+
+                    if not phi_targets:
+                        # Normal indirectbr stays a single native indirect
+                        # branch. Invalid destinations retain LLVM's UB
+                        # contract.
+                        out.append(
+                            muir.Br(
+                                muir.Width.I8,
+                                muir.Cond.EQ,
+                                muir.Imm(0),
+                                muir.Imm(0),
+                                target,
+                                target,
+                            )
                         )
-                    )
+                    else:
+                        # A PHI incoming value belongs to the selected
+                        # indirect edge, not to the predecessor as a whole.
+                        # Check only PHI-bearing targets and route matches
+                        # through tiny edge trampolines. All other declared
+                        # targets retain the native indirect branch fallback.
+                        stem = _sanitize(block.label) or "entry"
+                        edge_labels: list[tuple[str, str]] = []
+                        for index, target_label in enumerate(phi_targets):
+                            edge_label = fresh_block_label(
+                                f"__indirectbr_{stem}_phi{index}_edge"
+                            )
+                            real_target = muir.Target(label=target_label)
+                            out_blocks[edge_label] = muir.Block(
+                                edge_label,
+                                [
+                                    muir.Br(
+                                        muir.Width.I8,
+                                        muir.Cond.EQ,
+                                        muir.Imm(0),
+                                        muir.Imm(0),
+                                        real_target,
+                                        real_target,
+                                    )
+                                ],
+                            )
+                            pre_split_edge_blocks[
+                                (block.label, target_label)
+                            ].append(edge_label)
+                            edge_labels.append((target_label, edge_label))
+
+                        fallback_label = fresh_block_label(
+                            f"__indirectbr_{stem}_fallback"
+                        )
+                        out_blocks[fallback_label] = muir.Block(
+                            fallback_label,
+                            [
+                                muir.Br(
+                                    muir.Width.I8,
+                                    muir.Cond.EQ,
+                                    muir.Imm(0),
+                                    muir.Imm(0),
+                                    target,
+                                    target,
+                                )
+                            ],
+                        )
+
+                        compare_labels = [
+                            fresh_block_label(
+                                f"__indirectbr_{stem}_phi{index}_cmp"
+                            )
+                            for index in range(1, len(edge_labels))
+                        ]
+                        for index, (target_label, edge_label) in enumerate(
+                            edge_labels
+                        ):
+                            false_label = (
+                                compare_labels[index]
+                                if index < len(compare_labels)
+                                else fallback_label
+                            )
+                            branch = muir.Br(
+                                muir.Width.I64,
+                                muir.Cond.EQ,
+                                dynamic_address,
+                                muir.BlockAddr(fn.name, target_label),
+                                muir.Target(label=edge_label),
+                                muir.Target(label=false_label),
+                            )
+                            if index == 0:
+                                out.append(branch)
+                            else:
+                                compare_label = compare_labels[index - 1]
+                                out_blocks[compare_label] = muir.Block(
+                                    compare_label, [branch]
+                                )
+
+                        extra_blocks_after[block.label].extend(compare_labels)
+                        extra_blocks_after[block.label].extend(
+                            edge_label for _target, edge_label in edge_labels
+                        )
+                        extra_blocks_after[block.label].append(fallback_label)
+
                     stats.lowered_indirectbr += 1
                     continue
 
@@ -2909,30 +3409,47 @@ def legalize_function(
 
         out_blocks[block.label] = muir.Block(block.label, out)
 
-    # Insert PHI edge copies immediately before predecessor terminators.
-    copies_by_pred: dict[str, list[tuple[muir.Slot, muir.Value, muir.Width]]] = defaultdict(list)
+    # Lower LLVM PHIs as edge-specific parallel copies.  Copies on an
+    # unconditional edge may execute immediately before its terminator.  A
+    # conditional predecessor is different: its PHI copies belong to only one
+    # selected successor and may also overwrite values used by the branch
+    # predicate.  Split such edges so the copies execute after the predicate
+    # has been evaluated and only on the chosen path.
+    copies_by_edge: dict[
+        tuple[str, str],
+        list[tuple[muir.Slot, muir.Value, muir.Width]],
+    ] = defaultdict(list)
     for target, phis in phis_by_target.items():
         for dst, src, pred, width in phis:
             resolved_pred = pred
-            if resolved_pred not in out_blocks and resolved_pred.isdigit() and "entry" in out_blocks:
+            if (
+                resolved_pred not in out_blocks
+                and resolved_pred.isdigit()
+                and "entry" in out_blocks
+            ):
                 resolved_pred = "entry"
             if resolved_pred not in out_blocks:
-                raise LegalizeError(fn.name, target, "phi", f"unknown predecessor: {pred}")
-            switch_edges = switch_edge_blocks.get((resolved_pred, target))
+                raise LegalizeError(
+                    fn.name,
+                    target,
+                    "phi",
+                    f"unknown predecessor: {pred}",
+                )
+            switch_edges = pre_split_edge_blocks.get((resolved_pred, target))
             if switch_edges:
+                # Switch lowering has already split every selected edge.
                 for edge_pred in switch_edges:
-                    copies_by_pred[edge_pred].append((dst, src, width))
+                    copies_by_edge[(edge_pred, target)].append(
+                        (dst, src, width)
+                    )
             else:
-                copies_by_pred[resolved_pred].append((dst, src, width))
+                copies_by_edge[(resolved_pred, target)].append(
+                    (dst, src, width)
+                )
 
-    for pred, copies in copies_by_pred.items():
-        block = out_blocks[pred]
-        if not block.instructions:
-            raise LegalizeError(fn.name, pred, "phi", "predecessor has no terminator")
-        term = block.instructions[-1]
-        if not isinstance(term, (muir.Br, muir.Ret, muir.Trap, muir.ArchEscape)):
-            raise LegalizeError(fn.name, pred, "phi", "predecessor terminator is not lowered")
-
+    def lower_phi_copies(
+        copies: list[tuple[muir.Slot, muir.Value, muir.Width]],
+    ) -> list[muir.Instr]:
         prelude: list[muir.Instr] = []
         normalized_copies: list[
             tuple[muir.Slot, muir.Value, muir.Width]
@@ -2972,8 +3489,89 @@ def legalize_function(
         for move in moves:
             if isinstance(move.dst, muir.Slot):
                 frame_slots.add(move.dst.name)
-        block.instructions[-1:-1] = prelude + moves
         stats.phi_edge_moves += len(moves)
+        return prelude + moves
+
+    for (pred, target), copies in copies_by_edge.items():
+        block = out_blocks[pred]
+        if not block.instructions:
+            raise LegalizeError(
+                fn.name, pred, "phi", "predecessor has no terminator"
+            )
+        term = block.instructions[-1]
+        if not isinstance(
+            term,
+            (muir.Br, muir.Ret, muir.Trap, muir.ArchEscape),
+        ):
+            raise LegalizeError(
+                fn.name,
+                pred,
+                "phi",
+                "predecessor terminator is not lowered",
+            )
+
+        edge_instructions = lower_phi_copies(copies)
+
+        if not isinstance(term, muir.Br):
+            # Preserve the existing behavior for architecture escape edges.
+            # Direct LLVM branches, including all normal PHI CFG edges, use
+            # the precise edge handling below.
+            block.instructions[-1:-1] = edge_instructions
+            continue
+
+        true_match = (
+            term.true_target.is_direct()
+            and term.true_target.label == target
+        )
+        false_match = (
+            term.false_target.is_direct()
+            and term.false_target.label == target
+        )
+        if not true_match and not false_match:
+            raise LegalizeError(
+                fn.name,
+                target,
+                "phi",
+                f"predecessor {pred} does not branch to target",
+            )
+
+        if true_match and false_match:
+            # P3 represents an unconditional jump as a branch whose two
+            # targets are identical.  The selected edge is therefore known.
+            block.instructions[-1:-1] = edge_instructions
+            continue
+
+        stem = _sanitize(pred) or "entry"
+        target_stem = _sanitize(target) or "target"
+        edge_label = fresh_block_label(
+            f"__phi_{stem}_to_{target_stem}_edge"
+        )
+        real_target = muir.Target(label=target)
+        out_blocks[edge_label] = muir.Block(
+            edge_label,
+            edge_instructions
+            + [
+                muir.Br(
+                    muir.Width.I8,
+                    muir.Cond.EQ,
+                    muir.Imm(0),
+                    muir.Imm(0),
+                    real_target,
+                    real_target,
+                )
+            ],
+        )
+        extra_blocks_after[pred].append(edge_label)
+
+        split_target = muir.Target(label=edge_label)
+        block.instructions[-1] = muir.Br(
+            term.width,
+            term.cond,
+            term.a,
+            term.b,
+            split_target if true_match else term.true_target,
+            split_target if false_match else term.false_target,
+        )
 
     ordered_blocks: list[muir.Block] = []
     for text_block in fn.blocks:

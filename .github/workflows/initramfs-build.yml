@@ -1,0 +1,81 @@
+name: Linux MiniMachine Initramfs Build
+
+on:
+  push:
+    branches: [work/checkpoint-after-kallsyms, work/native-p3-vm]
+    paths:
+      - linux-overlay/arch/minimachine/**
+      - scripts/build-minimachine-initramfs.py
+      - scripts/check-minimachine-boot.sh
+      - .github/workflows/initramfs-build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CACHE_ROOT: ${{ github.workspace }}/.cache/minimachine
+      BUILD_ROOT: ${{ github.workspace }}/build/linux-6.6.143-minimachine-initramfs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 llvm-18 lld-18 xz-utils
+
+      - name: Restore pinned Linux archive
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/minimachine/source/linux-6.6.143.tar.xz
+          key: minimachine-linux-source-6.6.143-dace1f8dc9c0dbf5
+
+      - name: Restore incremental boot objects
+        uses: actions/cache/restore@v4
+        with:
+          path: build/linux-6.6.143-minimachine-initramfs/out
+          key: minimachine-linux-initramfs-out-v1-${{ github.sha }}
+          restore-keys: |
+            minimachine-linux-initramfs-out-v1-
+
+      - name: Build default Linux with initramfs
+        run: bash scripts/check-minimachine-boot.sh
+
+      - name: Build P3 cache and verify initramfs linker surface
+        run: |
+          set +e
+          python3 scripts/run-minimachine-linux.py "$BUILD_ROOT/llvm/linked.ll"             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --initramfs "$BUILD_ROOT/out/minimachine-initramfs.cpio"             --program-cache-out "$BUILD_ROOT/llvm/linux-initramfs-p3-cache.pkl.gz"             --probe-kallsyms start_kernel             --max-steps 600000             2>&1 | tee "$BUILD_ROOT/llvm/initramfs-p3-probe.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          grep -F 'BOOT_EXEC_INITRAMFS' "$BUILD_ROOT/llvm/initramfs-p3-probe.log"
+          grep -F 'BOOT_EXEC_KALLSYMS_PROBE' "$BUILD_ROOT/llvm/initramfs-p3-probe.log"
+          exit "$status"
+
+      - name: Save incremental boot objects
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: build/linux-6.6.143-minimachine-initramfs/out
+          key: minimachine-linux-initramfs-out-v1-${{ github.sha }}
+
+      - name: Upload initramfs boot image
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-linux-initramfs-${{ github.run_id }}
+          path: |
+            build/linux-6.6.143-minimachine-initramfs/out/.config
+            build/linux-6.6.143-minimachine-initramfs/out/vmlinux
+            build/linux-6.6.143-minimachine-initramfs/out/minimachine-initramfs.cpio
+            build/linux-6.6.143-minimachine-initramfs/boot-build.log
+            build/linux-6.6.143-minimachine-initramfs/llvm/linked.bc
+            build/linux-6.6.143-minimachine-initramfs/llvm/linked.ll
+            build/linux-6.6.143-minimachine-initramfs/llvm/linux-initramfs-p3-cache.pkl.gz
+            build/linux-6.6.143-minimachine-initramfs/llvm/initramfs-p3-probe.log
+          if-no-files-found: ignore
+          retention-days: 14

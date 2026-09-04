@@ -1,0 +1,121 @@
+name: MiniMachine BusyBox Cold Initramfs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/busybox-ash-cold-initramfs.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  cold-initramfs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download exact Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33295701837
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33295701837
+          path: linux
+
+      - name: Download current console P3 cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33322528617
+          github-token: ${{ github.token }}
+          name: minimachine-linux-p3-console-current-33322528617
+          path: cache
+
+      - name: Download frozen BusyBox ash initramfs
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33322123027
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-ash-carrier-33322123027
+          path: ash
+
+      - name: Verify frozen inputs
+        run: |
+          test -s linux/llvm/linked.ll
+          test -s cache/linux-initramfs-p3-cache-console-current.pkl.gz
+          test -s ash/busybox-ash-first.cpio
+          ls -lh \
+            linux/llvm/linked.ll \
+            cache/linux-initramfs-p3-cache-console-current.pkl.gz \
+            ash/busybox-ash-first.cpio
+
+      - name: Cold boot Linux into BusyBox ash from initramfs
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          set +e
+          printf 'echo BUSYBOX_COLD_INITRAMFS_OK\nvalue=42\necho BUSYBOX_COLD_VAR_$value\nfalse\necho BUSYBOX_COLD_FALSE_STATUS_$?\nexit 0\n' | \
+          /usr/bin/time -f 'BUSYBOX_COLD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 1200 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in cache/linux-initramfs-p3-cache-console-current.pkl.gz \
+            --initramfs ash/busybox-ash-first.cpio \
+            --native-vm \
+            --native-boot-phases-only \
+            --native-report-every 50000000 \
+            --checkpoint-out build/busybox-cold-kernel-execve.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/busybox-cold-initramfs.log
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "BUSYBOX_COLD_STATUS=$status" | tee -a build/busybox-cold-initramfs.log
+
+      - name: Assert true cold BusyBox boot
+        run: |
+          grep -F 'BOOT_EXEC_INITRAMFS path=ash/busybox-ash-first.cpio' build/busybox-cold-initramfs.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED path=build/busybox-cold-kernel-execve.chk.gz' build/busybox-cold-initramfs.log
+          grep -F 'BOOT_EXEC_USER_HANDOFF ' build/busybox-cold-initramfs.log
+          grep -F 'function=__mm_user_ash_main' build/busybox-cold-initramfs.log
+          grep -Fx 'BUSYBOX_COLD_INITRAMFS_OK' build/busybox-cold-initramfs.log
+          grep -Fx 'BUSYBOX_COLD_VAR_42' build/busybox-cold-initramfs.log
+          grep -Fx 'BUSYBOX_COLD_FALSE_STATUS_1' build/busybox-cold-initramfs.log
+          grep -F 'BOOT_EXEC_USER_EXIT status=0' build/busybox-cold-initramfs.log
+          grep -F 'BUSYBOX_COLD_STATUS=0' build/busybox-cold-initramfs.log
+          ! grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/busybox-cold-initramfs.log
+          ! grep -F 'BOOT_EXEC_ROOTFS_INJECTED ' build/busybox-cold-initramfs.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-cold-initramfs.log
+
+      - name: Summarize cold boot
+        if: always()
+        run: |
+          grep -E 'BOOT_EXEC_(STAGE|MILESTONE|INITRAMFS|CHECKPOINT_SAVED|USER_HANDOFF|USER_VSNPRINTF|USER_ATOI|USER_EXIT|HALTED|BLOCKED)|BUSYBOX_COLD_' \
+            build/busybox-cold-initramfs.log | tail -360 || true
+
+      - name: Upload cold boot evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-cold-initramfs-${{ github.run_id }}
+          path: |
+            build/busybox-cold-initramfs.log
+            build/busybox-cold-kernel-execve.chk.gz
+          if-no-files-found: warn
+          retention-days: 7

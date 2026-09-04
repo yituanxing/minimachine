@@ -1,0 +1,60 @@
+name: MiniMachine Exact Initramfs Artifact Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/exact-initramfs-artifact-check.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  exact-artifact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install archive tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cpio file
+
+      - name: Download exact MiniMachine initramfs artifact
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33264250619
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33264250619
+          path: exact
+
+      - name: Validate exact cpio and P3 init
+        run: |
+          set -euxo pipefail
+          mkdir -p unpack
+          cd unpack
+          cpio -itv < ../exact/out/minimachine-initramfs.cpio | tee ../cpio-list.txt
+          cpio -idm --no-absolute-filenames init < ../exact/out/minimachine-initramfs.cpio
+          test -f init
+          test -x init
+          stat -c 'EXACT_INIT mode=%a size=%s type=%F' init
+          test "$(stat -c %a init)" = "755"
+          test "$(stat -c %s init)" = "384"
+          cd ..
+          PYTHONPATH=. python3 - <<'PY'
+          from pathlib import Path
+          from src.minimachine.user_image import extract_bflt_payload
+          p = Path("unpack/init")
+          fn = extract_bflt_payload(p.read_bytes())
+          print(
+              "EXACT_INIT_P3_OK "
+              f"name={fn.name} blocks={len(fn.blocks)} "
+              f"first={fn.blocks[0].label} insts={len(fn.blocks[0].instructions)}"
+          )
+          assert fn.name == "__mm_init"
+          assert len(fn.blocks) == 1
+          assert fn.blocks[0].label == "entry"
+          PY
+          sha256sum exact/out/minimachine-initramfs.cpio unpack/init

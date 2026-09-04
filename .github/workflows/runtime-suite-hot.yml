@@ -1,0 +1,133 @@
+name: MiniMachine Runtime Suite Hot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: minimachine-runtime-suite-hot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-hot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate runtime suite contracts
+        run: |
+          python3 -m py_compile             scripts/minimachine-runtime-suite.py             scripts/build-minimachine-runtime-overlay.py
+          python3 -m unittest tests.test_minimachine_runtime_suite -v
+          python3 -m unittest             tests.test_runtime.RuntimeTests.test_extended_portable_string_runtime_services -v
+          python3 scripts/minimachine-runtime-suite.py list --profile core
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared             native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download qualified 64 MiB Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33348074309
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33348074309
+          path: linux
+
+      - name: Download current-lowering Linux P3 cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33399276976
+          github-token: ${{ github.token }}
+          name: minimachine-linux-p3-console-current-33399276976
+          path: current-cache
+
+      - name: Download frozen BusyBox multicall image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33396890631
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-multicall-33396890631
+          path: busybox
+
+      - name: Download qualified multicall kernel_execve checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33456321243
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-multicall-cold-33456321243
+          path: cold
+
+      - name: Rebuild frozen rootfs and runtime workload
+        run: |
+          cat > build/frozen-init.sh <<'SH'
+          #!/bin/sh
+          echo BUSYBOX_MULTICALL_COLD_OK
+          value=42
+          echo BUSYBOX_MULTICALL_VAR_$value
+          false
+          echo BUSYBOX_MULTICALL_FALSE_STATUS_$?
+          exit 0
+          SH
+          chmod +x build/frozen-init.sh
+
+          python3 scripts/build-minimachine-busybox-rootfs.py             build/frozen-multicall.cpio             --busybox-image busybox/busybox-multicall.bflt             --init-script-file build/frozen-init.sh
+
+          python3 scripts/minimachine-runtime-suite.py             write-init build/runtime-init.sh --profile core
+          chmod +x build/runtime-init.sh build/mmrt-c*
+          test -s linux/llvm/linked.ll
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+          test -s cold/busybox-multicall-kernel-execve.chk.gz
+          test -s build/frozen-multicall.cpio
+          test -s build/runtime-init.sh
+          sha256sum             busybox/busybox-multicall.bflt             linux/llvm/linked.ll             current-cache/linux-initramfs-p3-cache-full-current.pkl.gz             cold/busybox-multicall-kernel-execve.chk.gz             > build/runtime-inputs.sha256
+          cat build/runtime-inputs.sha256
+
+      - name: Run cumulative runtime suite from warm Linux boundary
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+        run: |
+          set -o pipefail
+          set +e
+          inject_args=(--inject-init build/runtime-init.sh --inject-init-path /mmrt)
+          for case_script in build/mmrt-c*; do
+            inject_args+=(--inject-file "$case_script" "/$(basename "$case_script")")
+          done
+          /usr/bin/time -f 'MMRT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M'           timeout --signal=TERM 420           python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz             --initramfs build/frozen-multicall.cpio             --native-vm             --checkpoint-in cold/busybox-multicall-kernel-execve.chk.gz             "${inject_args[@]}"             --restart-run-init-after-checkpoint             --restart-init-path /mmrt             --stop-on-panic             --max-steps 0             --progress-every 0             2>&1 | tee build/runtime-suite.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "MMRT_RUN_STATUS=$status" | tee -a build/runtime-suite.log
+
+      - name: Report cumulative frontier
+        if: always()
+        run: |
+          python3 scripts/minimachine-runtime-suite.py             frontier-log build/runtime-suite.log --profile core || true
+          grep -E             'BOOT_EXEC_(ROOTFS_OPEN|ROOTFS_INJECTED|ROOTFS_CLOSE|CHECKPOINT_RESTORED|INIT_EXEC_RESTART|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_MALLOPT|USER_EXIT|BLOCKED|HALTED)|^MMRT_'             build/runtime-suite.log | tail -420 || true
+
+      - name: Verify complete core runtime suite
+        run: |
+          python3 scripts/minimachine-runtime-suite.py             verify-log build/runtime-suite.log --profile core
+          grep -F 'BOOT_EXEC_INIT_EXEC_RESTART path=/mmrt' build/runtime-suite.log
+          grep -F 'MMRT_RUN_STATUS=0' build/runtime-suite.log
+
+      - name: Upload runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-runtime-suite-hot-${{ github.run_id }}
+          path: |
+            build/runtime-init.sh
+            build/mmrt-c*
+            build/runtime-inputs.sha256
+            build/runtime-suite.log
+          if-no-files-found: warn
+          retention-days: 7

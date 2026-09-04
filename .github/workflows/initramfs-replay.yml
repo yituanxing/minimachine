@@ -1,0 +1,50 @@
+name: Linux MiniMachine Initramfs Replay
+
+on:
+  push:
+    branches: [work/checkpoint-after-kallsyms]
+    paths:
+      - .github/workflows/initramfs-replay.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download initramfs Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33263619309
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33263619309
+          path: replay-source
+
+      - name: Replay new image to PTY checkpoint
+        run: |
+          set +e
+          set -o pipefail
+          python3 scripts/run-minimachine-linux.py replay-source/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --initramfs replay-source/out/minimachine-initramfs.cpio             --program-cache-in replay-source/llvm/linux-initramfs-p3-cache.pkl.gz             --checkpoint-out replay-source/llvm/initramfs-pty.chk.gz             --checkpoint-function pty_init             --checkpoint-function-hit 1             --stop-after-checkpoint             --checkpoint-at-limit             --checkpoint-on-error             --max-steps 160000000             --progress-every 0             2>&1 | tee replay-source/llvm/initramfs-replay.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "INITRAMFS_REPLAY_STATUS $status"
+          grep -E 'BOOT_EXEC_(INITRAMFS|FAST_RUNTIME|CHECKPOINT_SAVED|CHECKPOINT_FUNCTION_PROGRESS|MILESTONE|PANIC_ENTER|BLOCKED|HALTED)' replay-source/llvm/initramfs-replay.log | tail -n 300 || true
+          test -s replay-source/llvm/initramfs-pty.chk.gz
+
+      - name: Upload new-image checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-initramfs-replay-${{ github.run_id }}
+          path: |
+            replay-source/llvm/initramfs-replay.log
+            replay-source/llvm/initramfs-pty.chk.gz
+          if-no-files-found: ignore
+          retention-days: 14

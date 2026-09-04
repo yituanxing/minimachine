@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import re
+import struct
 from typing import Iterable
 
 from . import muir
@@ -61,7 +63,12 @@ def _binary_integer(op: str, bits: int, a: int, b: int) -> int:
         return (a * b) & mask
     if op in {"shl", "lshr", "ashr"}:
         if b >= bits:
-            raise VMError(f"LLVM poison shift amount: {b} for i{bits}")
+            # LLVM defines an oversized shift result as poison. Poison may
+            # exist speculatively (for example in an unselected arm of a
+            # select) without making the execution undefined. P3 is a
+            # concrete machine, so choose one deterministic refinement
+            # instead of trapping at poison production time.
+            return 0
         if op == "shl":
             return (a << b) & mask
         if op == "lshr":
@@ -69,15 +76,18 @@ def _binary_integer(op: str, bits: int, a: int, b: int) -> int:
         return (_signed(a, bits) >> b) & mask
     if op in {"udiv", "urem"}:
         if b == 0:
-            raise VMError("LLVM poison unsigned division by zero")
+            # Division by zero is likewise an LLVM poison-producing
+            # operation. Concretize the poison; any later use on an
+            # actually-undefined path is unconstrained by the source IR.
+            return 0
         return (a // b if op == "udiv" else a % b) & mask
     if op in {"sdiv", "srem"}:
         sb = _signed(b, bits)
         sa = _signed(a, bits)
         if sb == 0:
-            raise VMError("LLVM poison signed division by zero")
+            return 0
         if sa == -(1 << (bits - 1)) and sb == -1:
-            raise VMError("LLVM poison signed division overflow")
+            return 0
         # LLVM signed division truncates toward zero.
         q = abs(sa) // abs(sb)
         if (sa < 0) != (sb < 0):
@@ -108,6 +118,84 @@ def _icmp(pred: str, bits: int, a: int, b: int) -> int:
         return int(table[pred])
     except KeyError as exc:
         raise VMError(f"unknown icmp predicate: {pred}") from exc
+
+
+def _fp_decode(bits: int, value: int) -> float:
+    if bits == 32:
+        return struct.unpack(">f", (value & 0xFFFFFFFF).to_bytes(4, "big"))[0]
+    if bits == 64:
+        return struct.unpack(">d", (value & MASK64).to_bytes(8, "big"))[0]
+    raise VMError(f"unsupported floating width: {bits}")
+
+
+def _fp_encode(bits: int, value: float) -> int:
+    fmt = ">f" if bits == 32 else ">d" if bits == 64 else None
+    if fmt is None:
+        raise VMError(f"unsupported floating width: {bits}")
+    try:
+        packed = struct.pack(fmt, value)
+    except OverflowError:
+        packed = struct.pack(
+            fmt,
+            math.copysign(math.inf, value),
+        )
+    return int.from_bytes(packed, "big")
+
+
+def _fp_binary(op: str, bits: int, a_raw: int, b_raw: int) -> int:
+    a = _fp_decode(bits, a_raw)
+    b = _fp_decode(bits, b_raw)
+    if op == "fadd":
+        value = a + b
+    elif op == "fsub":
+        value = a - b
+    elif op == "fmul":
+        value = a * b
+    elif op == "fdiv":
+        if b == 0.0:
+            if math.isnan(a) or a == 0.0:
+                value = math.nan
+            else:
+                sign = (
+                    math.copysign(1.0, a)
+                    * math.copysign(1.0, b)
+                )
+                value = math.copysign(math.inf, sign)
+        else:
+            value = a / b
+    else:
+        raise VMError(f"unsupported floating binary op: {op}")
+    return _fp_encode(bits, value)
+
+
+def _fp_compare(pred: str, bits: int, a_raw: int, b_raw: int) -> int:
+    a = _fp_decode(bits, a_raw)
+    b = _fp_decode(bits, b_raw)
+    unordered = math.isnan(a) or math.isnan(b)
+    ordered = not unordered
+
+    table = {
+        "false": False,
+        "oeq": ordered and a == b,
+        "ogt": ordered and a > b,
+        "oge": ordered and a >= b,
+        "olt": ordered and a < b,
+        "ole": ordered and a <= b,
+        "one": ordered and a != b,
+        "ord": ordered,
+        "ueq": unordered or a == b,
+        "ugt": unordered or a > b,
+        "uge": unordered or a >= b,
+        "ult": unordered or a < b,
+        "ule": unordered or a <= b,
+        "une": unordered or a != b,
+        "uno": unordered,
+        "true": True,
+    }
+    try:
+        return int(table[pred])
+    except KeyError as exc:
+        raise VMError(f"unsupported floating predicate: {pred}") from exc
 
 
 def _int_abi_align(bits: int) -> int:
@@ -206,6 +294,28 @@ def helper_callback(symbol: str):
 
         return wide_const
 
+    if symbol == "__mm_llvm_stacksave_p0":
+        def stack_save(vm: VM, args: tuple[int, ...]):
+            if args:
+                raise VMError("__mm_llvm_stacksave_p0 expects no arguments")
+            return vm.heap_next
+
+        return stack_save
+
+    if symbol == "__mm_llvm_stackrestore_p0":
+        def stack_restore(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError("__mm_llvm_stackrestore_p0 expects one pointer")
+            saved = args[0]
+            if saved > vm.heap_next or saved >= vm.stack_top:
+                raise VMError(
+                    "__mm_llvm_stackrestore_p0 received invalid saved stack"
+                )
+            vm.heap_next = saved
+            return None
+
+        return stack_restore
+
     if symbol == "__mm_llvm_va_start":
         def va_start(vm: VM, args: tuple[int, ...]):
             if len(args) != 2:
@@ -243,6 +353,161 @@ def helper_callback(symbol: str):
 
         return va_end
 
+
+    m = re.fullmatch(r"__mm_llvm_fabs_f(32|64)", symbol)
+    if m:
+        bits = int(m.group(1))
+        sign_bit = 1 << (bits - 1)
+        mask = (1 << bits) - 1
+
+        def llvm_fabs(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects 1 argument")
+            return args[0] & (mask ^ sign_bit)
+
+        return llvm_fabs
+
+    m = re.fullmatch(r"__mm_llvm_(ceil|floor)_f(32|64)", symbol)
+    if m:
+        op, bits_text = m.groups()
+        bits = int(bits_text)
+
+        def fp_round_integral(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects 1 argument")
+            value = _fp_decode(bits, args[0])
+
+            # LLVM's ceil/floor intrinsics follow IEEE-754 behavior:
+            # NaN/inf pass through, and signed zero must be preserved.
+            if math.isnan(value) or math.isinf(value) or value == 0.0:
+                rounded = value
+            elif op == "ceil":
+                rounded = float(math.ceil(value))
+                if rounded == 0.0 and math.copysign(1.0, value) < 0.0:
+                    rounded = -0.0
+            else:
+                rounded = float(math.floor(value))
+            return _fp_encode(bits, rounded)
+
+        return fp_round_integral
+
+    m = re.fullmatch(r"__mm_llvm_fmuladd_f(32|64)", symbol)
+    if m:
+        bits = int(m.group(1))
+
+        def fp_muladd(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError(f"{symbol} expects 3 arguments")
+            a = _fp_decode(bits, args[0])
+            b = _fp_decode(bits, args[1])
+            c = _fp_decode(bits, args[2])
+            # llvm.fmuladd permits target contraction; the reference runtime
+            # uses the non-contracted fmul+fadd semantics, which is a valid
+            # implementation of this intrinsic.
+            return _fp_encode(bits, a * b + c)
+
+        return fp_muladd
+
+    m = re.fullmatch(r"__mm_(fadd|fsub|fmul|fdiv)_(32|64)", symbol)
+    if m:
+        op, bits_text = m.groups()
+        bits = int(bits_text)
+
+        def fp_binary(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError(f"{symbol} expects 2 arguments")
+            return _fp_binary(op, bits, args[0], args[1])
+
+        return fp_binary
+
+    m = re.fullmatch(r"__mm_fneg_(32|64)", symbol)
+    if m:
+        bits = int(m.group(1))
+        sign_bit = 1 << (bits - 1)
+        mask = (1 << bits) - 1
+
+        def fp_neg(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects 1 argument")
+            return (args[0] ^ sign_bit) & mask
+
+        return fp_neg
+
+    m = re.fullmatch(
+        r"__mm_fcmp_(false|oeq|ogt|oge|olt|ole|one|ord|"
+        r"ueq|ugt|uge|ult|ule|une|uno|true)_(32|64)",
+        symbol,
+    )
+    if m:
+        pred, bits_text = m.groups()
+        bits = int(bits_text)
+
+        def fp_compare(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError(f"{symbol} expects 2 arguments")
+            return _fp_compare(pred, bits, args[0], args[1])
+
+        return fp_compare
+
+    m = re.fullmatch(r"__mm_(sitofp|uitofp)_(\d+)_(32|64)", symbol)
+    if m:
+        op, src_text, dst_text = m.groups()
+        src_bits = int(src_text)
+        dst_bits = int(dst_text)
+        src_mask = (1 << src_bits) - 1
+
+        def int_to_fp(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects 1 argument")
+            value = args[0] & src_mask
+            if op == "sitofp":
+                value = _signed(value, src_bits)
+            return _fp_encode(dst_bits, float(value))
+
+        return int_to_fp
+
+    m = re.fullmatch(r"__mm_(fptosi|fptoui)_(32|64)_(\d+)", symbol)
+    if m:
+        op, src_text, dst_text = m.groups()
+        src_bits = int(src_text)
+        dst_bits = int(dst_text)
+        dst_mask = (1 << dst_bits) - 1
+
+        def fp_to_int(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects 1 argument")
+            value = _fp_decode(src_bits, args[0])
+            if not math.isfinite(value):
+                raise VMError(f"{symbol} reached LLVM poison non-finite input")
+            integer = math.trunc(value)
+            if op == "fptosi":
+                lo = -(1 << (dst_bits - 1))
+                hi = 1 << (dst_bits - 1)
+                if not (lo <= integer < hi):
+                    raise VMError(
+                        f"{symbol} reached LLVM poison out-of-range input"
+                    )
+            else:
+                if not (0 <= integer < (1 << dst_bits)):
+                    raise VMError(
+                        f"{symbol} reached LLVM poison out-of-range input"
+                    )
+            return integer & dst_mask
+
+        return fp_to_int
+
+    m = re.fullmatch(r"__mm_(fpext|fptrunc)_(32|64)_(32|64)", symbol)
+    if m:
+        _op, src_text, dst_text = m.groups()
+        src_bits = int(src_text)
+        dst_bits = int(dst_text)
+
+        def fp_cast(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError(f"{symbol} expects 1 argument")
+            return _fp_encode(dst_bits, _fp_decode(src_bits, args[0]))
+
+        return fp_cast
 
     m = re.fullmatch(
         r"__mm_(and|or|xor|shl|lshr|ashr|mul|udiv|sdiv|urem|srem)_(\d+)",
@@ -411,6 +676,26 @@ def helper_callback(symbol: str):
             return ((a << (bits - amount)) | (b >> amount)) & mask
 
         return funnel
+
+    m = re.fullmatch(r"__mm_llvm_([su])(max|min)_i(8|16|32|64)", symbol)
+    if m:
+        signedness, op, bits_text = m.groups()
+        bits = int(bits_text)
+        mask = _mask(bits)
+
+        def minmax(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError(f"{symbol} expects two operands")
+            if signedness == "s":
+                a = _signed(args[0], bits)
+                b = _signed(args[1], bits)
+            else:
+                a = args[0] & mask
+                b = args[1] & mask
+            value = max(a, b) if op == "max" else min(a, b)
+            return value & mask
+
+        return minmax
 
     m = re.fullmatch(r"__mm_llvm_(cttz|ctlz|ctpop)_i(8|16|32|64)", symbol)
     if m:
@@ -619,8 +904,12 @@ def helper_callback(symbol: str):
                 raise VMError(f"{symbol} expects dst,value,length[,volatile]")
             dst, value, length = args[:3]
             byte = value & 0xFF
-            for i in range(length):
-                vm.memory.write((dst + i) & MASK64, 8, byte)
+            bulk = getattr(vm.memory, "bulk_set", None)
+            if bulk is not None:
+                bulk(dst, byte, length)
+            else:
+                for i in range(length):
+                    vm.memory.write((dst + i) & MASK64, 8, byte)
             return None
 
         return memset
@@ -630,9 +919,13 @@ def helper_callback(symbol: str):
             if len(args) < 3:
                 raise VMError(f"{symbol} expects dst,src,length[,volatile]")
             dst, src, length = args[:3]
-            data = [vm.memory.read((src + i) & MASK64, 8) for i in range(length)]
-            for i, byte in enumerate(data):
-                vm.memory.write((dst + i) & MASK64, 8, byte)
+            bulk = getattr(vm.memory, "bulk_copy", None)
+            if bulk is not None:
+                bulk(dst, src, length)
+            else:
+                data = [vm.memory.read((src + i) & MASK64, 8) for i in range(length)]
+                for i, byte in enumerate(data):
+                    vm.memory.write((dst + i) & MASK64, 8, byte)
             return None
 
         return memcpy
@@ -642,9 +935,13 @@ def helper_callback(symbol: str):
             if len(args) < 3:
                 raise VMError(f"{symbol} expects dst,src,length[,volatile]")
             dst, src, length = args[:3]
-            data = [vm.memory.read((src + i) & MASK64, 8) for i in range(length)]
-            for i, byte in enumerate(data):
-                vm.memory.write((dst + i) & MASK64, 8, byte)
+            bulk = getattr(vm.memory, "bulk_move", None)
+            if bulk is not None:
+                bulk(dst, src, length)
+            else:
+                data = [vm.memory.read((src + i) & MASK64, 8) for i in range(length)]
+                for i, byte in enumerate(data):
+                    vm.memory.write((dst + i) & MASK64, 8, byte)
             return None
 
         return memmove
@@ -1166,6 +1463,22 @@ _DIRECT_RUNTIME_SYMBOLS = (
     "strlen",
     "strcmp",
     "strncmp",
+    "strchr",
+    "strchrnul",
+    "memchr",
+    "fnmatch",
+    "strcpy",
+    "strncpy",
+    "stpcpy",
+    "stpncpy",
+    "strcasecmp",
+    "strncasecmp",
+    "strcspn",
+    "strpbrk",
+    "strstr",
+    "strdup",
+    "strtok_r",
+    "ror32",
 )
 
 
@@ -1177,8 +1490,38 @@ def direct_runtime_callback(symbol: str):
             if len(args) != 3:
                 raise VMError(f"{symbol} expects dst,src,size")
             dst, src, size = args
-            for i in range(size):
-                vm.memory.write(dst + i, 8, vm.memory.read(src + i, 8))
+            bulk = getattr(vm.memory, "bulk_copy", None)
+            trace_console_copy = (
+                getattr(vm, "trace_user_read_memcpy_code", None)
+                is not None
+            )
+            if trace_console_copy:
+                preview_size = min(32, int(size)) if size >= 0 else 0
+                before = bytes(
+                    vm.memory.read(src + i, 8)
+                    for i in range(preview_size)
+                )
+                print(
+                    "BOOT_EXEC_CONSOLE_MEMCPY "
+                    f"dst=0x{dst:x} src=0x{src:x} size={size} "
+                    f"src_data={before.hex()}",
+                    flush=True,
+                )
+            if bulk is not None:
+                bulk(dst, src, size)
+            else:
+                for i in range(size):
+                    vm.memory.write(dst + i, 8, vm.memory.read(src + i, 8))
+            if trace_console_copy:
+                after = bytes(
+                    vm.memory.read(dst + i, 8)
+                    for i in range(preview_size)
+                )
+                print(
+                    "BOOT_EXEC_CONSOLE_MEMCPY_RESULT "
+                    f"dst=0x{dst:x} data={after.hex()}",
+                    flush=True,
+                )
             return dst
         return memcpy
 
@@ -1187,9 +1530,13 @@ def direct_runtime_callback(symbol: str):
             if len(args) != 3:
                 raise VMError(f"{symbol} expects dst,src,size")
             dst, src, size = args
-            data = [vm.memory.read(src + i, 8) for i in range(size)]
-            for i, byte in enumerate(data):
-                vm.memory.write(dst + i, 8, byte)
+            bulk = getattr(vm.memory, "bulk_move", None)
+            if bulk is not None:
+                bulk(dst, src, size)
+            else:
+                data = [vm.memory.read(src + i, 8) for i in range(size)]
+                for i, byte in enumerate(data):
+                    vm.memory.write(dst + i, 8, byte)
             return dst
         return memmove
 
@@ -1199,8 +1546,12 @@ def direct_runtime_callback(symbol: str):
                 raise VMError(f"{symbol} expects dst,value,size")
             dst, value, size = args
             byte = value & 0xFF
-            for i in range(size):
-                vm.memory.write(dst + i, 8, byte)
+            bulk = getattr(vm.memory, "bulk_set", None)
+            if bulk is not None:
+                bulk(dst, byte, size)
+            else:
+                for i in range(size):
+                    vm.memory.write(dst + i, 8, byte)
             return dst
         return memset
 
@@ -1209,6 +1560,9 @@ def direct_runtime_callback(symbol: str):
             if len(args) != 3:
                 raise VMError("memcmp expects a,b,size")
             a, b, size = args
+            bulk = getattr(vm.memory, "bulk_compare", None)
+            if bulk is not None:
+                return bulk(a, b, size) & MASK64
             for i in range(size):
                 av = vm.memory.read(a + i, 8)
                 bv = vm.memory.read(b + i, 8)
@@ -1222,6 +1576,9 @@ def direct_runtime_callback(symbol: str):
             if len(args) != 1:
                 raise VMError("strlen expects string")
             ptr = args[0]
+            bulk = getattr(vm.memory, "bulk_strlen", None)
+            if bulk is not None:
+                return bulk(ptr)
             size = 0
             while vm.memory.read(ptr + size, 8) != 0:
                 size += 1
@@ -1261,6 +1618,437 @@ def direct_runtime_callback(symbol: str):
             return 0
         return strncmp
 
+    if base == "strchr" or base == "strchrnul":
+        def strchr(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError(f"{base} expects string,char")
+            ptr, ch = args
+            ch &= 0xFF
+            i = 0
+            while True:
+                byte = vm.memory.read(ptr + i, 8)
+                if byte == ch:
+                    return ptr + i
+                if byte == 0:
+                    return ptr + i if base == "strchrnul" else 0
+                i += 1
+        return strchr
+
+    if base == "strrchr":
+        def strrchr(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("strrchr expects string,char")
+            ptr, ch = args
+            ch &= 0xFF
+            last = 0
+            i = 0
+            while True:
+                byte = vm.memory.read(ptr + i, 8)
+                if byte == ch:
+                    last = ptr + i
+                if byte == 0:
+                    return last
+                i += 1
+        return strrchr
+
+    if base == "memchr":
+        def memchr(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError("memchr expects ptr,char,size")
+            ptr, ch, size = args
+            ch &= 0xFF
+            for i in range(size):
+                if vm.memory.read(ptr + i, 8) == ch:
+                    return ptr + i
+            return 0
+        return memchr
+
+    if base == "fnmatch":
+        def fnmatch(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError("fnmatch expects pattern,string,flags")
+            pattern_ptr, string_ptr, flags = map(int, args)
+
+            def read_cstring(ptr: int) -> bytes:
+                out = bytearray()
+                while True:
+                    byte = vm.memory.read(ptr + len(out), 8)
+                    if byte == 0:
+                        return bytes(out)
+                    out.append(byte)
+
+            pattern = read_cstring(pattern_ptr)
+            string = read_cstring(string_ptr)
+
+            # glibc/POSIX fnmatch flag values.
+            FNM_PATHNAME = 0x01
+            FNM_NOESCAPE = 0x02
+            FNM_PERIOD = 0x04
+            FNM_LEADING_DIR = 0x08
+            FNM_CASEFOLD = 0x10
+
+            pathname = bool(flags & FNM_PATHNAME)
+            noescape = bool(flags & FNM_NOESCAPE)
+            period = bool(flags & FNM_PERIOD)
+            leading_dir = bool(flags & FNM_LEADING_DIR)
+            casefold = bool(flags & FNM_CASEFOLD)
+
+            def folded(ch: int) -> int:
+                if casefold and 65 <= ch <= 90:
+                    return ch + 32
+                return ch
+
+            def protected_period(si: int) -> bool:
+                if not period or si >= len(string) or string[si] != ord("."):
+                    return False
+                return si == 0 or (
+                    pathname and si > 0 and string[si - 1] == ord("/")
+                )
+
+            def bracket_close(pi: int) -> int:
+                j = pi + 1
+                if j < len(pattern) and pattern[j] in (ord("!"), ord("^")):
+                    j += 1
+                if j < len(pattern) and pattern[j] == ord("]"):
+                    j += 1
+                while j < len(pattern):
+                    if pattern[j] == ord("]"):
+                        return j
+                    if (
+                        pattern[j] == ord("\\")
+                        and not noescape
+                        and j + 1 < len(pattern)
+                    ):
+                        j += 2
+                    else:
+                        j += 1
+                return -1
+
+            def bracket_matches(pi: int, ch: int, close: int) -> bool:
+                j = pi + 1
+                negate = False
+                if j < close and pattern[j] in (ord("!"), ord("^")):
+                    negate = True
+                    j += 1
+
+                matched = False
+                first = True
+                while j < close:
+                    if pattern[j] == ord("]") and first:
+                        start = ord("]")
+                        j += 1
+                    elif (
+                        pattern[j] == ord("\\")
+                        and not noescape
+                        and j + 1 < close
+                    ):
+                        start = pattern[j + 1]
+                        j += 2
+                    else:
+                        start = pattern[j]
+                        j += 1
+                    first = False
+
+                    if (
+                        j + 1 < close
+                        and pattern[j] == ord("-")
+                        and pattern[j + 1] != ord("]")
+                    ):
+                        j += 1
+                        if (
+                            pattern[j] == ord("\\")
+                            and not noescape
+                            and j + 1 < close
+                        ):
+                            end = pattern[j + 1]
+                            j += 2
+                        else:
+                            end = pattern[j]
+                            j += 1
+                        lo = folded(start)
+                        hi = folded(end)
+                        value = folded(ch)
+                        if lo <= value <= hi or hi <= value <= lo:
+                            matched = True
+                    elif folded(start) == folded(ch):
+                        matched = True
+
+                return not matched if negate else matched
+
+            memo: dict[tuple[int, int], bool] = {}
+
+            def match(pi: int, si: int) -> bool:
+                key = (pi, si)
+                cached = memo.get(key)
+                if cached is not None:
+                    return cached
+
+                if pi == len(pattern):
+                    result = si == len(string) or (
+                        leading_dir
+                        and si < len(string)
+                        and string[si] == ord("/")
+                    )
+                    memo[key] = result
+                    return result
+
+                token = pattern[pi]
+                if token == ord("*"):
+                    while pi + 1 < len(pattern) and pattern[pi + 1] == ord("*"):
+                        pi += 1
+                    if match(pi + 1, si):
+                        memo[key] = True
+                        return True
+                    if protected_period(si):
+                        memo[key] = False
+                        return False
+                    k = si
+                    while k < len(string):
+                        if pathname and string[k] == ord("/"):
+                            break
+                        k += 1
+                        if match(pi + 1, k):
+                            memo[key] = True
+                            return True
+                    memo[key] = False
+                    return False
+
+                if token == ord("?"):
+                    result = (
+                        si < len(string)
+                        and not (pathname and string[si] == ord("/"))
+                        and not protected_period(si)
+                        and match(pi + 1, si + 1)
+                    )
+                    memo[key] = result
+                    return result
+
+                if token == ord("["):
+                    close = bracket_close(pi)
+                    if close >= 0:
+                        result = (
+                            si < len(string)
+                            and not (pathname and string[si] == ord("/"))
+                            and not protected_period(si)
+                            and bracket_matches(pi, string[si], close)
+                            and match(close + 1, si + 1)
+                        )
+                        memo[key] = result
+                        return result
+
+                if (
+                    token == ord("\\")
+                    and not noescape
+                    and pi + 1 < len(pattern)
+                ):
+                    pi += 1
+                    token = pattern[pi]
+
+                result = (
+                    si < len(string)
+                    and folded(token) == folded(string[si])
+                    and match(pi + 1, si + 1)
+                )
+                memo[key] = result
+                return result
+
+            return 0 if match(0, 0) else 1
+        return fnmatch
+
+    if base in {"strcpy", "stpcpy", "strncpy", "stpncpy"}:
+        def string_copy(vm: VM, args: tuple[int, ...]):
+            if base in {"strcpy", "stpcpy"}:
+                if len(args) != 2:
+                    raise VMError(f"{base} expects dst,src")
+                dst, src = args
+                i = 0
+                while True:
+                    byte = vm.memory.read(src + i, 8)
+                    vm.memory.write(dst + i, 8, byte)
+                    if byte == 0:
+                        return dst + i if base == "stpcpy" else dst
+                    i += 1
+
+            if len(args) != 3:
+                raise VMError(f"{base} expects dst,src,size")
+            dst, src, size = args
+            i = 0
+            ended = False
+            while i < size:
+                byte = 0 if ended else vm.memory.read(src + i, 8)
+                vm.memory.write(dst + i, 8, byte)
+                if byte == 0:
+                    ended = True
+                    if base == "stpncpy":
+                        return dst + i
+                i += 1
+            return dst + size if base == "stpncpy" else dst
+        return string_copy
+
+    if base in {"strcasecmp", "strncasecmp"}:
+        def ci_compare(vm: VM, args: tuple[int, ...]):
+            if base == "strcasecmp":
+                if len(args) != 2:
+                    raise VMError("strcasecmp expects a,b")
+                a, b = args
+                limit = None
+            else:
+                if len(args) != 3:
+                    raise VMError("strncasecmp expects a,b,size")
+                a, b, limit = args
+
+            i = 0
+            while limit is None or i < limit:
+                av = vm.memory.read(a + i, 8)
+                bv = vm.memory.read(b + i, 8)
+                al = av + 32 if 65 <= av <= 90 else av
+                bl = bv + 32 if 65 <= bv <= 90 else bv
+                if al != bl:
+                    return (al - bl) & MASK64
+                if av == 0 or bv == 0:
+                    return 0
+                i += 1
+            return 0
+        return ci_compare
+
+    if base == "strcspn":
+        def strcspn(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("strcspn expects string,reject")
+            ptr, reject = args
+            reject_set = set()
+            j = 0
+            while True:
+                byte = vm.memory.read(reject + j, 8)
+                if byte == 0:
+                    break
+                reject_set.add(byte)
+                j += 1
+            i = 0
+            while True:
+                byte = vm.memory.read(ptr + i, 8)
+                if byte == 0 or byte in reject_set:
+                    return i
+                i += 1
+        return strcspn
+
+    if base == "strpbrk":
+        def strpbrk(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("strpbrk expects string,accept")
+            ptr, accept = args
+            accept_set = set()
+            j = 0
+            while True:
+                byte = vm.memory.read(accept + j, 8)
+                if byte == 0:
+                    break
+                accept_set.add(byte)
+                j += 1
+            i = 0
+            while True:
+                byte = vm.memory.read(ptr + i, 8)
+                if byte == 0:
+                    return 0
+                if byte in accept_set:
+                    return ptr + i
+                i += 1
+        return strpbrk
+
+    if base == "strstr":
+        def strstr(vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("strstr expects haystack,needle")
+            haystack, needle = args
+            needle_len = 0
+            while vm.memory.read(needle + needle_len, 8) != 0:
+                needle_len += 1
+            if needle_len == 0:
+                return haystack
+            i = 0
+            while vm.memory.read(haystack + i, 8) != 0:
+                matched = True
+                for j in range(needle_len):
+                    if vm.memory.read(haystack + i + j, 8) != vm.memory.read(
+                        needle + j, 8
+                    ):
+                        matched = False
+                        break
+                if matched:
+                    return haystack + i
+                i += 1
+            return 0
+        return strstr
+
+    if base == "strdup":
+        def strdup(vm: VM, args: tuple[int, ...]):
+            if len(args) != 1:
+                raise VMError("strdup expects string")
+            src = args[0]
+            size = 0
+            while vm.memory.read(src + size, 8) != 0:
+                size += 1
+            size += 1
+            dst = vm.alloc_bytes(size, align=1)
+            bulk = getattr(vm.memory, "bulk_copy", None)
+            if bulk is not None:
+                bulk(dst, src, size)
+            else:
+                for i in range(size):
+                    vm.memory.write(dst + i, 8, vm.memory.read(src + i, 8))
+            return dst
+        return strdup
+
+    if base == "strtok_r":
+        def strtok_r(vm: VM, args: tuple[int, ...]):
+            if len(args) != 3:
+                raise VMError("strtok_r expects string,delim,saveptr")
+            ptr, delim, saveptr = args
+            if ptr == 0:
+                ptr = vm.memory.read(saveptr, 64)
+            delim_set = set()
+            j = 0
+            while True:
+                byte = vm.memory.read(delim + j, 8)
+                if byte == 0:
+                    break
+                delim_set.add(byte)
+                j += 1
+
+            while True:
+                byte = vm.memory.read(ptr, 8)
+                if byte == 0:
+                    vm.memory.write(saveptr, 64, ptr)
+                    return 0
+                if byte not in delim_set:
+                    break
+                ptr += 1
+
+            token = ptr
+            while True:
+                byte = vm.memory.read(ptr, 8)
+                if byte == 0:
+                    vm.memory.write(saveptr, 64, ptr)
+                    return token
+                if byte in delim_set:
+                    vm.memory.write(ptr, 8, 0)
+                    vm.memory.write(saveptr, 64, ptr + 1)
+                    return token
+                ptr += 1
+        return strtok_r
+
+    if base == "ror32":
+        def ror32(_vm: VM, args: tuple[int, ...]):
+            if len(args) != 2:
+                raise VMError("ror32 expects word,shift")
+            word = args[0] & 0xFFFFFFFF
+            shift = args[1] & 31
+            return (
+                (word >> shift) |
+                ((word << ((-shift) & 31)) & 0xFFFFFFFF)
+            ) & 0xFFFFFFFF
+        return ror32
+
     return None
 
 
@@ -1276,7 +2064,16 @@ def install_direct_runtime(program: Program) -> None:
 
 def accelerate_direct_runtime(
     program: Program,
-    symbols: tuple[str, ...] = ("memcpy", "memmove", "memset"),
+    symbols: tuple[str, ...] = (
+        "memcpy",
+        "memmove",
+        "memset",
+        "memcmp",
+        "strlen",
+        "strcmp",
+        "strncmp",
+        "ror32",
+    ),
 ) -> tuple[str, ...]:
     """Fast-path selected portable runtime functions in the reference VM.
 

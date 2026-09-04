@@ -1,0 +1,84 @@
+name: MiniMachine Frozen BusyBox Census
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  census:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CARRIER_RUN: "33300177445"
+      CARRIER_NAME: "minimachine-busybox-bitcode-33300177445"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends llvm-18
+
+      - name: Run focused contracts
+        run: |
+          python3 -m unittest \
+            tests.test_legalizer \
+            tests.test_runtime \
+            -v
+
+      - name: Download frozen BusyBox carrier
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/carrier
+          gh run download "$CARRIER_RUN" \
+            --repo "${{ github.repository }}" \
+            --name "$CARRIER_NAME" \
+            --dir build/carrier
+          grep -Fx 'BUSYBOX_BITCODE_OBJECTS=571' \
+            build/carrier/busybox-bitcode-count.txt
+
+      - name: Run frozen 571-object census
+        run: |
+          /usr/bin/time -f 'FROZEN_BUSYBOX_CENSUS_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 scripts/abi_bc.py build/carrier/busybox-bc \
+              --llvm-major 18 \
+              --json build/busybox-frozen-census.json \
+              2>&1 | tee build/busybox-frozen-census.log
+          grep -F 'ABI_SUMMARY ' build/busybox-frozen-census.log
+          grep -F 'RUNTIME_EXECUTABLE ' build/busybox-frozen-census.log
+          grep -E '^(UNRESOLVED_HELPER|UNRESOLVED_SYS|ESCAPE_GROUP) ' \
+            build/busybox-frozen-census.log | head -120 || true
+
+      - name: Run whole-LTO census
+        run: |
+          mkdir -p build/whole
+          cp build/carrier/whole-lto/busybox_unstripped.0.4.opt.bc \
+            build/whole/busybox.bc
+          set +e
+          /usr/bin/time -f 'WHOLE_BUSYBOX_CENSUS_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 scripts/abi_bc.py build/whole \
+              --llvm-major 18 \
+              --json build/busybox-whole-census.json \
+              2>&1 | tee build/busybox-whole-census.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "WHOLE_BUSYBOX_CENSUS_STATUS=$status"
+          grep -E '^(ABI_SUMMARY|RUNTIME_EXECUTABLE|GLOBAL_SURFACE|DECL_SURFACE|UNRESOLVED_HELPER|UNRESOLVED_SYS|ESCAPE_GROUP|ABI 1/1)' \
+            build/busybox-whole-census.log | head -160 || true
+
+      - name: Upload frozen census
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-frozen-census-${{ github.run_id }}
+          path: |
+            build/busybox-frozen-census.json
+            build/busybox-frozen-census.log
+            build/busybox-whole-census.json
+            build/busybox-whole-census.log
+          if-no-files-found: ignore
+          retention-days: 14

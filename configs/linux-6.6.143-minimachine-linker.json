@@ -164,6 +164,14 @@
       "align": 8
     },
     {
+      "name": "module_versions",
+      "sections": [
+        "__modver"
+      ],
+      "align": 8,
+      "empty_after": "kernel_params"
+    },
+    {
       "name": "exception_table",
       "sections": [
         "__ex_table"
@@ -334,6 +342,16 @@
     {
       "symbol": "__stop___param",
       "group": "kernel_params",
+      "edge": "end"
+    },
+    {
+      "symbol": "__start___modver",
+      "group": "module_versions",
+      "edge": "start"
+    },
+    {
+      "symbol": "__stop___modver",
+      "group": "module_versions",
       "edge": "end"
     },
     {

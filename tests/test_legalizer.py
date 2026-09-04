@@ -87,6 +87,31 @@ class LegalizerTests(unittest.TestCase):
             )
         )
 
+    def test_switch_with_profile_metadata_lowers_normally(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @f(i8 %x) {
+            entry:
+              switch i8 %x, label %other [
+                i8 3, label %three
+                i8 19, label %nineteen
+              ], !prof !1
+            three:
+              ret i64 3
+            nineteen:
+              ret i64 19
+            other:
+              ret i64 0
+            }
+            !1 = !{!"branch_weights", i32 1, i32 2, i32 3}
+            """
+        )
+        self.assertEqual(stats.lowered_switch, 1)
+        by_name = {b.label: b for b in fn.blocks}
+        self.assertIn("three", by_name)
+        self.assertIn("nineteen", by_name)
+        self.assertIn("other", by_name)
+
     def test_switch_phi_copy_is_placed_on_selected_edge(self):
         fn, stats = self.lower_one(
             """
@@ -124,6 +149,81 @@ class LegalizerTests(unittest.TestCase):
         )
         self.assertEqual(stats.phi_edge_moves, 1)
 
+    def test_indirectbr_phi_copy_uses_selected_edge_trampoline(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @f(ptr %target, i64 %a) {
+            entry:
+              indirectbr ptr %target, [label %chosen, label %other]
+            chosen:
+              %v = phi i64 [ %a, %entry ]
+              ret i64 %v
+            other:
+              ret i64 99
+            }
+            """
+        )
+        by_name = {b.label: b for b in fn.blocks}
+        entry = by_name["entry"]
+        self.assertIsInstance(entry.instructions[-1], muir.Br)
+        self.assertEqual(entry.instructions[-1].cond, muir.Cond.EQ)
+        self.assertEqual(
+            entry.instructions[-1].b,
+            muir.BlockAddr("f", "chosen"),
+        )
+        edge_blocks = [
+            block
+            for block in fn.blocks
+            if block.label.startswith("__indirectbr_entry_phi0_edge")
+        ]
+        self.assertEqual(len(edge_blocks), 1)
+        edge = edge_blocks[0]
+        self.assertTrue(
+            any(
+                isinstance(inst, muir.Mov)
+                and inst.dst == muir.Slot("v")
+                and inst.src == muir.Slot("a")
+                for inst in edge.instructions
+            )
+        )
+        self.assertEqual(edge.instructions[-1].true_target.label, "chosen")
+        fallback = [
+            block
+            for block in fn.blocks
+            if block.label.startswith("__indirectbr_entry_fallback")
+        ]
+        self.assertEqual(len(fallback), 1)
+        self.assertTrue(fallback[0].instructions[-1].true_target.is_indirect())
+        self.assertEqual(stats.phi_edge_moves, 1)
+
+    def test_pointer_phi_ignores_nested_i8_gep_type(self):
+        fn, stats = self.lower_one(
+            """
+            @chars = internal constant [7 x i8] c"\\0A()&|;\\00"
+
+            define ptr @f(i1 %c, ptr %p) {
+            entry:
+              br i1 %c, label %left, label %right
+            left:
+              br label %merge
+            right:
+              br label %merge
+            merge:
+              %x = phi ptr [ %p, %left ], [ getelementptr inbounds ([7 x i8], ptr @chars, i64 0, i64 6), %right ]
+              ret ptr %x
+            }
+            """
+        )
+        moves = [
+            inst
+            for block in fn.blocks
+            for inst in block.instructions
+            if isinstance(inst, muir.Mov) and inst.dst == muir.Slot("x")
+        ]
+        self.assertEqual(len(moves), 2)
+        self.assertTrue(all(inst.width is muir.Width.I64 for inst in moves))
+        self.assertEqual(stats.phi_edge_moves, 2)
+
     def test_phi_becomes_edge_moves(self):
         fn, stats = self.lower_one(
             """
@@ -148,6 +248,62 @@ class LegalizerTests(unittest.TestCase):
             any(type(i).__name__.lower() == "phi" for b in fn.blocks for i in b.instructions)
         )
 
+    def test_conditional_phi_backedge_is_split_before_copy(self):
+        fn, stats = self.lower_one(
+            """
+            define i64 @f(i64 %start) {
+            entry:
+              br label %loop
+            loop:
+              %i = phi i64 [ %start, %entry ], [ %next, %back ]
+              br label %back
+            back:
+              %next = add nsw i64 %i, -1
+              %done = icmp eq i64 %i, 0
+              br i1 %done, label %exit, label %loop
+            exit:
+              ret i64 %i
+            }
+            """
+        )
+        by_name = {b.label: b for b in fn.blocks}
+        back = by_name["back"]
+        self.assertIsInstance(back.instructions[-1], muir.Br)
+        self.assertFalse(
+            any(
+                isinstance(inst, muir.Mov)
+                and inst.dst == muir.Slot("i")
+                for inst in back.instructions[:-1]
+            )
+        )
+
+        edge_blocks = [
+            block
+            for block in fn.blocks
+            if block.label.startswith("__phi_back_to_loop_edge")
+        ]
+        self.assertEqual(len(edge_blocks), 1)
+        edge = edge_blocks[0]
+        self.assertTrue(
+            any(
+                isinstance(inst, muir.Mov)
+                and inst.dst == muir.Slot("i")
+                and inst.src == muir.Slot("next")
+                for inst in edge.instructions
+            )
+        )
+        self.assertIsInstance(edge.instructions[-1], muir.Br)
+        self.assertEqual(edge.instructions[-1].true_target.label, "loop")
+        self.assertEqual(edge.instructions[-1].false_target.label, "loop")
+        self.assertIn(
+            edge.label,
+            {
+                back.instructions[-1].true_target.label,
+                back.instructions[-1].false_target.label,
+            },
+        )
+        self.assertEqual(stats.phi_edge_moves, 2)
+
     def test_constant_gep_folds_into_load(self):
         fn, stats = self.lower_one(
             """
@@ -165,6 +321,50 @@ class LegalizerTests(unittest.TestCase):
         self.assertIsInstance(mov, muir.Mov)
         self.assertIsInstance(mov.src, muir.Mem)
         self.assertEqual(mov.src.address.offset, 24)
+
+    def test_llvm_is_constant_compiletime_assert_guard_folds_only_guard(self):
+        fn, _stats = self.lower_one(
+            """
+            declare i1 @llvm.is.constant.i64(i64)
+            declare void @__compiletime_assert_1()
+
+            define i32 @f(i64 %size, ptr %dst, ptr %src) {
+            entry:
+              %c = call i1 @llvm.is.constant.i64(i64 %size)
+              br i1 %c, label %ok, label %bad
+            bad:
+              call void @__compiletime_assert_1()
+              unreachable
+            ok:
+              switch i64 %size, label %bad2 [
+                i64 1, label %one
+                i64 8, label %eight
+              ]
+            one:
+              ret i32 1
+            eight:
+              ret i32 8
+            bad2:
+              ret i32 -1
+            }
+            """
+        )
+        by_name = {b.label: b for b in fn.blocks}
+        guard_moves = [
+            inst
+            for inst in by_name["entry"].instructions
+            if isinstance(inst, muir.Mov) and inst.dst == muir.Slot("c")
+        ]
+        self.assertEqual(len(guard_moves), 1)
+        self.assertEqual(guard_moves[0].src, muir.Imm(1))
+        self.assertFalse(
+            any(
+                isinstance(inst, muir.Helper)
+                and inst.symbol.startswith("__mm_llvm_is_constant")
+                for block in fn.blocks
+                for inst in block.instructions
+            )
+        )
 
     def test_call_is_muir_pseudo_not_machine_instruction(self):
         fn, stats = self.lower_one(
@@ -256,6 +456,113 @@ class LegalizerTests(unittest.TestCase):
         self.assertEqual(entry[1].true_target.label, "fallthrough")
         self.assertEqual(entry[1].false_target.label, "taken")
         self.assertEqual(stats.lowered_static_branch, 1)
+
+    def test_float_ops_lower_to_ieee_bit_helpers(self):
+        fn, stats = self.lower_one(
+            """
+            define i32 @fp(i32 %x, ptr %p) {
+            entry:
+              %a = sitofp i32 %x to double
+              %b = fmul double %a, 2.500000e+00
+              %c = fcmp ogt double %b, 0.000000e+00
+              store double %b, ptr %p
+              %d = load double, ptr %p
+              %e = fptosi double %d to i32
+              %r = select i1 %c, i32 %e, i32 0
+              ret i32 %r
+            }
+            """
+        )
+        helpers = [
+            inst.symbol
+            for block in fn.blocks
+            for inst in block.instructions
+            if isinstance(inst, muir.Helper)
+        ]
+        self.assertIn("__mm_sitofp_32_64", helpers)
+        self.assertIn("__mm_fmul_64", helpers)
+        self.assertIn("__mm_fcmp_ogt_64", helpers)
+        self.assertIn("__mm_fptosi_64_32", helpers)
+        self.assertEqual(stats.lowered_float_ops, 2)
+        self.assertEqual(stats.lowered_float_casts, 2)
+
+    def test_float_phi_and_return_constant_are_raw_bits(self):
+        fn, _ = self.lower_one(
+            """
+            define double @fp_phi(i1 %c) {
+            entry:
+              br i1 %c, label %yes, label %no
+            yes:
+              br label %join
+            no:
+              br label %join
+            join:
+              %v = phi double [ 1.500000e+00, %yes ], [ 2.500000e+00, %no ]
+              ret double %v
+            }
+            """
+        )
+        self.assertTrue(
+            any(
+                isinstance(inst, muir.Mov)
+                for block in fn.blocks
+                for inst in block.instructions
+            )
+        )
+
+    def test_busybox_forget_const_inline_asm_is_identity(self):
+        fn, stats = self.lower_one(
+            r"""
+            @ptr_to_globals = external global i8
+
+            define ptr @forget_const() {
+            entry:
+              %p = call ptr asm sideeffect "# forget that p points to const", "=r,0"(ptr @ptr_to_globals)
+              ret ptr %p
+            }
+            """
+        )
+        moves = [
+            inst
+            for block in fn.blocks
+            for inst in block.instructions
+            if isinstance(inst, muir.Mov)
+            and inst.dst == muir.Slot("p")
+        ]
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(moves[0].src, muir.Symbol("ptr_to_globals"))
+        self.assertEqual(stats.lowered_identity_asm, 1)
+        self.assertFalse(
+            any(
+                isinstance(inst, muir.ArchEscape)
+                for block in fn.blocks
+                for inst in block.instructions
+            )
+        )
+
+    def test_ecall_preserves_ptrtoint_global_argument(self):
+        lowered, _ = self.lower_one(
+            r"""
+            @console_buffer = internal global [256 x i8] zeroinitializer, align 1
+
+            define i64 @probe(i64 %count) {
+            entry:
+              %got = call i64 asm sideeffect "ecall", "=r,r,r,r,~{memory}"(i64 4, i64 ptrtoint (ptr @console_buffer to i64), i64 %count)
+              ret i64 %got
+            }
+            """
+        )
+        sysops = [
+            inst
+            for block in lowered.blocks
+            for inst in block.instructions
+            if isinstance(inst, muir.Sys)
+        ]
+        self.assertEqual(len(sysops), 1)
+        self.assertEqual(sysops[0].op, "ecall")
+        self.assertEqual(sysops[0].args[0], muir.Imm(4))
+        self.assertEqual(sysops[0].args[1], muir.Symbol("console_buffer"))
+        self.assertEqual(sysops[0].args[2], muir.Slot("count"))
 
     def test_aggregate_ecall_uses_multi_result_sysop(self):
         fn, stats = self.lower_one(

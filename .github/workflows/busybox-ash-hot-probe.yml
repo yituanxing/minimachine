@@ -1,0 +1,76 @@
+name: MiniMachine BusyBox Ash Hot Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/busybox-ash-hot-probe.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  busybox-ash-hot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared             native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download exact Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33295701837
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33295701837
+          path: console
+
+      - name: Download proven kernel_execve checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33296957158
+          github-token: ${{ github.token }}
+          name: minimachine-shell-echo-33296957158
+          path: echo
+
+      - name: Download whole BusyBox ash bundle
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33301934244
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-bundle-33301934244
+          path: busybox
+
+      - name: Inject real BusyBox and run ash
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          set +e
+          printf 'exit\n' |           /usr/bin/time -f 'BUSYBOX_ASH_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M'           python3 scripts/run-minimachine-linux.py console/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --program-cache-in console/llvm/linux-initramfs-p3-cache.pkl.gz             --initramfs echo/mmsh-echo.cpio             --native-vm             --checkpoint-in echo/mmsh-echo-kernel-execve.chk.gz             --inject-init busybox/busybox-ash.bflt             --stop-on-panic             --max-steps 0             --progress-every 0             2>&1 | tee build/busybox-ash-hot.log
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "BUSYBOX_ASH_HOT_STATUS=$status" | tee -a build/busybox-ash-hot.log
+
+      - name: Summarize BusyBox handoff
+        if: always()
+        run: |
+          grep -E 'BOOT_EXEC_(HOST_BULK_WRITE|ROOTFS_INJECTED|CHECKPOINT_RESTORED|USER_RUNTIME|USER_EXTERNAL_SURFACE|USER_EXTERNAL_DATA|USER_IMAGE_DATA|USER_ARGS|USER_HANDOFF|NATIVE_APPEND_PACK|NATIVE_APPEND|NATIVE_HOST_APPEND|NATIVE_DATA_APPEND|USER_EXTERNAL|USER_SYSCALL|HOST_INPUT|USER_READ_BUFFER|BLOCKED|HALTED)|BUSYBOX_ASH_HOT_(WALL|STATUS)|(^| )[/#] '             build/busybox-ash-hot.log | tail -320 || true
+
+      - name: Upload BusyBox hot trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-ash-hot-${{ github.run_id }}
+          path: build/busybox-ash-hot.log
+          if-no-files-found: error
+          retention-days: 14

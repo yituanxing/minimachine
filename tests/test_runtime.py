@@ -25,6 +25,66 @@ def executable(functions):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_indirectbr_phi_executes_only_selected_trampoline(self):
+        functions, _ = legalize_module(
+            """
+            define i64 @indirect_phi(ptr %target, i64 %a) {
+            entry:
+              indirectbr ptr %target, [label %chosen, label %other]
+            chosen:
+              %v = phi i64 [ %a, %entry ]
+              ret i64 %v
+            other:
+              ret i64 99
+            }
+            """
+        )
+        program = executable(functions)
+        chosen = program.block_code[("indirect_phi", "chosen")]
+        other = program.block_code[("indirect_phi", "other")]
+        self.assertEqual(
+            program.new_vm().run_function(
+                "indirect_phi",
+                (chosen, 42),
+            ),
+            (42,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function(
+                "indirect_phi",
+                (other, 42),
+            ),
+            (99,),
+        )
+
+    def test_conditional_phi_backedge_executes_selected_edge_only(self):
+        functions, _ = legalize_module(
+            """
+            define i64 @phi_backedge(i64 %start) {
+            entry:
+              br label %loop
+            loop:
+              %i = phi i64 [ %start, %entry ], [ %next, %back ]
+              br label %back
+            back:
+              %next = add nsw i64 %i, -1
+              %done = icmp eq i64 %i, 0
+              br i1 %done, label %exit, label %loop
+            exit:
+              ret i64 %i
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("phi_backedge", (0,)),
+            (0,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function("phi_backedge", (3,)),
+            (0,),
+        )
+
     def test_direct_runtime_acceleration_rebinds_existing_memset(self):
         memset_fn = muir.Function(
             "memset",
@@ -43,6 +103,43 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(accelerated, ("memset",))
         self.assertNotEqual(host_entry, p3_entry)
         self.assertEqual(program.host_code[host_entry], "__mm_fast_memset")
+
+    def test_ror32_fast_path_matches_p3_body(self):
+        functions, _ = legalize_module(
+            """
+            define i32 @ror32(i32 %word, i32 %shift) {
+            entry:
+              %s = and i32 %shift, 31
+              %neg = sub i32 0, %shift
+              %s2 = and i32 %neg, 31
+              %a = lshr i32 %word, %s
+              %b = shl i32 %word, %s2
+              %r = or i32 %a, %b
+              ret i32 %r
+            }
+            """
+        )
+        program = executable(functions)
+
+        cases = (
+            (0x00000000, 0),
+            (0xFFFFFFFF, 1),
+            (0x12345678, 7),
+            (0x80000001, 31),
+            (0x89ABCDEF, 32),
+            (0x13579BDF, 63),
+        )
+        expected = [
+            program.new_vm().run_function("ror32", case)[0]
+            for case in cases
+        ]
+
+        self.assertEqual(accelerate_direct_runtime(program), ("ror32",))
+        actual = [
+            program.new_vm().run_function("ror32", case)[0]
+            for case in cases
+        ]
+        self.assertEqual(actual, expected)
 
     def test_scalar_helpers_execute_end_to_end(self):
         functions, _ = legalize_module(
@@ -78,6 +175,143 @@ class RuntimeTests(unittest.TestCase):
             ((-7) & ((1 << 64) - 1), 3),
         )
         self.assertEqual(result, (((-2) & ((1 << 64) - 1)),))
+
+    def test_stack_save_restore_reclaims_dynamic_alloca_cursor(self):
+        functions, _ = legalize_module(
+            """
+            declare ptr @llvm.stacksave.p0()
+            declare void @llvm.stackrestore.p0(ptr)
+
+            define i64 @stack_lifetime(i64 %n) {
+            entry:
+              %saved = call ptr @llvm.stacksave.p0()
+              %a = alloca i8, i64 %n, align 1
+              call void @llvm.stackrestore.p0(ptr %saved)
+              %b = alloca i8, i64 %n, align 1
+              %same = icmp eq ptr %a, %b
+              %r = zext i1 %same to i64
+              ret i64 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("stack_lifetime", (64,)),
+            (1,),
+        )
+
+    def test_llvm_fmuladd_f64_runtime_helper(self):
+        functions, _ = legalize_module(
+            """
+            declare double @llvm.fmuladd.f64(double, double, double)
+
+            define i32 @muladd() {
+            entry:
+              %v = call double @llvm.fmuladd.f64(double 2.000000e+00, double 3.000000e+00, double 1.000000e+00)
+              %r = fptosi double %v to i32
+              ret i32 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(program.new_vm().run_function("muladd"), (7,))
+
+    def test_llvm_ceil_and_floor_f64_runtime_helpers(self):
+        functions, _ = legalize_module(
+            """
+            declare double @llvm.ceil.f64(double)
+            declare double @llvm.floor.f64(double)
+
+            define i32 @round_integral() {
+            entry:
+              %a = call double @llvm.ceil.f64(double 2.250000e+00)
+              %b = call double @llvm.floor.f64(double 2.750000e+00)
+              %ai = fptosi double %a to i32
+              %bi = fptosi double %b to i32
+              %r = add i32 %ai, %bi
+              ret i32 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("round_integral"),
+            (5,),
+        )
+
+    def test_llvm_integer_minmax_runtime_helpers(self):
+        functions, _ = legalize_module(
+            """
+            declare i32 @llvm.smax.i32(i32, i32)
+            declare i32 @llvm.smin.i32(i32, i32)
+            declare i64 @llvm.umax.i64(i64, i64)
+            declare i64 @llvm.umin.i64(i64, i64)
+
+            define i64 @minmax() {
+            entry:
+              %a = call i32 @llvm.smax.i32(i32 -7, i32 3)
+              %b = call i32 @llvm.smin.i32(i32 -7, i32 3)
+              %c = call i64 @llvm.umax.i64(i64 9, i64 12)
+              %d = call i64 @llvm.umin.i64(i64 9, i64 12)
+              %ae = sext i32 %a to i64
+              %be = sext i32 %b to i64
+              %x = add i64 %ae, %be
+              %y = add i64 %c, %d
+              %r = add i64 %x, %y
+              ret i64 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(program.new_vm().run_function("minmax"), (17,))
+
+    def test_soft_float_helpers_execute_end_to_end(self):
+        functions, stats = legalize_module(
+            """
+            define i32 @fp_roundtrip(i32 %x, ptr %p) {
+            entry:
+              %a = sitofp i32 %x to double
+              %b = fmul double %a, 2.500000e+00
+              %c = fadd double %b, 1.000000e+00
+              store double %c, ptr %p
+              %d = load double, ptr %p
+              %ok = fcmp ogt double %d, 0.000000e+00
+              %n = fptosi double %d to i32
+              %r = select i1 %ok, i32 %n, i32 0
+              ret i32 %r
+            }
+            """
+        )
+        self.assertEqual(stats.lowered_float_ops, 3)
+        self.assertEqual(stats.lowered_float_casts, 2)
+        program = executable(functions)
+        vm = program.new_vm()
+        self.assertEqual(
+            vm.run_function("fp_roundtrip", (4, 0x3900)),
+            (11,),
+        )
+
+    def test_soft_float_extend_truncate_and_negate(self):
+        functions, _ = legalize_module(
+            """
+            define i32 @fp_cast(i16 %x) {
+            entry:
+              %a = uitofp i16 %x to float
+              %b = fpext float %a to double
+              %c = fneg double %b
+              %d = fsub double 0.000000e+00, %c
+              %e = fptrunc double %d to float
+              %f = fpext float %e to double
+              %r = fptoui double %f to i32
+              ret i32 %r
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("fp_cast", (123,)),
+            (123,),
+        )
 
     def test_supervisor_state_system_service_executes(self):
         fn = muir.Function(
@@ -424,6 +658,33 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(
             program.new_vm().run_function("replace_poison", (99,)),
             (1,),
+        )
+
+    def test_speculative_poison_shift_can_remain_unselected(self):
+        functions, _ = legalize_module(
+            """
+            define i32 @guarded_shift(i32 %n) {
+            entry:
+              %nz = icmp ne i32 %n, 0
+              %amt = add nsw i32 %n, -1
+              %shifted = shl nuw i32 1, %amt
+              %result = select i1 %nz, i32 %shifted, i32 0
+              ret i32 %result
+            }
+            """
+        )
+        program = executable(functions)
+        self.assertEqual(
+            program.new_vm().run_function("guarded_shift", (0,)),
+            (0,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function("guarded_shift", (1,)),
+            (1,),
+        )
+        self.assertEqual(
+            program.new_vm().run_function("guarded_shift", (2,)),
+            (2,),
         )
 
     def test_funnel_shift_intrinsics_execute_with_distinct_halves(self):
@@ -911,6 +1172,42 @@ class RuntimeTests(unittest.TestCase):
         )
 
 
+    def test_xxreadtoken_newline_table_lookup_preserves_pointer(self):
+        llvm = r"""
+            @chars = internal constant [7 x i8] c"\0A()&|;\00", align 1
+            @tokens = internal constant [10 x i8] c"\01\09\0A\05\08\04\00\06\07\0B", align 1
+            declare ptr @memchr(ptr, i32, i64)
+
+            define signext i32 @token_lookup(i32 %c) {
+            entry:
+              %p = call ptr @memchr(ptr @chars, i32 %c, i64 7)
+              %p32 = ptrtoint ptr %p to i32
+              %idx32 = sub i32 %p32, ptrtoint (ptr @chars to i32)
+              %wide = icmp sgt i32 %idx32, 2
+              br i1 %wide, label %other, label %single
+
+            other:
+              br label %join
+
+            single:
+              br label %join
+
+            join:
+              %q = phi ptr [ getelementptr inbounds ([7 x i8], ptr @chars, i64 0, i64 6), %other ], [ %p, %single ]
+              %q64 = ptrtoint ptr %q to i64
+              %idx64 = sub i64 %q64, ptrtoint (ptr @chars to i64)
+              %addr = getelementptr inbounds [10 x i8], ptr @tokens, i64 0, i64 %idx64
+              %byte = load i8, ptr %addr, align 1
+              %result = zext i8 %byte to i32
+              ret i32 %result
+            }
+        """
+        functions, _ = legalize_module(llvm)
+        program = executable(functions)
+        install_module_image(program, parse_module_image(llvm))
+
+        self.assertEqual(program.new_vm().run_function("token_lookup", (10,)), (1,))
+
     def test_portable_string_runtime_services_execute(self):
         functions, _ = legalize_module(
             """
@@ -950,6 +1247,116 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(vm.run_function("runtime_strcmp", (a, a)), (0,))
         self.assertEqual(vm.run_function("runtime_strncmp", (a, b, 3)), (0,))
         self.assertNotEqual(vm.run_function("runtime_strncmp", (a, b, 4)), (0,))
+
+    def test_extended_portable_string_runtime_services(self):
+        vm = Program().new_vm()
+
+        def put(address, data):
+            for i, byte in enumerate(data + b"\0"):
+                vm.memory.write(address + i, 8, byte)
+
+        a = 0xB400
+        b = 0xB500
+        c = 0xB600
+        save = 0xB700
+        put(a, b"Alpha=Beta,Gamma")
+        put(b, b"beta")
+        put(c, b"=,")
+        vm.memory.write(save, 64, 0)
+
+        strchr = direct_runtime_callback("strchr")
+        strchrnul = direct_runtime_callback("strchrnul")
+        strrchr = direct_runtime_callback("strrchr")
+        strcasecmp = direct_runtime_callback("strcasecmp")
+        strcspn = direct_runtime_callback("strcspn")
+        strpbrk = direct_runtime_callback("strpbrk")
+        strstr = direct_runtime_callback("strstr")
+        strdup = direct_runtime_callback("strdup")
+        strtok_r = direct_runtime_callback("strtok_r")
+        self.assertIsNotNone(strchr)
+        self.assertIsNotNone(strchrnul)
+        self.assertIsNotNone(strrchr)
+        self.assertIsNotNone(strcasecmp)
+        self.assertIsNotNone(strcspn)
+        self.assertIsNotNone(strpbrk)
+        self.assertIsNotNone(strstr)
+        self.assertIsNotNone(strdup)
+        self.assertIsNotNone(strtok_r)
+
+        assert strchr is not None
+        assert strchrnul is not None
+        assert strrchr is not None
+        assert strcasecmp is not None
+        assert strcspn is not None
+        assert strpbrk is not None
+        assert strstr is not None
+        assert strdup is not None
+        assert strtok_r is not None
+
+        self.assertEqual(strchr(vm, (a, ord("="))), a + 5)
+        self.assertEqual(strchr(vm, (a, ord("Z"))), 0)
+        self.assertEqual(strchrnul(vm, (b, ord("Z"))), b + 4)
+        self.assertEqual(strrchr(vm, (a, ord("a"))), a + 15)
+        self.assertEqual(strrchr(vm, (a, ord("Z"))), 0)
+        self.assertEqual(strrchr(vm, (a, 0)), a + len(b"Alpha=Beta,Gamma"))
+        put(0xB800, b"BETA")
+        self.assertEqual(strcasecmp(vm, (b, 0xB800)), 0)
+        self.assertEqual(strcspn(vm, (a, c)), 5)
+        self.assertEqual(strpbrk(vm, (a, c)), a + 5)
+        put(0xB900, b"Beta")
+        self.assertEqual(strstr(vm, (a, 0xB900)), a + 6)
+
+        dup = strdup(vm, (b,))
+        self.assertEqual(
+            bytes(vm.memory.read(dup + i, 8) for i in range(5)),
+            b"beta\0",
+        )
+
+        token1 = strtok_r(vm, (a, c, save))
+        token2 = strtok_r(vm, (0, c, save))
+        self.assertEqual(token1, a)
+        self.assertEqual(token2, a + 6)
+        self.assertEqual(
+            bytes(vm.memory.read(token1 + i, 8) for i in range(6)),
+            b"Alpha\0",
+        )
+        self.assertEqual(
+            bytes(vm.memory.read(token2 + i, 8) for i in range(5)),
+            b"Beta\0",
+        )
+
+    def test_portable_fnmatch_runtime_semantics(self):
+        callback = direct_runtime_callback("fnmatch")
+        self.assertIsNotNone(callback)
+        vm = Program().new_vm()
+
+        def put(address, data):
+            for i, byte in enumerate(data + b"\0"):
+                vm.memory.write(address + i, 8, byte)
+
+        pattern = 0xBA00
+        string = 0xBB00
+        assert callback is not None
+
+        cases = [
+            (b"alpha", b"alpha", 0, 0),
+            (b"a*", b"alpha", 0, 0),
+            (b"a?pha", b"alpha", 0, 0),
+            (b"a[kl]pha", b"alpha", 0, 0),
+            (b"a[!x]pha", b"alpha", 0, 0),
+            (b"a\\*b", b"a*b", 0, 0),
+            (b"a*b", b"a/x/b", 0x01, 1),
+            (b"*/b", b"a/b", 0x01, 0),
+            (b"*", b".hidden", 0x04, 1),
+            (b".*", b".hidden", 0x04, 0),
+            (b"ALPHA", b"alpha", 0x10, 0),
+            (b"alpha", b"alpha/rest", 0x01 | 0x08, 0),
+        ]
+        for pat, text, flags, expected in cases:
+            with self.subTest(pattern=pat, string=text, flags=flags):
+                put(pattern, pat)
+                put(string, text)
+                self.assertEqual(callback(vm, (pattern, string, flags)), expected)
 
     def test_portable_memmove_runtime_handles_overlap(self):
         callback = direct_runtime_callback("memmove")

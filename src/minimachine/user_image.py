@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import base64
 import json
 import struct
+import zlib
 
 from . import muir, p3
+from .image import (
+    BlockExpr,
+    ImageAlias,
+    ImageObject,
+    ModuleImage,
+    Relocation,
+    SymbolExpr,
+)
 
 FORMAT = "minimachine-p3-v1"
+PROGRAM_FORMAT = "minimachine-p3-program-v1"
 
 BFLT_MAGIC = b"bFLT"
 BFLT_VERSION = 4
@@ -13,12 +25,39 @@ BFLT_HEADER_SIZE = 64
 BFLT_FLAG_KTRACE = 0x0010
 USER_PAYLOAD_MAGIC = b"MMP3"
 USER_PAYLOAD_VERSION = 1
+USER_PAYLOAD_ZLIB_VERSION = 2
+USER_PROGRAM_PAYLOAD_VERSION = 3
+USER_PROGRAM_PAYLOAD_ZLIB_VERSION = 4
 USER_PAYLOAD_HEADER_SIZE = 12
 BFLT_DATA_ALIGN = 0x20
 
 
 class UserImageError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class UserProgramImage:
+    entry: str
+    functions: tuple[p3.Function, ...]
+    image: ModuleImage | None = None
+    entry_args: str = "none"
+    runtime_helpers: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        names = tuple(fn.name for fn in self.functions)
+        if not names:
+            raise UserImageError("P3 user program has no functions")
+        if len(set(names)) != len(names):
+            raise UserImageError("P3 user program has duplicate function names")
+        if self.entry not in names:
+            raise UserImageError(
+                f"P3 user program entry is missing: {self.entry}"
+            )
+        if self.entry_args not in {"none", "linux-main"}:
+            raise UserImageError(
+                f"unsupported user entry argument mode: {self.entry_args}"
+            )
 
 
 def _width(bits: int) -> muir.Width:
@@ -235,6 +274,184 @@ def loads_function(data: bytes) -> p3.Function:
         raise UserImageError("P3 user image must be a JSON object")
     return function_from_obj(obj)
 
+def _image_target_to_obj(target: SymbolExpr | BlockExpr) -> dict:
+    if isinstance(target, SymbolExpr):
+        return {
+            "kind": "symbol",
+            "symbol": target.symbol,
+            "addend": target.addend,
+        }
+    if isinstance(target, BlockExpr):
+        return {
+            "kind": "block",
+            "function": target.function,
+            "label": target.label,
+            "addend": target.addend,
+        }
+    raise UserImageError(
+        f"unsupported image relocation target: {type(target).__name__}"
+    )
+
+
+def _image_target_from_obj(obj) -> SymbolExpr | BlockExpr:
+    kind = obj.get("kind")
+    if kind == "symbol":
+        return SymbolExpr(
+            obj["symbol"],
+            int(obj.get("addend", 0)),
+        )
+    if kind == "block":
+        return BlockExpr(
+            obj["function"],
+            obj["label"],
+            int(obj.get("addend", 0)),
+        )
+    raise UserImageError(f"unsupported image target kind: {kind!r}")
+
+
+def _module_image_to_obj(image: ModuleImage | None):
+    if image is None:
+        return None
+    return {
+        "objects": [
+            {
+                "name": obj.name,
+                "ty": obj.ty,
+                "data": base64.b64encode(obj.data).decode("ascii"),
+                "align": obj.align,
+                "section": obj.section,
+                "constant": obj.constant,
+                "relocations": [
+                    {
+                        "offset": reloc.offset,
+                        "size": reloc.size,
+                        "target": _image_target_to_obj(reloc.target),
+                    }
+                    for reloc in obj.relocations
+                ],
+            }
+            for obj in image.objects
+        ],
+        "aliases": [
+            {
+                "name": alias.name,
+                "target": _image_target_to_obj(alias.target),
+            }
+            for alias in image.aliases
+        ],
+        "external_data": list(image.external_data),
+        "external_functions": list(image.external_functions),
+        "skipped_linker_metadata": list(image.skipped_linker_metadata),
+        "undef_bytes": image.undef_bytes,
+    }
+
+
+def _module_image_from_obj(obj) -> ModuleImage | None:
+    if obj is None:
+        return None
+    if not isinstance(obj, dict):
+        raise UserImageError("P3 user program image must be an object")
+    objects = []
+    for raw in obj.get("objects", ()):
+        try:
+            data = base64.b64decode(raw["data"], validate=True)
+        except (KeyError, ValueError) as exc:
+            raise UserImageError("invalid user image object data") from exc
+        objects.append(
+            ImageObject(
+                name=raw["name"],
+                ty=raw["ty"],
+                data=data,
+                align=int(raw["align"]),
+                section=raw.get("section"),
+                constant=bool(raw.get("constant", False)),
+                relocations=tuple(
+                    Relocation(
+                        int(reloc["offset"]),
+                        int(reloc["size"]),
+                        _image_target_from_obj(reloc["target"]),
+                    )
+                    for reloc in raw.get("relocations", ())
+                ),
+            )
+        )
+    aliases = tuple(
+        ImageAlias(
+            raw["name"],
+            _image_target_from_obj(raw["target"]),
+        )
+        for raw in obj.get("aliases", ())
+    )
+    if any(not isinstance(alias.target, SymbolExpr) for alias in aliases):
+        raise UserImageError("user image alias target must be a symbol")
+    return ModuleImage(
+        objects=tuple(objects),
+        aliases=aliases,
+        external_data=tuple(obj.get("external_data", ())),
+        external_functions=tuple(obj.get("external_functions", ())),
+        skipped_linker_metadata=tuple(
+            obj.get("skipped_linker_metadata", ())
+        ),
+        undef_bytes=int(obj.get("undef_bytes", 0)),
+    )
+
+
+def program_to_obj(program: UserProgramImage) -> dict:
+    return {
+        "format": PROGRAM_FORMAT,
+        "entry": program.entry,
+        "functions": [
+            function_to_obj(function)["function"]
+            for function in program.functions
+        ],
+        "image": _module_image_to_obj(program.image),
+        "entry_args": program.entry_args,
+        "runtime_helpers": list(program.runtime_helpers),
+    }
+
+
+def program_from_obj(obj: dict) -> UserProgramImage:
+    if obj.get("format") != PROGRAM_FORMAT:
+        raise UserImageError(
+            f"unsupported user program format: {obj.get('format')!r}"
+        )
+    raw_functions = obj.get("functions")
+    if not isinstance(raw_functions, list):
+        raise UserImageError("P3 user program functions must be a list")
+    functions = tuple(
+        function_from_obj({"format": FORMAT, "function": fn})
+        for fn in raw_functions
+    )
+    entry = obj.get("entry")
+    if not isinstance(entry, str) or not entry:
+        raise UserImageError("P3 user program entry is missing")
+    return UserProgramImage(
+        entry,
+        functions,
+        _module_image_from_obj(obj.get("image")),
+        obj.get("entry_args", "none"),
+        tuple(obj.get("runtime_helpers", ())),
+    )
+
+
+def dumps_program(program: UserProgramImage) -> bytes:
+    return json.dumps(
+        program_to_obj(program),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def loads_program(data: bytes) -> UserProgramImage:
+    try:
+        obj = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UserImageError("invalid P3 user program JSON") from exc
+    if not isinstance(obj, dict):
+        raise UserImageError("P3 user program must be a JSON object")
+    return program_from_obj(obj)
+
+
 
 def _align_up(value: int, align: int) -> int:
     if align <= 0 or (align & (align - 1)):
@@ -242,15 +459,84 @@ def _align_up(value: int, align: int) -> int:
     return (value + align - 1) & ~(align - 1)
 
 
-def pack_user_payload(function: p3.Function) -> bytes:
-    body = dumps_function(function)
+def pack_user_payload(
+    function: p3.Function,
+    *,
+    compress: bool = False,
+) -> bytes:
+    raw = dumps_function(function)
+    if compress:
+        body = zlib.compress(raw, level=9)
+        version = USER_PAYLOAD_ZLIB_VERSION
+    else:
+        body = raw
+        version = USER_PAYLOAD_VERSION
     header = struct.pack(
         ">4sII",
         USER_PAYLOAD_MAGIC,
-        USER_PAYLOAD_VERSION,
+        version,
         len(body),
     )
     return header + body
+
+
+def pack_user_program(
+    program: UserProgramImage,
+    *,
+    compress: bool = False,
+) -> bytes:
+    raw = dumps_program(program)
+    if compress:
+        body = zlib.compress(raw, level=9)
+        version = USER_PROGRAM_PAYLOAD_ZLIB_VERSION
+    else:
+        body = raw
+        version = USER_PROGRAM_PAYLOAD_VERSION
+    header = struct.pack(
+        ">4sII",
+        USER_PAYLOAD_MAGIC,
+        version,
+        len(body),
+    )
+    return header + body
+
+
+def unpack_user_image(data: bytes) -> UserProgramImage:
+    if len(data) < USER_PAYLOAD_HEADER_SIZE:
+        raise UserImageError("truncated MiniMachine user payload")
+    magic, version, size = struct.unpack(
+        ">4sII", data[:USER_PAYLOAD_HEADER_SIZE]
+    )
+    if magic != USER_PAYLOAD_MAGIC:
+        raise UserImageError(f"bad MiniMachine user payload magic: {magic!r}")
+    supported = {
+        USER_PAYLOAD_VERSION,
+        USER_PAYLOAD_ZLIB_VERSION,
+        USER_PROGRAM_PAYLOAD_VERSION,
+        USER_PROGRAM_PAYLOAD_ZLIB_VERSION,
+    }
+    if version not in supported:
+        raise UserImageError(
+            f"unsupported MiniMachine user payload version: {version}"
+        )
+    end = USER_PAYLOAD_HEADER_SIZE + size
+    if end > len(data):
+        raise UserImageError("truncated MiniMachine user payload body")
+    body = data[USER_PAYLOAD_HEADER_SIZE:end]
+    if version in {
+        USER_PAYLOAD_ZLIB_VERSION,
+        USER_PROGRAM_PAYLOAD_ZLIB_VERSION,
+    }:
+        try:
+            body = zlib.decompress(body)
+        except zlib.error as exc:
+            raise UserImageError(
+                "invalid compressed MiniMachine user payload"
+            ) from exc
+    if version in {USER_PAYLOAD_VERSION, USER_PAYLOAD_ZLIB_VERSION}:
+        function = loads_function(body)
+        return UserProgramImage(function.name, (function,))
+    return loads_program(body)
 
 
 def unpack_user_payload(data: bytes) -> p3.Function:
@@ -261,26 +547,33 @@ def unpack_user_payload(data: bytes) -> p3.Function:
     )
     if magic != USER_PAYLOAD_MAGIC:
         raise UserImageError(f"bad MiniMachine user payload magic: {magic!r}")
-    if version != USER_PAYLOAD_VERSION:
+    if version not in {USER_PAYLOAD_VERSION, USER_PAYLOAD_ZLIB_VERSION}:
         raise UserImageError(
             f"unsupported MiniMachine user payload version: {version}"
         )
     end = USER_PAYLOAD_HEADER_SIZE + size
     if end > len(data):
         raise UserImageError("truncated MiniMachine user payload body")
-    return loads_function(data[USER_PAYLOAD_HEADER_SIZE:end])
+    body = data[USER_PAYLOAD_HEADER_SIZE:end]
+    if version == USER_PAYLOAD_ZLIB_VERSION:
+        try:
+            body = zlib.decompress(body)
+        except zlib.error as exc:
+            raise UserImageError(
+                "invalid compressed MiniMachine user payload"
+            ) from exc
+    return loads_function(body)
 
 
-def build_bflt(
-    function: p3.Function,
+def _wrap_bflt_payload(
+    payload: bytes,
     *,
-    stack_size: int = 64 * 1024,
-    ktrace: bool = False,
+    stack_size: int,
+    ktrace: bool,
 ) -> bytes:
     if stack_size <= 0 or stack_size >= (1 << 28):
         raise UserImageError(f"invalid bFLT stack size: {stack_size}")
 
-    payload = pack_user_payload(function)
     entry = BFLT_HEADER_SIZE
     text_end = _align_up(entry + len(payload), BFLT_DATA_ALIGN)
     flags = BFLT_FLAG_KTRACE if ktrace else 0
@@ -310,6 +603,36 @@ def build_bflt(
     image = header + payload
     image += b"\0" * (text_end - len(image))
     return image
+
+
+def build_bflt_program(
+    program: UserProgramImage,
+    *,
+    stack_size: int = 64 * 1024,
+    ktrace: bool = False,
+    compress_payload: bool = False,
+) -> bytes:
+    payload = pack_user_program(program, compress=compress_payload)
+    return _wrap_bflt_payload(
+        payload,
+        stack_size=stack_size,
+        ktrace=ktrace,
+    )
+
+
+def build_bflt(
+    function: p3.Function,
+    *,
+    stack_size: int = 64 * 1024,
+    ktrace: bool = False,
+    compress_payload: bool = False,
+) -> bytes:
+    payload = pack_user_payload(function, compress=compress_payload)
+    return _wrap_bflt_payload(
+        payload,
+        stack_size=stack_size,
+        ktrace=ktrace,
+    )
 
 
 def extract_bflt_payload(image: bytes) -> p3.Function:
