@@ -4835,8 +4835,34 @@ def _call_linux_function_preserving_control(
             call_tasks.extend([call_task] * (previous_depth - len(call_tasks)))
     call_tasks.append(call_task)
 
+    # A semantic Linux call can return control to another task while its
+    # kernel continuation remains parked inside the task's semantic stack.
+    # Re-entering a syscall for that same task must not reuse the parked arena:
+    # doing so overwrites __switch_to()'s dynamic return chain before the task
+    # is scheduled back in.
+    stack_depth = task_depth
+    parked = getattr(vm, "linux_task_contexts", {}).get(call_task)
+    while parked is not None:
+        parked_sp = int(parked[0])
+        semantic_stacks = getattr(vm, "linux_task_semantic_stacks", {})
+        candidate_top = semantic_stacks.get((call_task, stack_depth))
+        if candidate_top is None:
+            break
+        candidate_top = int(candidate_top)
+        candidate_bottom = candidate_top - _LINUX_SEMANTIC_STACK_BYTES
+        if not (candidate_bottom <= parked_sp < candidate_top):
+            break
+        print(
+            "BOOT_EXEC_TASK_SEMANTIC_STACK_BUSY "
+            f"task=0x{call_task:x} depth={stack_depth} "
+            f"parked_sp=0x{parked_sp:x} "
+            f"top=0x{candidate_top:x} bottom=0x{candidate_bottom:x}",
+            flush=True,
+        )
+        stack_depth += 1
+
     temp_stack_top = _linux_semantic_call_stack_top(
-        vm, call_task, task_depth
+        vm, call_task, stack_depth
     )
     result_words = max(1, result_count)
     total = linked.frame_size + len(args) * 8 + result_words * 8

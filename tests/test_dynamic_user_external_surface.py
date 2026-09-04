@@ -382,6 +382,67 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             0x1111222233334444,
         )
 
+    def test_semantic_linux_call_stack_skips_same_task_parked_frame(self):
+        runner = load_runner()
+
+        fn = muir.Function(
+            "echo",
+            [
+                muir.Block(
+                    "entry",
+                    [muir.Ret(muir.Slot("value"))],
+                )
+            ],
+            {"value"},
+            ("value",),
+        )
+        expanded, _ = expand_function(fn)
+        program = Program((lower_function(expanded),))
+        vm = program.new_vm()
+
+        task = 0xB91880
+        vm.linux_current_task = task
+        first_value = 0x1111222233334444
+        self.assertEqual(
+            runner._call_linux_function_preserving_control(
+                vm,
+                "echo",
+                (first_value,),
+                result_count=1,
+            ),
+            (first_value,),
+        )
+
+        depth0_top = vm.linux_task_semantic_stacks[(task, 0)]
+        linked = program.functions["echo"]
+        depth0_sp = depth0_top - linked.frame_size - 8 - 8
+        depth0_arg = depth0_sp + linked.frame_size
+        self.assertEqual(vm.memory.read(depth0_arg, 64), first_value)
+
+        # Model the task being switched out while its depth-0 semantic call
+        # frame is still the scheduler resume point. A later syscall from the
+        # same userspace task must use another arena instead of clobbering it.
+        vm.linux_task_contexts = {
+            task: (depth0_sp, program.halt_code, depth0_arg),
+        }
+        second_value = 0xAAAABBBBCCCCDDDD
+        self.assertEqual(
+            runner._call_linux_function_preserving_control(
+                vm,
+                "echo",
+                (second_value,),
+                result_count=1,
+            ),
+            (second_value,),
+        )
+
+        self.assertIn((task, 1), vm.linux_task_semantic_stacks)
+        self.assertNotEqual(
+            vm.linux_task_semantic_stacks[(task, 1)],
+            depth0_top,
+        )
+        self.assertEqual(vm.memory.read(depth0_arg, 64), first_value)
+
     def test_exiting_user_task_switch_marks_nonreturning_transfer(self):
         runner = load_runner()
 
