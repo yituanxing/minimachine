@@ -3440,6 +3440,35 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                 raise VMError("waitpid expects pid,status,options")
             pid, status_ptr, options = map(int, args)
 
+            # A normal CLONE_VM fork returns to the parent before the child
+            # necessarily wins a scheduler slot. Keep the real Linux scheduler
+            # in charge, but drive bounded schedule() rounds until service 2
+            # consumes the pending P3 child continuation.
+            pending = getattr(vm, "pending_user_fork_continuation", None)
+            if pending is not None and "schedule" in vm.program.functions:
+                for round_no in range(1, 9):
+                    before = getattr(vm, "pending_user_fork_continuation", None)
+                    if before is None:
+                        break
+                    scheduled = _call_linux_function_preserving_control(
+                        vm,
+                        "schedule",
+                        (),
+                        result_count=0,
+                        max_extra_steps=12_000_000,
+                        preserve_linux_task_state=True,
+                    )
+                    print(
+                        "BOOT_EXEC_USER_WAIT_SCHEDULE "
+                        f"round={round_no} "
+                        f"pending_before={1 if before is not None else 0} "
+                        f"pending_after={1 if getattr(vm, 'pending_user_fork_continuation', None) is not None else 0} "
+                        f"transfer={1 if scheduled is HOST_CONTROL_TRANSFER else 0}",
+                        flush=True,
+                    )
+                    if scheduled is HOST_CONTROL_TRANSFER:
+                        return HOST_CONTROL_TRANSFER
+
             # The NOMMU child currently shares the concrete P3 userspace stack
             # addresses with its parent. wait4 is the point where the parent
             # stops and the child is allowed to run, so preserve the parent's
