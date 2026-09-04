@@ -3431,7 +3431,39 @@ def sync_program_initial_range(vm, start: int, end: int) -> None:
     )
 
 
-def install_user_external_surface(vm, user_image, envp: int) -> None:
+def _activate_user_linux_task(vm, task: int, *, source: str) -> None:
+    task = int(task)
+    if not task:
+        return
+
+    previous = int(getattr(vm, "linux_current_task", 0) or 0)
+    current_addr = vm.program.symbol_addresses.get("minimachine_current_task")
+    kernel_previous = (
+        int(vm.memory.read(current_addr, 64))
+        if current_addr is not None
+        else 0
+    )
+    if previous == task and (current_addr is None or kernel_previous == task):
+        return
+
+    vm.linux_current_task = task
+    if current_addr is not None:
+        vm.memory.write(current_addr, 64, task)
+    print(
+        "BOOT_EXEC_USER_TASK_ACTIVATE "
+        f"source={source} task=0x{task:x} "
+        f"vm_before=0x{previous:x} kernel_before=0x{kernel_previous:x}",
+        flush=True,
+    )
+
+
+def install_user_external_surface(
+    vm,
+    user_image,
+    envp: int,
+    *,
+    task: int = 0,
+) -> None:
     image = user_image.image
     if image is None:
         return
@@ -3505,6 +3537,23 @@ def install_user_external_surface(vm, user_image, envp: int) -> None:
             continue
         original = _user_external_original(symbol)
         callback = _user_libc_callback(symbol, errno_address)
+        if task:
+            raw_callback = callback
+
+            def callback(
+                vm_arg,
+                args,
+                *,
+                _callback=raw_callback,
+                _task=int(task),
+                _source=original,
+            ):
+                _activate_user_linux_task(
+                    vm_arg,
+                    _task,
+                    source=f"external:{_source}",
+                )
+                return _callback(vm_arg, args)
         if direct_runtime_callback(original) is not None or original == "bcmp":
             accelerated += 1
         vm.program.register_service(symbol, callback)
@@ -3730,7 +3779,25 @@ def linux_ecall(vm, args: tuple[int, ...]):
             )
         _, regs = args
 
-        current_task = int(getattr(vm, "linux_current_task", 0) or 0)
+        current_addr = vm.program.symbol_addresses.get(
+            "minimachine_current_task"
+        )
+        kernel_current = (
+            int(vm.memory.read(current_addr, 64))
+            if current_addr is not None
+            else 0
+        )
+        current_task = int(
+            kernel_current
+            or getattr(vm, "linux_current_task", 0)
+            or 0
+        )
+        if current_task:
+            _activate_user_linux_task(
+                vm,
+                current_task,
+                source="userspace-handoff",
+            )
         fork_continuations = getattr(
             vm, "linux_user_fork_continuations", {}
         )
@@ -3972,7 +4039,12 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 flush=True,
             )
 
-            install_user_external_surface(vm, user_image, user_envp)
+            install_user_external_surface(
+                vm,
+                user_image,
+                user_envp,
+                task=current_task,
+            )
         trace_user_external_descriptor(vm, "getcwd", "external-surface")
 
         registered_user_helpers = 0
