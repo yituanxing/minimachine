@@ -44,9 +44,15 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         vm = program.new_vm()
         vm.linux_current_task = boot_task
 
+        main = muir.Function(
+            "unused",
+            [muir.Block("entry", [muir.Ret(None)])],
+            set(),
+        )
+        expanded, _ = expand_function(main)
         image = UserProgramImage(
             "unused",
-            (),
+            (lower_function(expanded),),
             ModuleImage(
                 objects=(),
                 aliases=(),
