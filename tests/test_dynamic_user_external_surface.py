@@ -782,14 +782,9 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
 
     def test_waitpid_drives_scheduler_until_pending_fork_child_is_armed(self):
         runner = load_runner()
-        fn = muir.Function(
-            "schedule",
-            [muir.Block("entry", [muir.Ret()])],
-            set(),
-        )
-        expanded, _ = expand_function(fn)
-        program = Program((lower_function(expanded),))
+        program = Program()
         vm = program.new_vm()
+        vm.program.functions["schedule"] = object()
         vm.pending_user_fork_continuation = (0x1000, 0x2000, 0x3000)
         calls = []
 
