@@ -780,6 +780,47 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(vm.memory.read(status_ptr, 32), 0x2A00)
         self.assertEqual(vm.memory.read(vm.sp + runner.RET_PC, 64), original_ret_pc)
 
+    def test_waitpid_drives_scheduler_until_pending_fork_child_is_armed(self):
+        runner = load_runner()
+        fn = muir.Function(
+            "schedule",
+            [muir.Block("entry", [muir.Ret()])],
+            set(),
+        )
+        expanded, _ = expand_function(fn)
+        program = Program((lower_function(expanded),))
+        vm = program.new_vm()
+        vm.pending_user_fork_continuation = (0x1000, 0x2000, 0x3000)
+        calls = []
+
+        def fake_call(vm_arg, name, args, **kwargs):
+            self.assertIs(vm_arg, vm)
+            calls.append((name, args, kwargs))
+            if name == "schedule" and len(calls) == 2:
+                vm.pending_user_fork_continuation = None
+            return ()
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            self.assertEqual(args[0], 260)
+            return (1 << 64) - 10
+
+        runner._call_linux_function_preserving_control = fake_call
+        runner.user_syscall = fake_user_syscall
+        callback = runner._user_libc_callback("__mm_user_ext_waitpid", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        self.assertEqual(
+            callback(vm, ((1 << 64) - 1, 0, 0)),
+            (1 << 64) - 1,
+        )
+        schedule_calls = [call for call in calls if call[0] == "schedule"]
+        self.assertEqual(len(schedule_calls), 2)
+        self.assertTrue(
+            all(call[2]["preserve_linux_task_state"] for call in schedule_calls)
+        )
+
     def test_waitpid_replays_tracked_child_exit_when_wait4_bridge_is_unavailable(self):
         runner = load_runner()
         vm = Program().new_vm()
