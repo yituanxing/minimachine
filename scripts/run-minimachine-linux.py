@@ -3450,6 +3450,10 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     before = getattr(vm, "pending_user_fork_continuation", None)
                     if before is None:
                         break
+                    scheduler_owner = int(
+                        getattr(vm, "linux_current_task", 0)
+                        or 0
+                    )
                     scheduled = _call_linux_function_preserving_control(
                         vm,
                         "schedule",
@@ -3457,6 +3461,14 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                         result_count=0,
                         max_extra_steps=12_000_000,
                         preserve_linux_task_state=True,
+                        # This is an internal kernel scheduler drive, not a
+                        # syscall owned by the active userspace continuation.
+                        # Bind its semantic stack to the Linux task that is
+                        # actually executing schedule() so context-switch
+                        # frames from different tasks cannot alias.
+                        call_task_override=(
+                            scheduler_owner if scheduler_owner else None
+                        ),
                     )
                     print(
                         "BOOT_EXEC_USER_WAIT_SCHEDULE "
@@ -5149,6 +5161,7 @@ def _call_linux_function_preserving_control(
     result_count: int,
     max_extra_steps: int = 2_000_000,
     preserve_linux_task_state: bool = False,
+    call_task_override: int | None = None,
 ):
     if name not in vm.program.functions:
         raise VMError(f"rootfs injection missing Linux function: {name}")
@@ -5191,9 +5204,13 @@ def _call_linux_function_preserving_control(
     # that owns this semantic syscall. Prefer the active userspace continuation
     # owner so task-scoped exec/exit transfers unwind the right call suffix.
     call_task = int(
-        saved_active_user_task
-        or getattr(vm, "linux_current_task", 0)
-        or (saved_current if saved_current is not None else 0)
+        call_task_override
+        if call_task_override is not None
+        else (
+            saved_active_user_task
+            or getattr(vm, "linux_current_task", 0)
+            or (saved_current if saved_current is not None else 0)
+        )
     )
     task_depths = getattr(vm, "_preserved_task_depths", None)
     if task_depths is None:

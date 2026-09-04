@@ -786,6 +786,8 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         vm = program.new_vm()
         vm.program.functions["schedule"] = object()
         vm.pending_user_fork_continuation = (0x1000, 0x2000, 0x3000)
+        vm.active_user_task = 0xB91880
+        vm.linux_current_task = 0xB4C000
         calls = []
 
         def fake_call(vm_arg, name, args, **kwargs):
@@ -814,6 +816,12 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(len(schedule_calls), 2)
         self.assertTrue(
             all(call[2]["preserve_linux_task_state"] for call in schedule_calls)
+        )
+        self.assertTrue(
+            all(
+                call[2]["call_task_override"] == 0xB4C000
+                for call in schedule_calls
+            )
         )
 
     def test_waitpid_replays_tracked_child_exit_when_wait4_bridge_is_unavailable(self):
