@@ -31,6 +31,58 @@ def load_runner():
 
 
 class DynamicUserExternalSurfaceTests(unittest.TestCase):
+    def test_user_external_callback_reactivates_owning_linux_task(self):
+        runner = load_runner()
+        program = Program()
+        boot_task = 0xB4C000
+        shell_task = 0xB91880
+        current_addr = program.define_data_symbol(
+            "minimachine_current_task",
+            boot_task.to_bytes(8, "little"),
+            align=8,
+        )
+        vm = program.new_vm()
+        vm.linux_current_task = boot_task
+
+        image = UserProgramImage(
+            "unused",
+            (),
+            ModuleImage(
+                objects=(),
+                aliases=(),
+                external_data=(),
+                external_functions=("__mm_shell_ext_getpid",),
+                skipped_linker_metadata=(),
+            ),
+            "none",
+            (),
+        )
+
+        seen = {}
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            seen["task"] = vm_arg.linux_current_task
+            seen["kernel_task"] = vm_arg.memory.read(current_addr, 64)
+            seen["args"] = args
+            return 15
+
+        runner.user_syscall = fake_user_syscall
+        runner.install_user_external_surface(
+            vm,
+            image,
+            0,
+            task=shell_task,
+        )
+
+        callback = program.host_services["__mm_shell_ext_getpid"]
+        self.assertEqual(callback(vm, ()), 15)
+        self.assertEqual(seen["task"], shell_task)
+        self.assertEqual(seen["kernel_task"], shell_task)
+        self.assertEqual(seen["args"], (172, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(vm.linux_current_task, shell_task)
+        self.assertEqual(vm.memory.read(current_addr, 64), shell_task)
+
     def test_service3_isolates_exec_instances_by_linux_task(self):
         runner = load_runner()
 
