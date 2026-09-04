@@ -3457,13 +3457,7 @@ def _activate_user_linux_task(vm, task: int, *, source: str) -> None:
     )
 
 
-def install_user_external_surface(
-    vm,
-    user_image,
-    envp: int,
-    *,
-    task: int = 0,
-) -> None:
+def install_user_external_surface(vm, user_image, envp: int) -> None:
     image = user_image.image
     if image is None:
         return
@@ -3537,23 +3531,27 @@ def install_user_external_surface(
             continue
         original = _user_external_original(symbol)
         callback = _user_libc_callback(symbol, errno_address)
-        if task:
-            raw_callback = callback
+        raw_callback = callback
 
-            def callback(
-                vm_arg,
-                args,
-                *,
-                _callback=raw_callback,
-                _task=int(task),
-                _source=original,
-            ):
+        def callback(
+            vm_arg,
+            args,
+            *,
+            _callback=raw_callback,
+            _source=original,
+        ):
+            active_task = int(
+                getattr(vm_arg, "active_user_task", 0)
+                or getattr(vm_arg, "linux_current_task", 0)
+                or 0
+            )
+            if active_task:
                 _activate_user_linux_task(
                     vm_arg,
-                    _task,
+                    active_task,
                     source=f"external:{_source}",
                 )
-                return _callback(vm_arg, args)
+            return _callback(vm_arg, args)
         if direct_runtime_callback(original) is not None or original == "bcmp":
             accelerated += 1
         vm.program.register_service(symbol, callback)
@@ -3706,6 +3704,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
             resume_sp, resume_pc, result_ptr = saved
             vm.memory.write(result_ptr, 64, prev)
             vm.linux_current_task = next_task
+            vm.active_user_task = next_task
             vm.sp = resume_sp
             vm.halted = False
             vm._set_code(resume_pc)
@@ -3740,6 +3739,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
             )
 
         vm.linux_current_task = next_task
+        vm.active_user_task = next_task
         if not start_fn:
             pending = getattr(vm, "pending_user_fork_continuation", None)
             if pending is not None:
@@ -3788,15 +3788,21 @@ def linux_ecall(vm, args: tuple[int, ...]):
             else 0
         )
         current_task = int(
-            kernel_current
-            or getattr(vm, "linux_current_task", 0)
+            getattr(vm, "linux_current_task", 0)
+            or kernel_current
             or 0
         )
         if current_task:
+            vm.active_user_task = current_task
             _activate_user_linux_task(
                 vm,
                 current_task,
                 source="userspace-handoff",
+            )
+            print(
+                "BOOT_EXEC_ACTIVE_USER_TASK "
+                f"source=userspace-handoff task=0x{current_task:x}",
+                flush=True,
             )
         fork_continuations = getattr(
             vm, "linux_user_fork_continuations", {}
@@ -4043,7 +4049,6 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 vm,
                 user_image,
                 user_envp,
-                task=current_task,
             )
         trace_user_external_descriptor(vm, "getcwd", "external-surface")
 
@@ -4770,6 +4775,9 @@ def _call_linux_function_preserving_control(
         vm.halted,
         vm.steps,
     )
+    saved_active_user_task = int(
+        getattr(vm, "active_user_task", 0) or 0
+    )
     linked = vm.program.functions[name]
     previous_depth = int(getattr(vm, "_preserved_call_depth", 0))
 
@@ -4982,6 +4990,7 @@ def _call_linux_function_preserving_control(
                 vm.halted,
                 _saved_steps,
             ) = saved
+            vm.active_user_task = saved_active_user_task
             vm.steps = observed_steps if preserve_linux_task_state else _saved_steps
 
 
