@@ -2786,6 +2786,38 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_getopt
 
+    if original == "gnu_dev_major":
+        def user_gnu_dev_major(vm, args):
+            if len(args) != 1:
+                raise VMError("gnu_dev_major expects dev")
+            dev = int(args[0]) & ((1 << 64) - 1)
+            return ((dev >> 8) & 0xFFF) | ((dev >> 32) & ~0xFFF)
+
+        return user_gnu_dev_major
+
+    if original == "gnu_dev_minor":
+        def user_gnu_dev_minor(vm, args):
+            if len(args) != 1:
+                raise VMError("gnu_dev_minor expects dev")
+            dev = int(args[0]) & ((1 << 64) - 1)
+            return (dev & 0xFF) | ((dev >> 12) & ~0xFF)
+
+        return user_gnu_dev_minor
+
+    if original == "gnu_dev_makedev":
+        def user_gnu_dev_makedev(vm, args):
+            if len(args) != 2:
+                raise VMError("gnu_dev_makedev expects major,minor")
+            major, minor = (int(value) & 0xFFFFFFFF for value in args)
+            return (
+                (minor & 0xFF)
+                | ((major & 0xFFF) << 8)
+                | ((minor & ~0xFF) << 12)
+                | ((major & ~0xFFF) << 32)
+            ) & ((1 << 64) - 1)
+
+        return user_gnu_dev_makedev
+
     if original == "vsnprintf":
         def user_vsnprintf(vm, args):
             if len(args) != 4:

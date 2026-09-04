@@ -961,6 +961,41 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(seen["name"], "sys_setsid")
         self.assertEqual(seen["args"], ())
 
+    def test_gnu_dev_helpers_round_trip_linux_dev_t_encoding(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+
+        major_cb = runner._user_libc_callback(
+            "__mm_user_ext_gnu_dev_major",
+            None,
+        )
+        minor_cb = runner._user_libc_callback(
+            "__mm_user_ext_gnu_dev_minor",
+            None,
+        )
+        make_cb = runner._user_libc_callback(
+            "__mm_user_ext_gnu_dev_makedev",
+            None,
+        )
+        self.assertIsNotNone(major_cb)
+        self.assertIsNotNone(minor_cb)
+        self.assertIsNotNone(make_cb)
+        assert major_cb is not None
+        assert minor_cb is not None
+        assert make_cb is not None
+
+        major = 0x12345
+        minor = 0x6789A
+        dev = make_cb(vm, (major, minor))
+        self.assertEqual(major_cb(vm, (dev,)), major)
+        self.assertEqual(minor_cb(vm, (dev,)), minor)
+
+        # Also cover the compact legacy layout used by ordinary tty/dev nodes.
+        small_dev = make_cb(vm, (240, 7))
+        self.assertEqual(small_dev, (240 << 8) | 7)
+        self.assertEqual(major_cb(vm, (small_dev,)), 240)
+        self.assertEqual(minor_cb(vm, (small_dev,)), 7)
+
     def test_time_libc_wrapper_uses_linux_gettimeofday(self):
         runner = load_runner()
         program = Program()
