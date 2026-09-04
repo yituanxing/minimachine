@@ -17,6 +17,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: 2c1a067ae18d971ee968eb9d88810f2294b3f996
 
       - name: Download exact image
         uses: actions/download-artifact@v4
