@@ -558,6 +558,7 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             self.assertIs(vm_arg, vm)
             seen["name"] = name
             seen["args"] = args
+            seen["kwargs"] = kwargs
             return runner.HOST_CONTROL_TRANSFER
 
         runner._call_linux_function_preserving_control = fake_call
@@ -568,6 +569,7 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertIs(result, runner.HOST_CONTROL_TRANSFER)
         self.assertEqual(seen["name"], "__se_sys_wait4")
         self.assertEqual(seen["args"], (14, 0xD340, 0, 0))
+        self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
 
     def test_waitpid_uses_linux_wait4_and_guest_status(self):
         runner = load_runner()
