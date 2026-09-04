@@ -4,17 +4,31 @@ MiniMachine is a compiler-driven minimal-machine research project.
 
 The goal is not to minimize opcode count at any cost. The goal is to design the smallest practical machine boundary that makes lowering from LLVM mechanical, total where possible, and easy to audit.
 
-## Current research question
+## v1.0 status
 
-Can we design a machine competitive with SUBLEQ-style minimal machines in implementation size, while substantially reducing LLVM lowering complexity?
-
-The current candidate is intentionally provisional:
+MiniMachine has reached its v1.0 functional freeze. The v1.0 machine boundary is
+P3:
 
 - `MOV` — data movement, direct/indirect memory access, width-aware loads/stores
 - `SUB` — integer state transformation
 - `BR` — two-target conditional control flow, shaped to match LLVM `icmp + br`
 
-Nothing in the repository treats this P3 candidate as frozen.
+For v1.0, this boundary is frozen. New primitives are not added merely to make a
+new workload easier; any future ISA change must again justify itself against total
+machine + VM + lowering + runtime complexity.
+
+The runtime freeze point is commit
+`710cf462d74fd9840d0f634d8996ba5e620722fa`. At that point the same code and
+inputs passed the four release gates three consecutive times:
+
+- Native Dynamic Service Contract;
+- Lua Runtime Hot;
+- BusyBox Real Software Hot;
+- Linux MiniMachine Target Gate.
+
+The BusyBox gate reaches `MINIMACHINE_REAL_EXTERNAL_END`, exits with status 0,
+and rejects any `BOOT_EXEC_BLOCKED` marker. See
+`docs/V1_RELEASE_STATUS.md` for the frozen evidence.
 
 ## Linux corpus contract
 
@@ -47,9 +61,14 @@ normalized LLVM
   |
   +--> census / semantic pressure
   |
-  +--> P3 lowering experiments
+  v
+P3 lowering
   |
-  +--> future tiny VM
+  v
+native P3 VM + checkpoint/replay
+  |
+  v
+Linux 6.6.143 + real userspace
 ```
 
 Linux source, generated headers, `.i`, `.bc`, and normalized artifacts are reproducible cache material and are not committed to Git.
@@ -107,6 +126,7 @@ not become the development roadmap, and a BusyBox/ash-specific host shortcut is
 not considered a completed feature unless it represents a reusable ABI/runtime
 contract.
 
-The current software ladder is Linux -> BusyBox init/userspace, followed by
-additional real programs such as Lua and SQLite once the BusyBox userspace path
-is stable.
+The v1.0 software ladder is Linux -> BusyBox init/userspace -> Lua. BusyBox and
+Lua are release gates and are stable at the v1.0 freeze point. SQLite and broader
+network/application coverage are intentionally deferred to post-v1 work rather
+than extending the v1.0 finish line.

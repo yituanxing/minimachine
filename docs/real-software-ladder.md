@@ -22,9 +22,19 @@ semantic surface while keeping failures attributable:
 The ladder is intentionally not a collection of "small C programs".  Each
 stage should open a new class of workload.
 
+## v1.0 freeze
+
+The v1.0 ladder is frozen at Linux + BusyBox + Lua. At runtime freeze commit
+`710cf462d74fd9840d0f634d8996ba5e620722fa`, the release gates were rerun
+three times without code changes and all three attempts passed.
+
+SQLite and Dropbear remain useful future coverage, but they are not v1.0 release
+requirements. This prevents the real-software ladder from turning into an
+unbounded definition of "done".
+
 ## Current ladder
 
-### 0. Linux 6.6.143 + BusyBox 1.37.0
+### 0. Linux 6.6.143 + BusyBox 1.37.0 — v1.0 PASS
 
 Role: operating-system and baseline userspace gate.
 
@@ -38,7 +48,12 @@ Adds:
 BusyBox remains the first gate because later programs should be launched by a
 normal userspace environment rather than by a special MiniMachine harness.
 
-### 1. Lua 5.4.9
+Frozen v1.0 evidence includes BusyBox init/rcS, a real shell, three consecutive
+external-command forks, `uname`, `ls`, `cat`,
+`MINIMACHINE_REAL_EXTERNAL_END`, clean wait/exit cleanup, status 0, and no
+`BOOT_EXEC_BLOCKED`.
+
+### 1. Lua 5.4.9 — v1.0 PASS
 
 Role: compact language-runtime gate.
 
@@ -55,7 +70,7 @@ Success criterion: the unmodified upstream interpreter bundle runs a real Lua
 script through the Linux userspace path.  Missing functionality must be fixed
 as generic libc/ABI/runtime behavior, not Lua-specific callbacks.
 
-### 2. SQLite 3.53.4
+### 2. SQLite 3.53.4 — post-v1
 
 Role: persistent file/VFS and 64-bit data-structure gate.
 
@@ -70,7 +85,7 @@ Why it follows Lua:
 Success criterion: the upstream CLI creates a file-backed database, performs
 schema/data updates, closes it, reopens it, and verifies the persisted result.
 
-### 3. Dropbear 2026.94
+### 3. Dropbear 2026.94 — post-v1
 
 Role: network/event/process integration gate.
 
@@ -140,3 +155,23 @@ bundle stage:
 This is the intended development pattern: a real program discovers a missing
 generic mechanism; the repair is made below the application layer; the same
 unmodified program advances.
+
+### BusyBox/Linux runtime freeze milestone
+
+The v1.0 runtime freeze is `710cf462d74fd9840d0f634d8996ba5e620722fa`.
+
+The same commit was exercised in three consecutive attempts of each formal gate:
+
+- Native Dynamic Service Contract — run `33883760844`, attempts 1–3: PASS;
+- Lua Runtime Hot — run `33883760758`, attempts 1–3: PASS;
+- BusyBox Real Software Hot — run `33883760746`, attempts 1–3: PASS;
+- Linux MiniMachine Target Gate — run `33883760887`, attempts 1–3: PASS.
+
+The final process-semantics repair snapshots the parent P3 wait frame before a
+CLONE_VM child is scheduled and restores it across the full wait window. This
+eliminated cross-task corruption of the host-backed `waitpid` frame while
+preserving Linux fork/wait/exit behavior.
+
+This milestone closes v1.0 runtime development. Subsequent v1.0 changes should
+be documentation, packaging, test-harness cleanup, or release engineering unless
+a release-gate regression proves that the frozen behavior is incomplete.
