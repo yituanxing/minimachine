@@ -2896,6 +2896,47 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_gnu_dev_makedev
 
+    if original == "vasprintf":
+        def user_vasprintf(vm, args):
+            if len(args) != 3:
+                raise VMError("vasprintf expects strp,format,va_list")
+            strp, fmt_ptr, ap = map(int, args)
+            if not strp:
+                set_errno(vm, 22)
+                return (1 << 64) - 1
+
+            renderer = _user_libc_callback(
+                f"{external_prefix}vsnprintf",
+                errno_address,
+            )
+            if renderer is None:
+                raise VMError("vasprintf is missing vsnprintf renderer")
+
+            length = renderer(vm, (0, 0, fmt_ptr, ap))
+            if length is HOST_CONTROL_TRANSFER:
+                return HOST_CONTROL_TRANSFER
+            length = int(length)
+            if length < 0:
+                return (1 << 64) - 1
+
+            buffer = vm.alloc_bytes(length + 1, align=1)
+            written = renderer(vm, (buffer, length + 1, fmt_ptr, ap))
+            if written is HOST_CONTROL_TRANSFER:
+                return HOST_CONTROL_TRANSFER
+            written = int(written)
+            if written < 0:
+                return (1 << 64) - 1
+            vm.memory.write(strp, 64, buffer)
+            print(
+                "BOOT_EXEC_USER_VASPRINTF "
+                f"fmt=0x{fmt_ptr:x} ap=0x{ap:x} "
+                f"buffer=0x{buffer:x} length={written}",
+                flush=True,
+            )
+            return written
+
+        return user_vasprintf
+
     if original == "vsnprintf":
         def user_vsnprintf(vm, args):
             if len(args) != 4:

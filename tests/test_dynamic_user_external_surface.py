@@ -1006,6 +1006,36 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             sorted(values),
         )
 
+    def test_vasprintf_allocates_and_formats_guest_string(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+
+        strp = 0xD800
+        fmt = 0xD880
+        text = 0xD900
+        ap = 0xD980
+        for offset, byte in enumerate(b"%s:%d\0"):
+            vm.memory.write(fmt + offset, 8, byte)
+        for offset, byte in enumerate(b"item\0"):
+            vm.memory.write(text + offset, 8, byte)
+        vm.memory.write(ap, 64, text)
+        vm.memory.write(ap + 8, 64, 42)
+
+        callback = runner._user_libc_callback(
+            "__mm_user_ext_vasprintf",
+            None,
+        )
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        self.assertEqual(callback(vm, (strp, fmt, ap)), 7)
+        result = vm.memory.read(strp, 64)
+        self.assertNotEqual(result, 0)
+        self.assertEqual(
+            bytes(vm.memory.read(result + index, 8) for index in range(8)),
+            b"item:42\0",
+        )
+
     def test_gnu_dev_helpers_round_trip_linux_dev_t_encoding(self):
         runner = load_runner()
         vm = Program().new_vm()
