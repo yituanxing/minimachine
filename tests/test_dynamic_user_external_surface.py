@@ -746,10 +746,18 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         status_ptr = 0xD340
         seen = {}
 
+        original_ret_pc = 0x123456789ABCDEF0
+        vm.memory.write(vm.sp + runner.FRAME_SIZE, 64, runner.HEADER_SIZE)
+        vm.memory.write(vm.sp + runner.ARG_COUNT, 64, 0)
+        vm.memory.write(vm.sp + runner.RET_PC, 64, original_ret_pc)
+
         def fake_user_syscall(vm_arg, args):
             self.assertIs(vm_arg, vm)
             seen["args"] = args
             vm.memory.write(status_ptr, 32, 0x2A00)
+            # Model a child reusing the parent's concrete P3 userspace stack
+            # while wait4 has the parent blocked.
+            vm.memory.write(vm.sp + runner.RET_PC, 64, 0xDEADBEEF)
             return 14
 
         runner.user_syscall = fake_user_syscall
@@ -763,6 +771,7 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             (260, 14, status_ptr, 0, 0, 0, 0),
         )
         self.assertEqual(vm.memory.read(status_ptr, 32), 0x2A00)
+        self.assertEqual(vm.memory.read(vm.sp + runner.RET_PC, 64), original_ret_pc)
 
     def test_fork_adapts_to_nommu_vfork_clone_flags(self):
         runner = load_runner()

@@ -3269,6 +3269,14 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             if len(args) != 3:
                 raise VMError("waitpid expects pid,status,options")
             pid, status_ptr, options = map(int, args)
+
+            # The NOMMU child currently shares the concrete P3 userspace stack
+            # addresses with its parent. wait4 is the point where the parent
+            # stops and the child is allowed to run, so preserve the parent's
+            # live P3 call chain across that scheduling window. Restoring here,
+            # after Linux has resumed the waiter, keeps the BusyBox evaltree
+            # continuation intact without hiding kernel task/fd/VFS semantics.
+            waiter_stack = _snapshot_p3_call_chain(vm)
             raw = user_syscall(
                 vm,
                 (
@@ -3283,6 +3291,15 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             )
             if raw is HOST_CONTROL_TRANSFER:
                 return HOST_CONTROL_TRANSFER
+            _restore_p3_call_chain(vm, waiter_stack)
+            if waiter_stack:
+                print(
+                    "BOOT_EXEC_USER_WAIT_STACK_RESTORE "
+                    f"frames={len(waiter_stack)} "
+                    f"bytes={sum(len(payload) for _, payload in waiter_stack)} "
+                    f"pid={pid}",
+                    flush=True,
+                )
             return libc_linux_result(vm, raw)
 
         return user_waitpid
