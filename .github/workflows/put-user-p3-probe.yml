@@ -36,63 +36,144 @@ jobs:
           name: minimachine-fixed-sret-33293453553
           path: fixed
 
-      - name: Inspect put_user function and unresolved operands
+      - name: Inspect Linux P3 slot-store shape
         run: |
           python3 - <<'PY'
+          from collections import Counter
           from pathlib import Path
           from src.minimachine.checkpoint import image_fingerprint
           from src.minimachine.program_cache import load_program_cache
           from src.minimachine import muir, p3
 
-          ll=Path("exact/llvm/linked.ll").read_text()
-          c=load_program_cache(Path("fixed/fixed-linux-p3-cache.pkl.gz"), image_sha256=image_fingerprint(ll))
-          program=c.program
-          target="__put_user_fn.5658"
-          print("LLVM_TARGET_BEGIN", target)
-          active=False
-          for line in ll.splitlines():
-              if not active and line.startswith("define ") and f"@{target}(" in line:
-                  active=True
-              if active:
-                  print(line)
-                  if line.strip()=="}":
-                      break
-          print("LLVM_TARGET_END", target)
-          names=[n for n in program.functions if n.startswith("__put_user_fn")]
-          print("PUT_USER_FUNCTIONS", names)
-          fn=program.functions[target].function
-          print("TARGET", target, "blocks", len(fn.blocks), "frame_slots", len(fn.frame_slots))
+          ll = Path("exact/llvm/linked.ll").read_text()
+          c = load_program_cache(
+              Path("fixed/fixed-linux-p3-cache.pkl.gz"),
+              image_sha256=image_fingerprint(ll),
+          )
+          program = c.program
+          functions = list(program.functions.values())
 
-          def values(inst):
-              out=[]
-              for attr in ("dst","src","a","b"):
-                  if hasattr(inst,attr):
-                      out.append((attr,getattr(inst,attr)))
-              if isinstance(inst,p3.Br):
-                  out += [("t",inst.true_target),("f",inst.false_target)]
-              return out
+          rows = []
+          total_slots = 0
+          total_insts = 0
+          for linked in functions:
+              fn = linked.function
+              slots = len(fn.frame_slots)
+              insts = sum(len(b.instructions) for b in fn.blocks)
+              total_slots += slots
+              total_insts += insts
+              rows.append((slots, insts, fn.name, len(fn.blocks), linked.frame_size))
 
-          def check_value(v):
-              vals=[]
-              if isinstance(v,p3.Mem):
-                  vals.append(v.address.base)
-              elif isinstance(v,muir.Target):
-                  if v.symbol is not None: vals.append(muir.Symbol(v.symbol))
-                  if v.address is not None: vals.append(v.address.base)
-              else:
-                  vals.append(v)
-              for x in vals:
-                  if isinstance(x,muir.Symbol):
-                      ok=x.name in program.symbol_addresses
-                      print("SYMBOL",x.name,"resolved",int(ok),"addr",hex(program.symbol_addresses.get(x.name,0)))
-                  elif isinstance(x,muir.Reloc):
-                      ok=x.symbol in program.symbol_addresses
-                      print("RELOC",x.symbol,"addend",x.addend,"resolved",int(ok),"addr",hex(program.symbol_addresses.get(x.symbol,0)))
+          rows.sort()
+          slot_counts = [r[0] for r in rows]
+          def pct(p):
+              if not slot_counts:
+                  return 0
+              i = round((len(slot_counts)-1) * p)
+              return slot_counts[i]
 
-          for block in fn.blocks:
-              print("BLOCK",block.label)
-              for i,inst in enumerate(block.instructions):
-                  print(i,repr(inst))
-                  for _,v in values(inst):
-                      check_value(v)
+          print("SLOT_STORE_SUMMARY",
+                "functions", len(rows),
+                "total_slots", total_slots,
+                "total_p3_insts", total_insts,
+                "mean_slots", f"{total_slots/max(1,len(rows)):.2f}",
+                "p50", pct(.50),
+                "p90", pct(.90),
+                "p95", pct(.95),
+                "p99", pct(.99),
+                "max", max(slot_counts, default=0))
+
+          for limit in (8, 16, 32, 64, 128, 256, 512):
+              n = sum(1 for x in slot_counts if x <= limit)
+              print("SLOT_STORE_FIT",
+                    "limit", limit,
+                    "functions", n,
+                    "pct", f"{100*n/max(1,len(rows)):.2f}",
+                    "bytes_per_activation", limit*8)
+
+          # Weight by static P3 instruction count: how much code lives in functions
+          # whose entire slot set fits a given local store.
+          for limit in (8, 16, 32, 64, 128, 256, 512):
+              ninst = sum(insts for slots, insts, *_ in rows if slots <= limit)
+              print("SLOT_STORE_CODE_FIT",
+                    "limit", limit,
+                    "p3_insts", ninst,
+                    "pct", f"{100*ninst/max(1,total_insts):.2f}")
+
+          print("SLOT_STORE_TOP_BEGIN")
+          for slots, insts, name, blocks, frame_size in sorted(rows, reverse=True)[:25]:
+              print("SLOT_STORE_TOP",
+                    "slots", slots,
+                    "bytes", slots*8,
+                    "frame_size_v1", frame_size,
+                    "p3_insts", insts,
+                    "blocks", blocks,
+                    "name", name)
+          print("SLOT_STORE_TOP_END")
+
+          # Audit whether strict P3 directly addresses memory relative to SP.
+          # Offsets >= 64 are especially important because v1 currently places
+          # local slots there, despite Slot having no address-of operator.
+          sp_mem_offsets = Counter()
+          sp_target_offsets = Counter()
+          sp_mem_examples = {}
+          sp_target_examples = {}
+
+          def audit_operand(x, fn_name, block_label, idx):
+              if isinstance(x, p3.Mem):
+                  a = x.address
+                  if a.base is muir.Special.SP:
+                      sp_mem_offsets[a.offset] += 1
+                      sp_mem_examples.setdefault(a.offset, (fn_name, block_label, idx, repr(x)))
+
+          def audit_target(t, fn_name, block_label, idx):
+              if t.address is not None and t.address.base is muir.Special.SP:
+                  off = t.address.offset
+                  sp_target_offsets[off] += 1
+                  sp_target_examples.setdefault(off, (fn_name, block_label, idx, repr(t)))
+
+          for linked in functions:
+              fn = linked.function
+              for block in fn.blocks:
+                  for i, inst in enumerate(block.instructions):
+                      if isinstance(inst, p3.Mov):
+                          audit_operand(inst.dst, fn.name, block.label, i)
+                          audit_operand(inst.src, fn.name, block.label, i)
+                      elif isinstance(inst, p3.Br):
+                          audit_target(inst.true_target, fn.name, block.label, i)
+                          audit_target(inst.false_target, fn.name, block.label, i)
+
+          print("SP_RELATIVE_MEM",
+                "total", sum(sp_mem_offsets.values()),
+                "distinct_offsets", len(sp_mem_offsets),
+                "ge64", sum(v for k,v in sp_mem_offsets.items() if k >= 64),
+                "lt0", sum(v for k,v in sp_mem_offsets.items() if k < 0))
+          for off, n in sorted(sp_mem_offsets.items()):
+              print("SP_RELATIVE_MEM_OFFSET", off, n, sp_mem_examples[off])
+
+          print("SP_RELATIVE_TARGET",
+                "total", sum(sp_target_offsets.values()),
+                "distinct_offsets", len(sp_target_offsets),
+                "ge64", sum(v for k,v in sp_target_offsets.items() if k >= 64))
+          for off, n in sorted(sp_target_offsets.items()):
+              print("SP_RELATIVE_TARGET_OFFSET", off, n, sp_target_examples[off])
+
+          # Architectural-state sanity: Slot is never itself converted to an address
+          # in strict P3; count uses where a Slot's VALUE is used as a memory base.
+          slot_as_mem_base = 0
+          slot_as_target_base = 0
+          for linked in functions:
+              for block in linked.function.blocks:
+                  for inst in block.instructions:
+                      if isinstance(inst, p3.Mov):
+                          for op in (inst.dst, inst.src):
+                              if isinstance(op, p3.Mem) and isinstance(op.address.base, muir.Slot):
+                                  slot_as_mem_base += 1
+                      elif isinstance(inst, p3.Br):
+                          for t in (inst.true_target, inst.false_target):
+                              if t.address is not None and isinstance(t.address.base, muir.Slot):
+                                  slot_as_target_base += 1
+          print("SLOT_VALUE_AS_ADDRESS_BASE",
+                "mem", slot_as_mem_base,
+                "branch_target", slot_as_target_base)
           PY
