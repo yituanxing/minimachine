@@ -31,11 +31,12 @@ def load_runner():
 
 
 class DynamicUserExternalSurfaceTests(unittest.TestCase):
-    def test_user_external_callback_reactivates_owning_linux_task(self):
+    def test_user_external_callback_tracks_dynamic_active_linux_task(self):
         runner = load_runner()
         program = Program()
         boot_task = 0xB4C000
         shell_task = 0xB91880
+        child_task = 0xB91EA0
         current_addr = program.define_data_symbol(
             "minimachine_current_task",
             boot_task.to_bytes(8, "little"),
@@ -64,30 +65,43 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             (),
         )
 
-        seen = {}
+        seen = []
 
         def fake_user_syscall(vm_arg, args):
             self.assertIs(vm_arg, vm)
-            seen["task"] = vm_arg.linux_current_task
-            seen["kernel_task"] = vm_arg.memory.read(current_addr, 64)
-            seen["args"] = args
+            seen.append(
+                (
+                    vm_arg.linux_current_task,
+                    vm_arg.memory.read(current_addr, 64),
+                    args,
+                )
+            )
             return 15
 
         runner.user_syscall = fake_user_syscall
-        runner.install_user_external_surface(
-            vm,
-            image,
-            0,
-            task=shell_task,
+        runner.install_user_external_surface(vm, image, 0)
+        callback = program.host_services["__mm_shell_ext_getpid"]
+
+        vm.active_user_task = shell_task
+        self.assertEqual(callback(vm, ()), 15)
+        self.assertEqual(
+            seen[-1],
+            (shell_task, shell_task, (172, 0, 0, 0, 0, 0, 0)),
         )
 
-        callback = program.host_services["__mm_shell_ext_getpid"]
+        # A vfork child inherits the exact same userspace namespace before
+        # exec. The callback must follow the dynamic continuation owner rather
+        # than the task that happened to install this namespace.
+        vm.active_user_task = child_task
+        vm.linux_current_task = shell_task
+        vm.memory.write(current_addr, 64, shell_task)
         self.assertEqual(callback(vm, ()), 15)
-        self.assertEqual(seen["task"], shell_task)
-        self.assertEqual(seen["kernel_task"], shell_task)
-        self.assertEqual(seen["args"], (172, 0, 0, 0, 0, 0, 0))
-        self.assertEqual(vm.linux_current_task, shell_task)
-        self.assertEqual(vm.memory.read(current_addr, 64), shell_task)
+        self.assertEqual(
+            seen[-1],
+            (child_task, child_task, (172, 0, 0, 0, 0, 0, 0)),
+        )
+        self.assertEqual(vm.linux_current_task, child_task)
+        self.assertEqual(vm.memory.read(current_addr, 64), child_task)
 
     def test_service3_isolates_exec_instances_by_linux_task(self):
         runner = load_runner()
