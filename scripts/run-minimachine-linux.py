@@ -3693,15 +3693,38 @@ def linux_ecall(vm, args: tuple[int, ...]):
 
         # Save where __switch_to() must continue when this task is resumed,
         # together with the system-call result slot carrying the last task.
-        contexts[prev] = (
+        saved_prev = (
             vm.memory.read(vm.sp + CALLER_SP, 64),
             vm.memory.read(vm.sp + RET_PC, 64),
             vm.memory.read(vm.sp + RESULT_PTR, 64),
+        )
+        contexts[prev] = saved_prev
+        prev_resume_sp, prev_resume_pc, prev_result_ptr = saved_prev
+        prev_code = vm.program.code_block.get(prev_resume_pc)
+        print(
+            "BOOT_EXEC_TASK_CONTEXT_SAVE "
+            f"prev=0x{prev:x} next=0x{next_task:x} "
+            f"frame_sp=0x{vm.sp:x} "
+            f"resume_sp=0x{prev_resume_sp:x} "
+            f"resume_pc=0x{prev_resume_pc:x} "
+            f"resume_code={prev_code!r} "
+            f"result_ptr=0x{prev_result_ptr:x}",
+            flush=True,
         )
 
         saved = contexts.get(next_task)
         if saved is not None:
             resume_sp, resume_pc, result_ptr = saved
+            resume_code = vm.program.code_block.get(resume_pc)
+            print(
+                "BOOT_EXEC_TASK_CONTEXT_RESTORE "
+                f"prev=0x{prev:x} next=0x{next_task:x} "
+                f"resume_sp=0x{resume_sp:x} "
+                f"resume_pc=0x{resume_pc:x} "
+                f"resume_code={resume_code!r} "
+                f"result_ptr=0x{result_ptr:x}",
+                flush=True,
+            )
             vm.memory.write(result_ptr, 64, prev)
             vm.linux_current_task = next_task
             vm.active_user_task = next_task
