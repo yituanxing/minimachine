@@ -858,9 +858,49 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
                 self.assertEqual(seen["name"], "__se_sys_clone")
                 self.assertEqual(seen["args"], (0x4111, 0, 0, 0, 0))
                 self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
-                self.assertIsNone(
+                self.assertIsNotNone(
                     getattr(vm, "pending_user_fork_continuation", None)
                 )
+                # Model service 2 consuming the first-run child continuation
+                # before the next subtest starts another fork.
+                vm.pending_user_fork_continuation = None
+
+    def test_fork_retries_internal_restart_without_dropping_child_continuation(self):
+        runner = load_runner()
+        fn = muir.Function(
+            "__se_sys_clone",
+            [muir.Block("entry", [muir.Ret(muir.Imm(0))])],
+            set(),
+        )
+        expanded, _ = expand_function(fn)
+        program = Program((lower_function(expanded),))
+        vm = program.new_vm()
+
+        vm.memory.write(vm.sp + runner.RESULT_COUNT, 64, 1)
+        vm.memory.write(vm.sp + runner.CALLER_SP, 64, 0xAC1000)
+        vm.memory.write(vm.sp + runner.RET_PC, 64, program.halt_code)
+        vm.memory.write(vm.sp + runner.RESULT_PTR, 64, 0xAC2000)
+        vm.memory.write(vm.sp + runner.FRAME_SIZE, 64, runner.HEADER_SIZE)
+        vm.memory.write(vm.sp + runner.ARG_COUNT, 64, 0)
+
+        results = iter(((1 << 64) - 513, 17))
+        calls = []
+
+        def fake_call(vm_arg, name, args, **kwargs):
+            self.assertIs(vm_arg, vm)
+            calls.append((name, args, kwargs))
+            return (next(results),)
+
+        runner._call_linux_function_preserving_control = fake_call
+        callback = runner._user_libc_callback("__mm_user_ext_fork", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        self.assertEqual(callback(vm, ()), 17)
+        self.assertEqual(len(calls), 2)
+        self.assertIsNotNone(
+            getattr(vm, "pending_user_fork_continuation", None)
+        )
 
     def test_getpid_and_getppid_track_active_userspace_task(self):
         runner = load_runner()

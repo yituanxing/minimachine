@@ -3394,18 +3394,29 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             clone_vfork = 0x00004000
             sigchld = 17
             flags = clone_vm | clone_vfork | sigchld
-            parent_stack = _snapshot_p3_call_chain(vm)
-            try:
-                call_result = _call_linux_function_preserving_control(
-                    vm,
-                    "__se_sys_clone",
-                    (flags, 0, 0, 0, 0),
-                    result_count=1,
-                    max_extra_steps=80_000_000,
-                    preserve_linux_task_state=True,
-                )
+            restart_errors = {-512, -513, -514, -516}
+            attempt = 0
+            while True:
+                parent_stack = _snapshot_p3_call_chain(vm)
+                try:
+                    call_result = _call_linux_function_preserving_control(
+                        vm,
+                        "__se_sys_clone",
+                        (flags, 0, 0, 0, 0),
+                        result_count=1,
+                        max_extra_steps=80_000_000,
+                        preserve_linux_task_state=True,
+                    )
+                except Exception:
+                    if getattr(vm, "pending_user_fork_continuation", None) is continuation:
+                        vm.pending_user_fork_continuation = None
+                    raise
+
                 if call_result is HOST_CONTROL_TRANSFER:
+                    # The first-run child path consumes the continuation in
+                    # service 2. Keep it armed across the control transfer.
                     return HOST_CONTROL_TRANSFER
+
                 _restore_p3_call_chain(vm, parent_stack)
                 print(
                     "BOOT_EXEC_USER_FORK_STACK_RESTORE "
@@ -3414,16 +3425,42 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     flush=True,
                 )
                 result, = call_result
-            finally:
-                # service 2 consumes this once the new user task is first
-                # scheduled.  If clone failed before that point, do not leak
-                # the continuation into a later unrelated task.
-                if getattr(vm, "pending_user_fork_continuation", None) is continuation:
+                signed_result = (
+                    result - (1 << 64)
+                    if result & (1 << 63)
+                    else result
+                )
+
+                # Directly invoking __se_sys_clone bypasses Linux's normal
+                # syscall-exit restart handling. Internal ERESTART* values
+                # must never escape to BusyBox. Retry only while the child
+                # continuation is still unconsumed, which means no first-run
+                # child has taken ownership of it yet.
+                if (
+                    signed_result in restart_errors
+                    and getattr(vm, "pending_user_fork_continuation", None) is continuation
+                    and attempt < 3
+                ):
+                    attempt += 1
+                    print(
+                        "BOOT_EXEC_USER_FORK_RESTART "
+                        f"attempt={attempt} result={signed_result}",
+                        flush=True,
+                    )
+                    continue
+
+                if (
+                    signed_result < 0
+                    and getattr(vm, "pending_user_fork_continuation", None) is continuation
+                ):
+                    # A real clone failure cannot produce a child first-run.
                     vm.pending_user_fork_continuation = None
+                break
 
             print(
                 "BOOT_EXEC_USER_FORK_VFORK "
-                f"flags=0x{flags:x} result={result}",
+                f"flags=0x{flags:x} result={result} "
+                f"pending={1 if getattr(vm, 'pending_user_fork_continuation', None) is continuation else 0}",
                 flush=True,
             )
             return libc_linux_result(vm, result)
