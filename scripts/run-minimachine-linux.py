@@ -3538,13 +3538,18 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             )
             vm.pending_user_fork_continuation = continuation
 
-            # MiniMachine Linux is NOMMU.  Preserve real Linux task/fd/VFS
-            # semantics by adapting the libc fork request to a vfork-style
-            # clone: child runs first, then exec/exit releases the parent.
+            # MiniMachine Linux is NOMMU, so both forms share the Linux
+            # address space. Keep the semantic distinction between fork and
+            # vfork, though: ordinary fork creates a separate SIGCHLD task and
+            # lets the parent block naturally in wait4; only vfork holds the
+            # parent inside CLONE_VFORK until child exec/exit. P3 userspace
+            # stacks/continuations are already task-scoped above this layer.
             clone_vm = 0x00000100
             clone_vfork = 0x00004000
             sigchld = 17
-            flags = clone_vm | clone_vfork | sigchld
+            flags = clone_vm | sigchld
+            if original == "vfork":
+                flags |= clone_vfork
             restart_errors = {-512, -513, -514, -516}
             attempt = 0
             while True:
@@ -3609,8 +3614,8 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                 break
 
             print(
-                "BOOT_EXEC_USER_FORK_VFORK "
-                f"flags=0x{flags:x} result={result} "
+                "BOOT_EXEC_USER_FORK_CLONE "
+                f"kind={original} flags=0x{flags:x} result={result} "
                 f"pending={1 if getattr(vm, 'pending_user_fork_continuation', None) is continuation else 0}",
                 flush=True,
             )

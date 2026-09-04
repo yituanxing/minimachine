@@ -834,7 +834,7 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             return (321,)
 
         runner._call_linux_function_preserving_control = fake_call
-        for original in ("fork", "vfork"):
+        for original, expected_flags in (("fork", 0x111), ("vfork", 0x4111)):
             with self.subTest(original=original):
                 callback = runner._user_libc_callback(
                     f"__mm_user_ext_{original}",
@@ -856,7 +856,7 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
                 self.assertEqual(callback(vm, ()), 321)
                 self.assertEqual(vm.memory.read(vm.sp + runner.RET_PC, 64), original_ret_pc)
                 self.assertEqual(seen["name"], "__se_sys_clone")
-                self.assertEqual(seen["args"], (0x4111, 0, 0, 0, 0))
+                self.assertEqual(seen["args"], (expected_flags, 0, 0, 0, 0))
                 self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
                 self.assertIsNotNone(
                     getattr(vm, "pending_user_fork_continuation", None)
@@ -892,7 +892,7 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             return (next(results),)
 
         runner._call_linux_function_preserving_control = fake_call
-        callback = runner._user_libc_callback("__mm_user_ext_fork", None)
+        callback = runner._user_libc_callback("__mm_user_ext_vfork", None)
         self.assertIsNotNone(callback)
         assert callback is not None
 
