@@ -16,7 +16,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.minimachine import muir
-from src.minimachine.abi import CALLER_SP, RESULT_COUNT, RESULT_PTR, RET_PC, expand_function
+from src.minimachine.abi import (
+    ARG_COUNT,
+    CALLER_SP,
+    FRAME_SIZE,
+    HEADER_SIZE,
+    RESULT_COUNT,
+    RESULT_PTR,
+    RET_PC,
+    WORD,
+    expand_function,
+)
 from src.minimachine.checkpoint import (
     CheckpointError,
     image_fingerprint,
@@ -3305,6 +3315,7 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             clone_vfork = 0x00004000
             sigchld = 17
             flags = clone_vm | clone_vfork | sigchld
+            parent_stack = _snapshot_p3_call_chain(vm)
             try:
                 call_result = _call_linux_function_preserving_control(
                     vm,
@@ -3316,6 +3327,13 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                 )
                 if call_result is HOST_CONTROL_TRANSFER:
                     return HOST_CONTROL_TRANSFER
+                _restore_p3_call_chain(vm, parent_stack)
+                print(
+                    "BOOT_EXEC_USER_FORK_STACK_RESTORE "
+                    f"frames={len(parent_stack)} "
+                    f"bytes={sum(len(payload) for _, payload in parent_stack)}",
+                    flush=True,
+                )
                 result, = call_result
             finally:
                 # service 2 consumes this once the new user task is first
@@ -3429,6 +3447,48 @@ def sync_program_initial_range(vm, start: int, end: int) -> None:
         f"start=0x{start:x} end=0x{end:x} bytes={len(payload)}",
         flush=True,
     )
+
+
+def _snapshot_p3_call_chain(vm):
+    snapshots = []
+    frame = int(vm.sp)
+    seen = set()
+    for _ in range(4096):
+        if not frame or frame in seen:
+            break
+        seen.add(frame)
+
+        frame_size = int(vm.memory.read(frame + FRAME_SIZE, 64))
+        argc = int(vm.memory.read(frame + ARG_COUNT, 64))
+        result_count = int(vm.memory.read(frame + RESULT_COUNT, 64))
+        if frame_size < HEADER_SIZE or frame_size > (1 << 24):
+            break
+        if argc > (1 << 20) or result_count > (1 << 20):
+            break
+        total = frame_size + argc * WORD + max(1, result_count) * WORD
+        if total > (1 << 26):
+            raise VMError(
+                "MiniMachine P3 call-chain frame snapshot too large: "
+                f"sp=0x{frame:x} bytes={total}"
+            )
+        payload = bytes(vm.memory.read(frame + offset, 8) for offset in range(total))
+        snapshots.append((frame, payload))
+
+        caller = int(vm.memory.read(frame + CALLER_SP, 64))
+        if not caller or caller == frame:
+            break
+        frame = caller
+    return tuple(snapshots)
+
+
+def _restore_p3_call_chain(vm, snapshots) -> None:
+    bulk_write = getattr(vm.memory, "bulk_write", None)
+    for frame, payload in snapshots:
+        if bulk_write is not None:
+            bulk_write(frame, payload)
+        else:
+            for offset, byte in enumerate(payload):
+                vm.memory.write(frame + offset, 8, byte)
 
 
 def _activate_user_linux_task(vm, task: int, *, source: str) -> None:

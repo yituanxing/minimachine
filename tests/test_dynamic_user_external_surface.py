@@ -798,7 +798,19 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(callback)
                 assert callback is not None
+                original_ret_pc = 0x123456789ABCDEF0
+                vm.memory.write(vm.sp + runner.FRAME_SIZE, 64, runner.HEADER_SIZE)
+                vm.memory.write(vm.sp + runner.ARG_COUNT, 64, 0)
+                vm.memory.write(vm.sp + runner.RET_PC, 64, original_ret_pc)
+
+                def fake_call_with_stack_damage(vm_arg, name, args, **kwargs):
+                    fake_call(vm_arg, name, args, **kwargs)
+                    vm_arg.memory.write(vm_arg.sp + runner.RET_PC, 64, 0xDEADBEEF)
+                    return (321,)
+
+                runner._call_linux_function_preserving_control = fake_call_with_stack_damage
                 self.assertEqual(callback(vm, ()), 321)
+                self.assertEqual(vm.memory.read(vm.sp + runner.RET_PC, 64), original_ret_pc)
                 self.assertEqual(seen["name"], "__se_sys_clone")
                 self.assertEqual(seen["args"], (0x4111, 0, 0, 0, 0))
                 self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
