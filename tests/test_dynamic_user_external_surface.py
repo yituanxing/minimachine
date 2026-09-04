@@ -286,6 +286,9 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         runner = load_runner()
         vm = Program().new_vm()
         vm.linux_current_task = 0xBEEF
+        vm.active_user_task = 0xBEEF
+        vm.user_task_pids = {0xBEEF: 16}
+        vm.user_task_parent_pids = {0xBEEF: 15}
         calls = []
 
         def fake_user_syscall(vm_arg, args):
@@ -315,6 +318,10 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
                 (93, 7, 0, 0, 0, 0, 0),
                 (93, 9, 0, 0, 0, 0, 0),
             ],
+        )
+        self.assertEqual(
+            vm.user_wait_exits,
+            [(16, 15, 7, 0xBEEF)],
         )
 
     def test_semantic_linux_call_owner_prefers_active_userspace_task(self):
@@ -773,6 +780,34 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(vm.memory.read(status_ptr, 32), 0x2A00)
         self.assertEqual(vm.memory.read(vm.sp + runner.RET_PC, 64), original_ret_pc)
 
+    def test_waitpid_replays_tracked_child_exit_when_wait4_bridge_is_unavailable(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+        parent_task = 0xB91880
+        child_task = 0xB91EA0
+        status_ptr = 0xD3C0
+        vm.active_user_task = parent_task
+        vm.linux_current_task = parent_task
+        vm.user_task_pids = {parent_task: 15, child_task: 16}
+        vm.user_wait_exits = [(16, 15, 0, child_task)]
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            self.assertEqual(args[0], 260)
+            return (1 << 64) - 38
+
+        runner.user_syscall = fake_user_syscall
+        callback = runner._user_libc_callback("__mm_user_ext_waitpid", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        self.assertEqual(
+            callback(vm, ((1 << 64) - 1, status_ptr, 0)),
+            16,
+        )
+        self.assertEqual(vm.memory.read(status_ptr, 32), 0)
+        self.assertEqual(vm.user_wait_exits, [])
+
     def test_fork_adapts_to_nommu_vfork_clone_flags(self):
         runner = load_runner()
         fn = muir.Function(
@@ -826,6 +861,39 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
                 self.assertIsNone(
                     getattr(vm, "pending_user_fork_continuation", None)
                 )
+
+    def test_getpid_and_getppid_track_active_userspace_task(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+        task = 0xB91EA0
+        vm.active_user_task = task
+        vm.linux_current_task = 0xB4C000
+
+        results = {
+            "minimachine_user_syscall": (1 << 64) - 38,
+            "sys_getpid": 16,
+            "sys_getppid": 15,
+        }
+
+        def fake_call(vm_arg, name, args, **kwargs):
+            self.assertIs(vm_arg, vm)
+            return (results[name],)
+
+        runner._call_linux_function_preserving_control = fake_call
+        vm.program.functions["minimachine_user_syscall"] = object()
+        vm.program.functions["sys_getpid"] = object()
+        vm.program.functions["sys_getppid"] = object()
+
+        self.assertEqual(
+            runner.user_syscall(vm, (172, 0, 0, 0, 0, 0, 0)),
+            16,
+        )
+        self.assertEqual(
+            runner.user_syscall(vm, (173, 0, 0, 0, 0, 0, 0)),
+            15,
+        )
+        self.assertEqual(vm.user_task_pids[task], 16)
+        self.assertEqual(vm.user_task_parent_pids[task], 15)
 
     def test_setsid_syscall_falls_back_to_linux_sys_setsid(self):
         runner = load_runner()

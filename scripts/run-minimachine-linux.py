@@ -3156,6 +3156,25 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                 f"task=0x{vm._user_exit_task:x}",
                 flush=True,
             )
+
+            task_pids = getattr(vm, "user_task_pids", {})
+            parent_pids = getattr(vm, "user_task_parent_pids", {})
+            child_pid = int(task_pids.get(vm._user_exit_task, 0) or 0)
+            parent_pid = int(parent_pids.get(vm._user_exit_task, 0) or 0)
+            if child_pid:
+                exits = getattr(vm, "user_wait_exits", None)
+                if exits is None:
+                    exits = []
+                    vm.user_wait_exits = exits
+                if not any(int(item[3]) == vm._user_exit_task for item in exits):
+                    exits.append((child_pid, parent_pid, status, vm._user_exit_task))
+                    print(
+                        "BOOT_EXEC_USER_EXIT_TRACKED "
+                        f"task=0x{vm._user_exit_task:x} "
+                        f"pid={child_pid} ppid={parent_pid} status={status}",
+                        flush=True,
+                    )
+
             raw = user_syscall(
                 vm,
                 (93, status, 0, 0, 0, 0, 0),
@@ -3300,6 +3319,49 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
                     f"pid={pid}",
                     flush=True,
                 )
+
+            signed_raw = raw - (1 << 64) if raw & (1 << 63) else raw
+            requested_pid = pid - (1 << 64) if pid & (1 << 63) else pid
+            if signed_raw in {-38, -10}:
+                parent_task = int(
+                    getattr(vm, "active_user_task", 0)
+                    or getattr(vm, "linux_current_task", 0)
+                    or 0
+                )
+                parent_pid = int(
+                    getattr(vm, "user_task_pids", {}).get(parent_task, 0)
+                    or 0
+                )
+                exits = getattr(vm, "user_wait_exits", None)
+                if exits:
+                    match_index = None
+                    for index, item in enumerate(exits):
+                        child_pid, child_parent_pid, child_status, child_task = item
+                        if parent_pid and child_parent_pid and child_parent_pid != parent_pid:
+                            continue
+                        if requested_pid > 0 and child_pid != requested_pid:
+                            continue
+                        match_index = index
+                        break
+                    if match_index is not None:
+                        child_pid, child_parent_pid, child_status, child_task = exits.pop(match_index)
+                        if status_ptr:
+                            vm.memory.write(
+                                status_ptr,
+                                32,
+                                (int(child_status) & 0xFF) << 8,
+                            )
+                        raw = int(child_pid)
+                        print(
+                            "BOOT_EXEC_USER_WAIT_EXIT_REPLAY "
+                            f"parent_task=0x{parent_task:x} "
+                            f"parent_pid={parent_pid} "
+                            f"child_task=0x{int(child_task):x} "
+                            f"child_pid={int(child_pid)} "
+                            f"status={int(child_status)} "
+                            f"kernel_result={signed_raw}",
+                            flush=True,
+                        )
             return libc_linux_result(vm, raw)
 
         return user_waitpid
@@ -4436,6 +4498,21 @@ def user_syscall(vm, args: tuple[int, ...]):
 
     if result is None:
         result = ((1 << 64) - 38) & ((1 << 64) - 1)
+
+    signed_result = result - (1 << 64) if result & (1 << 63) else result
+    active_task = int(
+        getattr(vm, "active_user_task", 0)
+        or getattr(vm, "linux_current_task", 0)
+        or 0
+    )
+    if active_task and signed_result >= 0 and nr in {172, 173}:
+        attr = "user_task_pids" if nr == 172 else "user_task_parent_pids"
+        table = getattr(vm, attr, None)
+        if table is None:
+            table = {}
+            setattr(vm, attr, table)
+        table[active_task] = int(signed_result)
+
     if nr == 63 and argv:
         user_ptr = argv[1]
         preview_len = min(32, max(0, int(result)))
