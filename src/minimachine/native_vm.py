@@ -229,7 +229,6 @@ def _load_library():
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_uint64),
-        ctypes.POINTER(ctypes.c_uint64),
         ctypes.c_size_t,
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_uint64),
