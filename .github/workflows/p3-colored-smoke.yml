@@ -1,0 +1,69 @@
+name: P3 Colored Frame Full Cache Smoke
+
+on:
+  push:
+    branches: [research/p3-slot-color-layout]
+    paths:
+      - .github/workflows/p3-colored-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  full-cache-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download frozen full P3 cache and Linux image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p current-cache linux
+          gh run download 33635973925 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name minimachine-linux-p3-console-current-33635973925 \
+            --dir current-cache
+          gh run download 33632628029 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name minimachine-linux-initramfs-33632628029 \
+            --dir linux
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+          test -s linux/llvm/linked.ll
+          test -s linux/out/minimachine-initramfs.cpio
+
+      - name: Relink all frames and execute one P3 step
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_SLOT_COLOR_LAYOUT: "1"
+        run: |
+          set -o pipefail
+          set +e
+          /usr/bin/time -f 'COLOR_SMOKE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs linux/out/minimachine-initramfs.cpio \
+            --native-vm \
+            --probe-kallsyms start_kernel \
+            --max-steps 1 \
+            --progress-every 0 \
+            2>&1 | tee build/colored-smoke.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "COLOR_SMOKE_STATUS=$status" | tee -a build/colored-smoke.log
+
+      - name: Assert full-cache recolor
+        run: |
+          grep -F 'BOOT_EXEC_SLOT_COLOR_LAYOUT functions=33018 logical_slots=3023234 physical_slots=263357 max_physical_slots=138' build/colored-smoke.log
+          grep -F 'BOOT_EXEC_NATIVE_PACK ' build/colored-smoke.log
+          grep -F 'step limit exceeded: 1' build/colored-smoke.log
