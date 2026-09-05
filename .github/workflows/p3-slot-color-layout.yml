@@ -1,0 +1,34 @@
+name: P3 Slot Color Layout Research
+
+on:
+  push:
+    branches: [research/p3-slot-color-layout]
+    paths:
+      - src/minimachine/slot_pressure.py
+      - src/minimachine/vm.py
+      - src/minimachine/native_vm.py
+      - tests/test_slot_coloring.py
+      - .github/workflows/p3-slot-color-layout.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Run full unit suite
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
