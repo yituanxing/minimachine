@@ -81,8 +81,7 @@ def _hidden_call_continuation(function_name, block):
     return None
 
 
-def analyze_linked_function(linked):
-    function = linked.function
+def analyze_function(function):
     blocks = {block.label: block for block in function.blocks}
     successors = {}
     instruction_ud = {}
@@ -177,8 +176,13 @@ def analyze_linked_function(linked):
         "logical_slots": len(function.frame_slots),
         "peak_live": peak_live,
         "colors": physical_slots,
+        "color_map": dict(colors),
         "hidden_call_edges": sum(
             _hidden_call_continuation(function.name, block) is not None
             for block in function.blocks
         ),
     }
+
+
+def analyze_linked_function(linked):
+    return analyze_function(linked.function)

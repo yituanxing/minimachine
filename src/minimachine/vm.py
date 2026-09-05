@@ -17,6 +17,7 @@ from .abi import (
     RET_PC,
     WORD,
 )
+from .slot_pressure import analyze_function
 from .verify import verify_p3
 
 
@@ -96,6 +97,7 @@ class Program:
         self._next_data = DATA_BASE
         self.halt_code = self._alloc_code()
         self.host_code[self.halt_code] = "__halt__"
+        self._slot_coloring_enabled = False
 
         for function in functions:
             self.add_function(function)
@@ -115,11 +117,23 @@ class Program:
         if function.name in self.functions or function.name in self.symbol_addresses:
             raise VMError(f"duplicate program symbol: {function.name}")
 
-        slot_offsets = {
-            name: HEADER_SIZE + i * WORD
-            for i, name in enumerate(sorted(function.frame_slots))
-        }
-        frame_size = HEADER_SIZE + len(slot_offsets) * WORD
+        if getattr(self, "_slot_coloring_enabled", False):
+            analysis = analyze_function(function)
+            color_map = analysis["color_map"]
+            physical_slots = int(analysis["colors"])
+            slot_offsets = {
+                name: HEADER_SIZE + int(color_map.get(name, 0)) * WORD
+                for name in sorted(function.frame_slots)
+            }
+            if function.frame_slots and physical_slots == 0:
+                physical_slots = 1
+            frame_size = HEADER_SIZE + physical_slots * WORD
+        else:
+            slot_offsets = {
+                name: HEADER_SIZE + i * WORD
+                for i, name in enumerate(sorted(function.frame_slots))
+            }
+            frame_size = HEADER_SIZE + len(slot_offsets) * WORD
         block_map = {block.label: block for block in function.blocks}
         linked = LinkedFunction(function, slot_offsets, frame_size, block_map)
         self.functions[function.name] = linked
@@ -134,6 +148,55 @@ class Program:
         entry = self.block_code[(function.name, function.blocks[0].label)]
         self.initial_memory.write(descriptor + 0, 64, entry)
         self.initial_memory.write(descriptor + 8, 64, frame_size)
+
+    def enable_slot_coloring(self) -> dict[str, int]:
+        """Re-link P3 frame slots onto interference-colored physical cells.
+
+        This changes only activation-frame layout. P3 instructions, blocks,
+        symbols, and code addresses are unchanged.
+        """
+        self._slot_coloring_enabled = True
+        logical_total = 0
+        physical_total = 0
+        max_physical = 0
+
+        for name, linked in list(self.functions.items()):
+            analysis = analyze_function(linked.function)
+            color_map = analysis["color_map"]
+            physical_slots = int(analysis["colors"])
+            if linked.function.frame_slots and physical_slots == 0:
+                physical_slots = 1
+
+            slot_offsets = {
+                slot: HEADER_SIZE + int(color_map.get(slot, 0)) * WORD
+                for slot in sorted(linked.function.frame_slots)
+            }
+            frame_size = HEADER_SIZE + physical_slots * WORD
+            self.functions[name] = LinkedFunction(
+                linked.function,
+                slot_offsets,
+                frame_size,
+                linked.block_map,
+            )
+
+            descriptor = self.symbol_addresses.get(name)
+            if descriptor is not None:
+                entry = self.initial_memory.read(descriptor, 64)
+                if entry not in self.host_code:
+                    self.initial_memory.write(
+                        descriptor + 8, 64, frame_size
+                    )
+
+            logical_total += len(linked.function.frame_slots)
+            physical_total += physical_slots
+            max_physical = max(max_physical, physical_slots)
+
+        return {
+            "functions": len(self.functions),
+            "logical_slots": logical_total,
+            "physical_slots": physical_total,
+            "max_physical_slots": max_physical,
+        }
 
     def register_service(self, symbol: str, callback: HostService) -> None:
         if symbol in self.symbol_addresses:

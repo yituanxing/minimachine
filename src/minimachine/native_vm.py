@@ -391,6 +391,19 @@ class NativeVM(VM):
 
     def __init__(self, program, *, stack_top: int = DEFAULT_STACK_TOP):
         self._lib = _load_library()
+        self._slot_color_layout = bool(
+            int(os.environ.get("MINIMACHINE_SLOT_COLOR_LAYOUT", "0") or "0")
+        )
+        if self._slot_color_layout:
+            stats = program.enable_slot_coloring()
+            print(
+                "BOOT_EXEC_SLOT_COLOR_LAYOUT "
+                f"functions={stats['functions']} "
+                f"logical_slots={stats['logical_slots']} "
+                f"physical_slots={stats['physical_slots']} "
+                f"max_physical_slots={stats['max_physical_slots']}",
+                flush=True,
+            )
         self._slot_stack_enabled = bool(
             int(os.environ.get("MINIMACHINE_SLOT_STACK_STATS", "0") or "0")
         )
