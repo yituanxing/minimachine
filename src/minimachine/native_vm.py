@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import atexit
 import ctypes
+import json
 import os
 from pathlib import Path
 import time
 
 from . import muir, p3
 from .abi import CALLER_SP, RET_PC
+from .slot_pressure import analyze_linked_function
 from .vm import DEFAULT_STACK_TOP, MASK64, VM, VMError
 
 MM_OP_MOV = 1
@@ -208,6 +211,23 @@ def _load_library():
         ctypes.c_uint64, ctypes.c_uint64,
     ]
     lib.mm_vm_set_state.restype = None
+    lib.mm_vm_set_slot_costs.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.c_size_t,
+    ]
+    lib.mm_vm_set_slot_costs.restype = ctypes.c_int
+    lib.mm_vm_get_slot_stack_hist.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
+    ]
+    lib.mm_vm_get_slot_stack_hist.restype = ctypes.c_size_t
     lib.mm_vm_run.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
     lib.mm_vm_run.restype = CRunResult
     return lib
@@ -360,6 +380,21 @@ class NativeVM(VM):
 
     def __init__(self, program, *, stack_top: int = DEFAULT_STACK_TOP):
         self._lib = _load_library()
+        self._slot_stack_enabled = bool(
+            int(os.environ.get("MINIMACHINE_SLOT_STACK_STATS", "0") or "0")
+        )
+        self._slot_cost_map = {}
+        slot_map_path = os.environ.get("MINIMACHINE_SLOT_COST_MAP")
+        if self._slot_stack_enabled and slot_map_path:
+            payload = json.loads(Path(slot_map_path).read_text())
+            self._slot_cost_map.update(
+                {
+                    str(name): int(cost)
+                    for name, cost in payload.get("function_colors", {}).items()
+                }
+            )
+        self._slot_cost_packed = None
+        self._slot_stack_reported = False
         self._packed = None
         self._extra_packed = []
         self._host_packed = None
@@ -387,6 +422,104 @@ class NativeVM(VM):
         self.native_report_slots: tuple[str, ...] = ()
         self._load_initial_memory(program)
         self._synced_data_end = program._next_data
+        if self._slot_stack_enabled:
+            self._refresh_slot_costs()
+            atexit.register(self._report_slot_stack_stats)
+
+    def _refresh_slot_costs(self) -> None:
+        if not self._slot_stack_enabled:
+            return
+        pairs = []
+        computed = 0
+        for name, linked in self.program.functions.items():
+            if not linked.function.blocks:
+                continue
+            cost = self._slot_cost_map.get(name)
+            if cost is None:
+                cost = int(analyze_linked_function(linked)["colors"])
+                self._slot_cost_map[name] = cost
+                computed += 1
+            entry = self.program.block_code[
+                (name, linked.function.blocks[0].label)
+            ]
+            pairs.append((int(entry) & MASK64, int(cost)))
+        pairs.sort()
+        codes = (ctypes.c_uint64 * len(pairs))(*(code for code, _ in pairs))
+        costs = (ctypes.c_uint32 * len(pairs))(*(cost for _, cost in pairs))
+        if not self._lib.mm_vm_set_slot_costs(
+            self._handle,
+            codes,
+            costs,
+            len(pairs),
+        ):
+            raise VMError("cannot install native P3 slot-cost map")
+        self._slot_cost_packed = (codes, costs)
+        print(
+            "BOOT_EXEC_SLOT_COST_MAP "
+            f"functions={len(pairs)} computed={computed}",
+            flush=True,
+        )
+
+    def _report_slot_stack_stats(self) -> None:
+        if (
+            not self._slot_stack_enabled
+            or self._slot_stack_reported
+            or not getattr(self, "_handle", None)
+        ):
+            return
+        self._slot_stack_reported = True
+        capacity = 4097
+        hist = (ctypes.c_uint64 * capacity)()
+        samples = ctypes.c_uint64()
+        total = ctypes.c_uint64()
+        max_value = ctypes.c_uint64()
+        unknown = ctypes.c_uint64()
+        needed = int(
+            self._lib.mm_vm_get_slot_stack_hist(
+                self._handle,
+                hist,
+                capacity,
+                ctypes.byref(samples),
+                ctypes.byref(total),
+                ctypes.byref(max_value),
+                ctypes.byref(unknown),
+            )
+        )
+        count = int(samples.value)
+        if not count:
+            print("BOOT_EXEC_SLOT_STACK_STATS samples=0", flush=True)
+            return
+
+        def percentile(fraction: float) -> int:
+            target = max(1, int((count * fraction) + 0.999999))
+            running = 0
+            for value in range(min(needed, capacity)):
+                running += int(hist[value])
+                if running >= target:
+                    return value
+            return int(max_value.value)
+
+        def coverage(limit: int) -> float:
+            upto = min(limit, capacity - 1)
+            return sum(int(hist[i]) for i in range(upto + 1)) / count
+
+        print(
+            "BOOT_EXEC_SLOT_STACK_STATS "
+            f"samples={count} "
+            f"mean={int(total.value) / count:.3f} "
+            f"p50={percentile(0.50)} "
+            f"p90={percentile(0.90)} "
+            f"p95={percentile(0.95)} "
+            f"p99={percentile(0.99)} "
+            f"p999={percentile(0.999)} "
+            f"max={int(max_value.value)} "
+            f"le64={coverage(64):.6f} "
+            f"le128={coverage(128):.6f} "
+            f"le256={coverage(256):.6f} "
+            f"le512={coverage(512):.6f} "
+            f"unknown_frames={int(unknown.value)}",
+            flush=True,
+        )
 
     def __del__(self):
         handle = getattr(self, "_handle", None)
@@ -702,6 +835,8 @@ class NativeVM(VM):
             self._trace_user_descriptor_after_sync("host-append")
             self._packed_host_codes = current_hosts
             self._program_shape = shape
+            if self._slot_stack_enabled:
+                self._refresh_slot_costs()
             print(
                 "BOOT_EXEC_NATIVE_HOST_APPEND "
                 f"hosts={len(new_hosts)} total={len(current_hosts)}",
@@ -752,6 +887,8 @@ class NativeVM(VM):
             self._packed_function_names = current_functions
             self._packed_host_codes = current_hosts
             self._program_shape = shape
+            if self._slot_stack_enabled:
+                self._refresh_slot_costs()
             print(
                 "BOOT_EXEC_NATIVE_APPEND "
                 f"functions={len(new_functions)} "
@@ -781,6 +918,8 @@ class NativeVM(VM):
         self._packed_function_names = current_functions
         self._packed_host_codes = current_hosts
         self._program_shape = shape
+        if self._slot_stack_enabled:
+            self._refresh_slot_costs()
         self.set_watch_codes(self._watch_codes)
 
     def set_watch_codes(self, codes) -> None:
