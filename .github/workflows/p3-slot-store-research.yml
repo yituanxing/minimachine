@@ -32,6 +32,8 @@ jobs:
           ls -lh input/linux-initramfs-p3-cache-full-current.pkl.gz
 
       - name: Analyze call-aware Slot coloring
+        env:
+          PYTHONPATH: .
         run: |
           /usr/bin/time -v \
             python3 scripts/analyze-p3-slot-coloring.py \
