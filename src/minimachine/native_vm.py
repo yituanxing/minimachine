@@ -226,6 +226,12 @@ def _load_library():
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
     ]
     lib.mm_vm_get_slot_stack_hist.restype = ctypes.c_size_t
     lib.mm_vm_run.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
@@ -474,6 +480,12 @@ class NativeVM(VM):
         total = ctypes.c_uint64()
         max_value = ctypes.c_uint64()
         unknown = ctypes.c_uint64()
+        unknown_host = ctypes.c_uint64()
+        unknown_nonhost = ctypes.c_uint64()
+        depth_capacity = 257
+        depth_hist = (ctypes.c_uint64 * depth_capacity)()
+        depth_sum = ctypes.c_uint64()
+        depth_max = ctypes.c_uint64()
         needed = int(
             self._lib.mm_vm_get_slot_stack_hist(
                 self._handle,
@@ -483,6 +495,12 @@ class NativeVM(VM):
                 ctypes.byref(total),
                 ctypes.byref(max_value),
                 ctypes.byref(unknown),
+                ctypes.byref(unknown_host),
+                ctypes.byref(unknown_nonhost),
+                depth_hist,
+                depth_capacity,
+                ctypes.byref(depth_sum),
+                ctypes.byref(depth_max),
             )
         )
         count = int(samples.value)
@@ -503,6 +521,15 @@ class NativeVM(VM):
             upto = min(limit, capacity - 1)
             return sum(int(hist[i]) for i in range(upto + 1)) / count
 
+        def depth_percentile(fraction: float) -> int:
+            target = max(1, int((count * fraction) + 0.999999))
+            running = 0
+            for depth in range(depth_capacity):
+                running += int(depth_hist[depth])
+                if running >= target:
+                    return depth
+            return int(depth_max.value)
+
         print(
             "BOOT_EXEC_SLOT_STACK_STATS "
             f"samples={count} "
@@ -517,7 +544,14 @@ class NativeVM(VM):
             f"le128={coverage(128):.6f} "
             f"le256={coverage(256):.6f} "
             f"le512={coverage(512):.6f} "
-            f"unknown_frames={int(unknown.value)}",
+            f"unknown_frames={int(unknown.value)} "
+            f"unknown_host={int(unknown_host.value)} "
+            f"unknown_nonhost={int(unknown_nonhost.value)} "
+            f"depth_mean={int(depth_sum.value) / count:.3f} "
+            f"depth_p50={depth_percentile(0.50)} "
+            f"depth_p90={depth_percentile(0.90)} "
+            f"depth_p99={depth_percentile(0.99)} "
+            f"depth_max={int(depth_max.value)}",
             flush=True,
         )
 
