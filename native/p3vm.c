@@ -418,17 +418,44 @@ static void record_slot_stack(MMVM *vm) {
             }
         }
 
-        uint64_t arg_count = mem_read(
-            vm, frame + MM_FRAME_ARG_COUNT, 64
-        );
-        uint64_t result_count = mem_read(
-            vm, frame + MM_FRAME_RESULT_COUNT, 64
-        );
-        uint64_t result_cells = result_count ? result_count : 1;
-        full_total += MM_FRAME_HEADER_CELLS
-            + local_cells + arg_count + result_cells;
-
         uint64_t parent = mem_read(vm, frame + MM_FRAME_CALLER_SP, 64);
+        uint64_t fixed_bytes = mem_read(
+            vm, frame + MM_FRAME_SIZE, 64
+        );
+        uint64_t tail_cells = 0;
+
+        if (parent && parent != frame) {
+            if (
+                parent > frame
+                && fixed_bytes >= 64
+                && parent - frame >= fixed_bytes
+                && ((parent - frame - fixed_bytes) & 7u) == 0
+            ) {
+                tail_cells = (parent - frame - fixed_bytes) / 8;
+            } else {
+                /*
+                 * A valid descriptor-mediated P3 call stack grows downward.
+                 * If a saved/control-transfer frame does not obey that
+                 * relation, it is not safe to infer an ABI tail from stale
+                 * count fields. Count the current frame and stop the walk.
+                 */
+                full_total += MM_FRAME_HEADER_CELLS + local_cells;
+                break;
+            }
+        } else {
+            uint64_t arg_count = mem_read(
+                vm, frame + MM_FRAME_ARG_COUNT, 64
+            );
+            uint64_t result_count = mem_read(
+                vm, frame + MM_FRAME_RESULT_COUNT, 64
+            );
+            uint64_t result_cells = result_count ? result_count : 1;
+            tail_cells = arg_count + result_cells;
+        }
+
+        full_total += MM_FRAME_HEADER_CELLS
+            + local_cells + tail_cells;
+
         if (!parent || parent == frame)
             break;
         frame = parent;
