@@ -1,0 +1,141 @@
+name: P3 Slot Stack Dynamic Research
+
+on:
+  push:
+    branches: [research/p3-slot-store]
+    paths:
+      - native/p3vm.c
+      - src/minimachine/native_vm.py
+      - src/minimachine/slot_pressure.py
+      - .github/workflows/p3-slot-stack-dynamic.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  busybox-slot-stack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build instrumented native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download exact frozen inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p cold current-cache linux busybox slot-map
+          gh run download 33635974084 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name minimachine-busybox-real-cold-33635974084 \
+            --dir cold
+          gh run download 33635973925 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name minimachine-linux-p3-console-current-33635973925 \
+            --dir current-cache
+          gh run download 33632628029 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name minimachine-linux-initramfs-33632628029 \
+            --dir linux
+          gh run download 33622913820 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name minimachine-busybox-multicall-33622913820 \
+            --dir busybox
+          test -s cold/busybox-real-kernel-execve.chk.gz
+          test -s cold/busybox-real-init.cpio
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+          test -s linux/llvm/linked.ll
+          test -s busybox/busybox-multicall.bflt
+
+      - name: Find full per-function slot map
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          found=""
+          for attempt in $(seq 1 60); do
+            for run_id in $(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow p3-slot-store-research.yml \
+              --branch research/p3-slot-store \
+              --limit 10 \
+              --json databaseId,status,conclusion \
+              --jq '.[] | select(.status == "completed" and .conclusion == "success") | .databaseId'); do
+              rm -rf slot-map/*
+              if ! gh run download "$run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "p3-slot-store-research-$run_id" \
+                --dir slot-map >/dev/null 2>&1; then
+                continue
+              fi
+              if grep -F '"function_colors"' slot-map/slot-coloring.json >/dev/null 2>&1; then
+                found="$run_id"
+                break
+              fi
+            done
+            if [ -n "$found" ]; then
+              break
+            fi
+            sleep 5
+          done
+          test -n "$found"
+          echo "SLOT_MAP_RUN_ID=$found" | tee build/slot-stack-inputs.env
+          test -s slot-map/slot-coloring.json
+
+      - name: Replay real BusyBox with slot-stack instrumentation
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+          MINIMACHINE_SLOT_STACK_STATS: "1"
+          MINIMACHINE_SLOT_COST_MAP: ${{ github.workspace }}/slot-map/slot-coloring.json
+        run: |
+          set -o pipefail
+          set +e
+          {
+            echo 'echo MINIMACHINE_REAL_EXTERNAL_BEGIN'
+            echo '/bin/uname -s'
+            echo '/bin/ls /etc'
+            echo '/bin/cat /etc/inittab'
+            echo 'echo MINIMACHINE_REAL_EXTERNAL_END'
+            echo 'exit'
+          } | \
+          /usr/bin/time -f 'SLOT_STACK_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 600 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/slot-stack-hot.log
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "SLOT_STACK_HOT_STATUS=$status" | tee -a build/slot-stack-hot.log
+
+      - name: Assert and report
+        run: |
+          grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' build/slot-stack-hot.log
+          grep -F 'BOOT_EXEC_SLOT_STACK_STATS ' build/slot-stack-hot.log
+          if grep -F 'BOOT_EXEC_BLOCKED ' build/slot-stack-hot.log >/dev/null; then
+            grep -F 'BOOT_EXEC_BLOCKED ' build/slot-stack-hot.log | tail -1
+            exit 1
+          fi
+
+      - name: Upload dynamic slot-stack evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p3-slot-stack-dynamic-${{ github.run_id }}
+          path: |
+            build/slot-stack-inputs.env
+            build/slot-stack-hot.log
+          retention-days: 14
