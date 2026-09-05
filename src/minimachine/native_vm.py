@@ -218,25 +218,10 @@ def _load_library():
         ctypes.c_size_t,
     ]
     lib.mm_vm_set_slot_costs.restype = ctypes.c_int
-    lib.mm_vm_get_slot_stack_hist.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.c_size_t,
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.c_size_t,
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.c_size_t,
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.POINTER(ctypes.c_uint64),
-    ]
+    # Research-only large statistics getter: keep the C ABI authoritative.
+    # Explicit ctypes wrappers are used at the call site to avoid a fragile
+    # long argtypes list drifting out of sync with native/p3vm.c.
+    lib.mm_vm_get_slot_stack_hist.argtypes = None
     lib.mm_vm_get_slot_stack_hist.restype = ctypes.c_size_t
     lib.mm_vm_run.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
     lib.mm_vm_run.restype = CRunResult
@@ -496,9 +481,9 @@ class NativeVM(VM):
         depth_max = ctypes.c_uint64()
         needed = int(
             self._lib.mm_vm_get_slot_stack_hist(
-                self._handle,
+                ctypes.c_void_p(self._handle),
                 hist,
-                capacity,
+                ctypes.c_size_t(capacity),
                 ctypes.byref(samples),
                 ctypes.byref(total),
                 ctypes.byref(max_value),
@@ -506,11 +491,11 @@ class NativeVM(VM):
                 ctypes.byref(unknown_host),
                 ctypes.byref(unknown_nonhost),
                 full_hist,
-                full_capacity,
+                ctypes.c_size_t(full_capacity),
                 ctypes.byref(full_sum),
                 ctypes.byref(full_max),
                 depth_hist,
-                depth_capacity,
+                ctypes.c_size_t(depth_capacity),
                 ctypes.byref(depth_sum),
                 ctypes.byref(depth_max),
             )
