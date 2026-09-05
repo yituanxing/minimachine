@@ -42,6 +42,10 @@
 #define MM_ERR_BAD_TARGET 5
 #define MM_ERR_OOM 6
 
+#define MM_FRAME_CALLER_SP 0u
+#define MM_FRAME_ENTRY 16u
+#define MM_SLOT_HIST_MAX 4096u
+
 typedef struct MMPage {
     uint64_t no;
     uint8_t *data;
@@ -105,6 +109,15 @@ typedef struct {
     uint64_t *watch_codes;
     size_t watch_count;
     uint64_t halt_code;
+
+    const uint64_t *slot_entry_codes;
+    const uint32_t *slot_entry_costs;
+    size_t slot_entry_count;
+    uint64_t slot_stack_hist[MM_SLOT_HIST_MAX + 1];
+    uint64_t slot_stack_samples;
+    uint64_t slot_stack_sum;
+    uint64_t slot_stack_max;
+    uint64_t slot_stack_unknown_frames;
 
     MMPage *pages[MM_BUCKETS];
     uint64_t sp;
@@ -335,6 +348,56 @@ static uint64_t mem_strlen_bytes(MMVM *vm, uint64_t addr) {
     }
 }
 
+static uint32_t slot_cost_for_entry(const MMVM *vm, uint64_t entry,
+                                    int *known) {
+    size_t lo = 0, hi = vm->slot_entry_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        uint64_t code = vm->slot_entry_codes[mid];
+        if (code == entry) {
+            *known = 1;
+            return vm->slot_entry_costs[mid];
+        }
+        if (code < entry) lo = mid + 1;
+        else hi = mid;
+    }
+    *known = 0;
+    return 0;
+}
+
+static void record_slot_stack(MMVM *vm) {
+    if (!vm->slot_entry_codes || !vm->slot_entry_count || !vm->sp)
+        return;
+
+    uint64_t frame = vm->sp;
+    uint64_t total = 0;
+    unsigned depth = 0;
+    while (frame && depth < 1024) {
+        uint64_t entry = mem_read(vm, frame + MM_FRAME_ENTRY, 64);
+        int known = 0;
+        uint32_t cost = slot_cost_for_entry(vm, entry, &known);
+        if (known)
+            total += cost;
+        else
+            vm->slot_stack_unknown_frames++;
+
+        uint64_t parent = mem_read(vm, frame + MM_FRAME_CALLER_SP, 64);
+        if (!parent || parent == frame)
+            break;
+        frame = parent;
+        depth++;
+    }
+
+    unsigned bucket = total > MM_SLOT_HIST_MAX
+        ? MM_SLOT_HIST_MAX
+        : (unsigned)total;
+    vm->slot_stack_hist[bucket]++;
+    vm->slot_stack_samples++;
+    vm->slot_stack_sum += total;
+    if (total > vm->slot_stack_max)
+        vm->slot_stack_max = total;
+}
+
 static int find_block_in_segment(const MMSegment *segment,
                                  uint64_t code, size_t *idx) {
     size_t lo = 0, hi = segment->block_count;
@@ -419,7 +482,12 @@ static int write_operand(MMVM *vm, const MMOperand *o,
             mem_write(vm, vm->sp + o->value, 64, value);
             return !vm->oom;
         case MM_V_SP:
-            vm->sp = value;
+            if (vm->sp != value) {
+                vm->sp = value;
+                record_slot_stack(vm);
+            } else {
+                vm->sp = value;
+            }
             return 1;
         case MM_V_MEM: {
             uint64_t base;
@@ -653,6 +721,38 @@ uint64_t mm_vm_mem_strlen(MMVM *vm, uint64_t addr) {
     return mem_strlen_bytes(vm, addr);
 }
 
+int mm_vm_set_slot_costs(MMVM *vm,
+                         const uint64_t *entry_codes,
+                         const uint32_t *costs,
+                         size_t n) {
+    if (!vm)
+        return 0;
+    vm->slot_entry_codes = entry_codes;
+    vm->slot_entry_costs = costs;
+    vm->slot_entry_count = n;
+    return 1;
+}
+
+size_t mm_vm_get_slot_stack_hist(MMVM *vm,
+                                 uint64_t *hist,
+                                 size_t capacity,
+                                 uint64_t *samples,
+                                 uint64_t *sum,
+                                 uint64_t *max_value,
+                                 uint64_t *unknown_frames) {
+    if (!vm)
+        return 0;
+    size_t needed = MM_SLOT_HIST_MAX + 1;
+    size_t n = capacity < needed ? capacity : needed;
+    if (hist && n)
+        memcpy(hist, vm->slot_stack_hist, n * sizeof(uint64_t));
+    if (samples) *samples = vm->slot_stack_samples;
+    if (sum) *sum = vm->slot_stack_sum;
+    if (max_value) *max_value = vm->slot_stack_max;
+    if (unknown_frames) *unknown_frames = vm->slot_stack_unknown_frames;
+    return needed;
+}
+
 int mm_vm_set_watches(MMVM *vm, const uint64_t *codes, size_t n) {
     uint64_t *copy = NULL;
     if (n) {
@@ -670,7 +770,12 @@ void mm_vm_set_state(MMVM *vm, uint64_t block_code, uint32_t ip,
                      uint64_t sp, uint64_t steps) {
     vm->block_code = block_code;
     vm->ip = ip;
-    vm->sp = sp;
+    if (vm->sp != sp) {
+        vm->sp = sp;
+        record_slot_stack(vm);
+    } else {
+        vm->sp = sp;
+    }
     vm->steps = steps;
     vm->cached_block_valid = 0;
 }
