@@ -44,7 +44,12 @@
 
 #define MM_FRAME_CALLER_SP 0u
 #define MM_FRAME_ENTRY 16u
+#define MM_FRAME_SIZE 24u
+#define MM_FRAME_RESULT_COUNT 40u
+#define MM_FRAME_ARG_COUNT 56u
+#define MM_FRAME_HEADER_CELLS 8u
 #define MM_SLOT_HIST_MAX 4096u
+#define MM_FULL_HIST_MAX 8192u
 #define MM_DEPTH_HIST_MAX 256u
 
 typedef struct MMPage {
@@ -121,6 +126,9 @@ typedef struct {
     uint64_t slot_stack_unknown_frames;
     uint64_t slot_stack_unknown_host_frames;
     uint64_t slot_stack_unknown_nonhost_frames;
+    uint64_t full_stack_hist[MM_FULL_HIST_MAX + 1];
+    uint64_t full_stack_sum;
+    uint64_t full_stack_max;
     uint64_t slot_stack_depth_hist[MM_DEPTH_HIST_MAX + 1];
     uint64_t slot_stack_depth_sum;
     uint64_t slot_stack_depth_max;
@@ -377,11 +385,13 @@ static void record_slot_stack(MMVM *vm) {
 
     uint64_t frame = vm->sp;
     uint64_t total = 0;
+    uint64_t full_total = 0;
     unsigned depth = 0;
     while (frame && depth < 1024) {
         uint64_t entry = mem_read(vm, frame + MM_FRAME_ENTRY, 64);
         int known = 0;
         uint32_t cost = slot_cost_for_entry(vm, entry, &known);
+        uint64_t local_cells = cost;
         if (known) {
             total += cost;
         } else {
@@ -393,11 +403,30 @@ static void record_slot_stack(MMVM *vm) {
                     break;
                 }
             }
-            if (is_host)
+            if (is_host) {
                 vm->slot_stack_unknown_host_frames++;
-            else
+                local_cells = 0;
+            } else {
                 vm->slot_stack_unknown_nonhost_frames++;
+                uint64_t fixed_bytes = mem_read(
+                    vm, frame + MM_FRAME_SIZE, 64
+                );
+                local_cells = fixed_bytes >= 64
+                    ? (fixed_bytes - 64) / 8
+                    : 0;
+                total += local_cells;
+            }
         }
+
+        uint64_t arg_count = mem_read(
+            vm, frame + MM_FRAME_ARG_COUNT, 64
+        );
+        uint64_t result_count = mem_read(
+            vm, frame + MM_FRAME_RESULT_COUNT, 64
+        );
+        uint64_t result_cells = result_count ? result_count : 1;
+        full_total += MM_FRAME_HEADER_CELLS
+            + local_cells + arg_count + result_cells;
 
         uint64_t parent = mem_read(vm, frame + MM_FRAME_CALLER_SP, 64);
         if (!parent || parent == frame)
@@ -419,10 +448,17 @@ static void record_slot_stack(MMVM *vm) {
         ? MM_SLOT_HIST_MAX
         : (unsigned)total;
     vm->slot_stack_hist[bucket]++;
+    unsigned full_bucket = full_total > MM_FULL_HIST_MAX
+        ? MM_FULL_HIST_MAX
+        : (unsigned)full_total;
+    vm->full_stack_hist[full_bucket]++;
     vm->slot_stack_samples++;
     vm->slot_stack_sum += total;
+    vm->full_stack_sum += full_total;
     if (total > vm->slot_stack_max)
         vm->slot_stack_max = total;
+    if (full_total > vm->full_stack_max)
+        vm->full_stack_max = full_total;
 }
 
 static int find_block_in_segment(const MMSegment *segment,
@@ -769,6 +805,10 @@ size_t mm_vm_get_slot_stack_hist(MMVM *vm,
                                  uint64_t *unknown_frames,
                                  uint64_t *unknown_host_frames,
                                  uint64_t *unknown_nonhost_frames,
+                                 uint64_t *full_hist,
+                                 size_t full_capacity,
+                                 uint64_t *full_sum,
+                                 uint64_t *full_max,
                                  uint64_t *depth_hist,
                                  size_t depth_capacity,
                                  uint64_t *depth_sum,
@@ -787,6 +827,12 @@ size_t mm_vm_get_slot_stack_hist(MMVM *vm,
         *unknown_host_frames = vm->slot_stack_unknown_host_frames;
     if (unknown_nonhost_frames)
         *unknown_nonhost_frames = vm->slot_stack_unknown_nonhost_frames;
+    size_t full_needed = MM_FULL_HIST_MAX + 1;
+    size_t fn = full_capacity < full_needed ? full_capacity : full_needed;
+    if (full_hist && fn)
+        memcpy(full_hist, vm->full_stack_hist, fn * sizeof(uint64_t));
+    if (full_sum) *full_sum = vm->full_stack_sum;
+    if (full_max) *full_max = vm->full_stack_max;
     size_t depth_needed = MM_DEPTH_HIST_MAX + 1;
     size_t dn = depth_capacity < depth_needed ? depth_capacity : depth_needed;
     if (depth_hist && dn)

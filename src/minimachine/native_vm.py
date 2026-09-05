@@ -229,6 +229,11 @@ def _load_library():
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
         ctypes.c_size_t,
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_uint64),
@@ -482,6 +487,10 @@ class NativeVM(VM):
         unknown = ctypes.c_uint64()
         unknown_host = ctypes.c_uint64()
         unknown_nonhost = ctypes.c_uint64()
+        full_capacity = 8193
+        full_hist = (ctypes.c_uint64 * full_capacity)()
+        full_sum = ctypes.c_uint64()
+        full_max = ctypes.c_uint64()
         depth_capacity = 257
         depth_hist = (ctypes.c_uint64 * depth_capacity)()
         depth_sum = ctypes.c_uint64()
@@ -497,6 +506,10 @@ class NativeVM(VM):
                 ctypes.byref(unknown),
                 ctypes.byref(unknown_host),
                 ctypes.byref(unknown_nonhost),
+                full_hist,
+                full_capacity,
+                ctypes.byref(full_sum),
+                ctypes.byref(full_max),
                 depth_hist,
                 depth_capacity,
                 ctypes.byref(depth_sum),
@@ -520,6 +533,19 @@ class NativeVM(VM):
         def coverage(limit: int) -> float:
             upto = min(limit, capacity - 1)
             return sum(int(hist[i]) for i in range(upto + 1)) / count
+
+        def full_percentile(fraction: float) -> int:
+            target = max(1, int((count * fraction) + 0.999999))
+            running = 0
+            for value in range(full_capacity):
+                running += int(full_hist[value])
+                if running >= target:
+                    return value
+            return int(full_max.value)
+
+        def full_coverage(limit: int) -> float:
+            upto = min(limit, full_capacity - 1)
+            return sum(int(full_hist[i]) for i in range(upto + 1)) / count
 
         def depth_percentile(fraction: float) -> int:
             target = max(1, int((count * fraction) + 0.999999))
@@ -547,6 +573,16 @@ class NativeVM(VM):
             f"unknown_frames={int(unknown.value)} "
             f"unknown_host={int(unknown_host.value)} "
             f"unknown_nonhost={int(unknown_nonhost.value)} "
+            f"full_mean={int(full_sum.value) / count:.3f} "
+            f"full_p50={full_percentile(0.50)} "
+            f"full_p90={full_percentile(0.90)} "
+            f"full_p95={full_percentile(0.95)} "
+            f"full_p99={full_percentile(0.99)} "
+            f"full_p999={full_percentile(0.999)} "
+            f"full_max={int(full_max.value)} "
+            f"full_le512={full_coverage(512):.6f} "
+            f"full_le1024={full_coverage(1024):.6f} "
+            f"full_le2048={full_coverage(2048):.6f} "
             f"depth_mean={int(depth_sum.value) / count:.3f} "
             f"depth_p50={depth_percentile(0.50)} "
             f"depth_p90={depth_percentile(0.90)} "
