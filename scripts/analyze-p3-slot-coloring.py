@@ -253,6 +253,9 @@ def main():
         "color_equals_peak_fraction": (
             sum(row["colors"] == row["peak_live"] for row in rows) / len(rows)
         ),
+        "function_colors": {
+            row["name"]: row["colors"] for row in rows
+        },
         "top_colors": sorted(rows, key=lambda row: (row["colors"], row["peak_live"], row["logical_slots"]), reverse=True)[:30],
         "top_peak": sorted(rows, key=lambda row: (row["peak_live"], row["colors"], row["logical_slots"]), reverse=True)[:30],
         "top_logical": sorted(rows, key=lambda row: row["logical_slots"], reverse=True)[:30],
