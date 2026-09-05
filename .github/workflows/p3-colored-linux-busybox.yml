@@ -1,0 +1,140 @@
+name: P3 Colored Frame Linux BusyBox Research
+
+on:
+  push:
+    branches: [research/p3-slot-color-layout]
+    paths:
+      - .github/workflows/p3-colored-linux-busybox.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  colored-linux-busybox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download frozen Linux, P3 cache, BusyBox, and rootfs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p current-cache linux busybox cold
+          gh run download 33635973925 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name minimachine-linux-p3-console-current-33635973925 \
+            --dir current-cache
+          gh run download 33632628029 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name minimachine-linux-initramfs-33632628029 \
+            --dir linux
+          gh run download 33622913820 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name minimachine-busybox-multicall-33622913820 \
+            --dir busybox
+          gh run download 33635974084 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name minimachine-busybox-real-cold-33635974084 \
+            --dir cold
+
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+          test -s linux/llvm/linked.ll
+          test -s busybox/busybox-multicall.bflt
+          test -s cold/busybox-real-init.cpio
+
+      - name: Cold boot colored Linux to exec boundary
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_SLOT_COLOR_LAYOUT: "1"
+        run: |
+          set -o pipefail
+          set +e
+          /usr/bin/time -f 'COLORED_COLD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 1800 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --native-boot-phases-only \
+            --native-report-every 50000000 \
+            --checkpoint-out build/colored-kernel-execve.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-after-checkpoint \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/colored-cold.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "COLORED_COLD_STATUS=$status" | tee -a build/colored-cold.log
+
+      - name: Assert colored cold checkpoint
+        run: |
+          grep -F 'BOOT_EXEC_SLOT_COLOR_LAYOUT functions=33018 ' build/colored-cold.log
+          grep -F 'logical_slots=3023234 physical_slots=263357 max_physical_slots=138' build/colored-cold.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/colored-cold.log
+          grep -F 'function=kernel_execve hit=1' build/colored-cold.log
+          test -s build/colored-kernel-execve.chk.gz
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/colored-cold.log
+
+      - name: Execute real BusyBox on colored frames
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_SLOT_COLOR_LAYOUT: "1"
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+        run: |
+          set -o pipefail
+          set +e
+          {
+            echo 'echo MINIMACHINE_COLORED_EXTERNAL_BEGIN'
+            echo '/bin/uname -s'
+            echo '/bin/ls /etc'
+            echo '/bin/cat /etc/inittab'
+            echo 'echo MINIMACHINE_COLORED_EXTERNAL_END'
+            echo 'exit'
+          } | \
+          /usr/bin/time -f 'COLORED_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 720 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --checkpoint-in build/colored-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/colored-hot.log
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "COLORED_HOT_STATUS=$status" | tee -a build/colored-hot.log
+
+      - name: Assert colored BusyBox execution
+        run: |
+          grep -F 'BOOT_EXEC_SLOT_COLOR_LAYOUT functions=33018 ' build/colored-hot.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/colored-hot.log
+          grep -Fx 'MINIMACHINE_COLORED_EXTERNAL_END' build/colored-hot.log
+          grep -F 'COLORED_HOT_STATUS=0' build/colored-hot.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/colored-hot.log
+
+      - name: Upload colored frame evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p3-colored-linux-busybox-${{ github.run_id }}
+          path: |
+            build/colored-cold.log
+            build/colored-hot.log
+            build/colored-kernel-execve.chk.gz
+          retention-days: 14
