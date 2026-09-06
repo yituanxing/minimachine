@@ -6,6 +6,7 @@ on:
     paths:
       - native/p3vm.c
       - src/minimachine/native_vm.py
+      - src/minimachine/runtime.py
       - src/minimachine/vm.py
       - src/minimachine/image.py
       - scripts/run-minimachine-linux.py
