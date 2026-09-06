@@ -6,6 +6,10 @@ on:
     branches: [work/native-p3-vm]
     paths:
       - src/minimachine/program_cache.py
+      - src/minimachine/native_vm.py
+      - src/minimachine/runtime.py
+      - src/minimachine/vm.py
+      - scripts/run-minimachine-linux.py
       - src/minimachine/llvm_text.py
       - src/minimachine/layout.py
       - src/minimachine/legalize.py
@@ -66,10 +70,17 @@ jobs:
             scripts/build-minimachine-initramfs.py \
             scripts/check-minimachine-boot.sh \
             .github/workflows/initramfs-build.yml)"
+          native_pack_sha="$(git log -1 --format=%H -- \
+            src/minimachine/native_vm.py \
+            src/minimachine/runtime.py \
+            src/minimachine/vm.py \
+            scripts/run-minimachine-linux.py)"
           test -n "$lowering_sha"
           test -n "$linux_sha"
+          test -n "$native_pack_sha"
           echo "LOWERING_SHA=$lowering_sha"
           echo "LINUX_SHA=$linux_sha"
+          echo "NATIVE_PACK_SHA=$native_pack_sha"
 
           refresh_id=""
           for attempt in $(seq 1 60); do
@@ -119,8 +130,8 @@ jobs:
             --json headSha --jq '.headSha')"
           test "$linux_head" = "$linux_sha"
 
-          printf 'LOWERING_SHA=%s\nLINUX_SHA=%s\nP3_REFRESH_RUN_ID=%s\nLINUX_RUN_ID=%s\n' \
-            "$lowering_sha" "$linux_sha" "$refresh_id" "$LINUX_RUN_ID" | tee build/input-runs.env
+          printf 'LOWERING_SHA=%s\nLINUX_SHA=%s\nNATIVE_PACK_SHA=%s\nP3_REFRESH_RUN_ID=%s\nLINUX_RUN_ID=%s\n' \
+            "$lowering_sha" "$linux_sha" "$native_pack_sha" "$refresh_id" "$LINUX_RUN_ID" | tee build/input-runs.env
 
           gh run download "$LINUX_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
@@ -199,6 +210,7 @@ jobs:
             --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
             --initramfs build/busybox-real-init.cpio \
             --native-vm \
+            --native-pack-cache-out build/busybox-real-native-pack.bin \
             --native-boot-phases-only \
             --native-report-every 50000000 \
             --checkpoint-out build/busybox-real-kernel-execve.chk.gz \
@@ -219,6 +231,8 @@ jobs:
           grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/busybox-real-cold.log
           grep -F 'function=kernel_execve hit=1' build/busybox-real-cold.log
           test -s build/busybox-real-kernel-execve.chk.gz
+          test -s build/busybox-real-native-pack.bin
+          grep -F 'BOOT_EXEC_NATIVE_PACK_CACHE_SAVED ' build/busybox-real-cold.log
           ! grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/busybox-real-cold.log
           ! grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-real-cold.log
 
@@ -240,7 +254,9 @@ jobs:
             build/busybox-real-init.cpio
             build/busybox-real-cold.log
             build/busybox-real-kernel-execve.chk.gz
+            build/busybox-real-native-pack.bin
           if-no-files-found: warn
+          compression-level: 1
           retention-days: 7
 
   real-software:
@@ -268,6 +284,7 @@ jobs:
           test -s cold/input-runs.env
           test -s cold/busybox-real-init.cpio
           test -s cold/busybox-real-kernel-execve.chk.gz
+          test -s cold/busybox-real-native-pack.bin
           cat cold/input-runs.env
 
       - name: Download exact Linux, P3 cache, and BusyBox inputs
@@ -323,6 +340,7 @@ jobs:
             --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
             --initramfs cold/busybox-real-init.cpio \
             --native-vm \
+            --native-pack-cache-in cold/busybox-real-native-pack.bin \
             --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
             --stop-on-panic \
             --max-steps 0 \
