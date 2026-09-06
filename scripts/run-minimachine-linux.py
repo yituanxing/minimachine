@@ -47,6 +47,10 @@ from src.minimachine.program_cache import (
     load_program_cache,
     save_program_cache,
 )
+from src.minimachine.native_hot_cache import (
+    NativeHotCacheError,
+    load_native_hot_cache,
+)
 from src.minimachine.runtime import (
     accelerate_direct_runtime,
     collect_runtime_surface,
@@ -119,6 +123,11 @@ def parse_args():
         "--native-vm",
         action="store_true",
         help="execute strict P3 with the C native VM backend",
+    )
+    p.add_argument(
+        "--native-hot-cache-in",
+        type=Path,
+        help="load slim Python metadata for mmap-backed native hot replay",
     )
     p.add_argument(
         "--native-pack-cache-in",
@@ -5954,7 +5963,39 @@ def main() -> int:
     linked_image_sha256 = image_fingerprint(llvm_text)
     linker_contract = LinkerContract.load(args.linker_contract)
 
-    if args.program_cache_in is not None:
+    if args.native_hot_cache_in is not None:
+        if not args.native_vm:
+            print(
+                "BOOT_EXEC_BLOCKED stage=native-hot-cache "
+                "error=requires --native-vm"
+            )
+            return 1
+        try:
+            cached = load_native_hot_cache(
+                args.native_hot_cache_in,
+                image_sha256=linked_image_sha256,
+            )
+        except NativeHotCacheError as exc:
+            print(f"BOOT_EXEC_BLOCKED stage=native-hot-cache error={exc}")
+            return 1
+        program = cached.program
+        surface = cached.surface
+        reasons = set(cached.reasons)
+        blocked_functions = list(cached.blocked_functions)
+        image = cached.image
+        task_sched_class_offset = cached.task_sched_class_offset
+        p3_function_count = cached.function_count
+        print(
+            "BOOT_EXEC_NATIVE_HOT_CACHE_LOADED "
+            f"path={args.native_hot_cache_in} functions={p3_function_count}",
+            flush=True,
+        )
+        print(
+            "BOOT_EXEC_STAGE "
+            f"stage=native-hot-cache elapsed_s={time.perf_counter() - runner_started:.3f}",
+            flush=True,
+        )
+    elif args.program_cache_in is not None:
         try:
             cached = load_program_cache(
                 args.program_cache_in,
