@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
+import mmap
 import os
 from pathlib import Path
+import struct
 import time
 
 from . import muir, p3
@@ -38,6 +41,48 @@ MM_STATUS_HOST = 2
 MM_STATUS_WATCH = 3
 MM_STATUS_ERROR = 4
 _NATIVE_PAGE_SIZE = 65536
+_NATIVE_PACK_MAGIC = b"MMP3NP1\0"
+_NATIVE_PACK_VERSION = 1
+_NATIVE_PACK_HEADER = struct.Struct("<8sIIIIQQQQ32s40x")
+_NATIVE_PACK_HEADER_SIZE = _NATIVE_PACK_HEADER.size
+
+
+def native_pack_schema_fingerprint() -> str:
+    """Fingerprint everything that can change the packed native code image."""
+    from .program_cache import lowering_fingerprint
+
+    root = Path(__file__).resolve().parent
+    repo = root.parents[1]
+    digest = hashlib.sha256()
+    digest.update(lowering_fingerprint().encode("ascii"))
+    digest.update(b"\0")
+    for path in (
+        root / "native_vm.py",
+        root / "runtime.py",
+        root / "vm.py",
+        root / "kallsyms.py",
+        root / "linker.py",
+        repo / "scripts" / "run-minimachine-linux.py",
+    ):
+        digest.update(str(path.relative_to(repo)).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def native_pack_cache_key(
+    *,
+    image_sha256: str,
+    initramfs_sha256: str | None,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(image_sha256.encode("ascii"))
+    digest.update(b"\0")
+    digest.update((initramfs_sha256 or "-").encode("ascii"))
+    digest.update(b"\0")
+    digest.update(native_pack_schema_fingerprint().encode("ascii"))
+    return digest.hexdigest()
 
 
 class COperand(ctypes.Structure):
@@ -379,12 +424,41 @@ class NativeMemory:
 class NativeVM(VM):
     """C-backed strict-P3 executor preserving the Python VM control contract."""
 
-    def __init__(self, program, *, stack_top: int = DEFAULT_STACK_TOP):
+    def __init__(
+        self,
+        program,
+        *,
+        stack_top: int = DEFAULT_STACK_TOP,
+        pack_cache_in: Path | None = None,
+        pack_cache_out: Path | None = None,
+        pack_cache_key: str | None = None,
+    ):
         self._lib = _load_library()
         self._packed = None
+        self._packed_mmap = None
         self._extra_packed = []
         self._host_packed = None
-        insts, blocks, hosts = self._pack_program(program)
+        if pack_cache_in is not None:
+            if pack_cache_key is None:
+                raise VMError("native pack cache input requires a cache key")
+            insts, blocks, hosts = self._load_packed_cache(
+                program,
+                pack_cache_in,
+                cache_key=pack_cache_key,
+            )
+        else:
+            insts, blocks, hosts = self._pack_program(program)
+            if pack_cache_out is not None:
+                if pack_cache_key is None:
+                    raise VMError("native pack cache output requires a cache key")
+                self._save_packed_cache(
+                    program,
+                    pack_cache_out,
+                    insts,
+                    blocks,
+                    hosts,
+                    cache_key=pack_cache_key,
+                )
         handle = self._lib.mm_vm_create(
             insts,
             len(insts),
@@ -418,6 +492,148 @@ class NativeVM(VM):
             except Exception:
                 pass
             self._handle = None
+
+    def _save_packed_cache(
+        self,
+        program,
+        path: Path,
+        insts,
+        blocks,
+        hosts,
+        *,
+        cache_key: str,
+    ) -> None:
+        started = time.perf_counter()
+        try:
+            key_bytes = bytes.fromhex(cache_key)
+        except ValueError as exc:
+            raise VMError("native pack cache key is not hexadecimal") from exc
+        if len(key_bytes) != 32:
+            raise VMError("native pack cache key must be a SHA-256 digest")
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        header = _NATIVE_PACK_HEADER.pack(
+            _NATIVE_PACK_MAGIC,
+            _NATIVE_PACK_VERSION,
+            ctypes.sizeof(CInst),
+            ctypes.sizeof(CBlock),
+            ctypes.sizeof(ctypes.c_uint64),
+            len(insts),
+            len(blocks),
+            len(hosts),
+            program.halt_code & MASK64,
+            key_bytes,
+        )
+        with path.open("wb") as handle:
+            handle.write(header)
+            handle.write(memoryview(insts).cast("B"))
+            handle.write(memoryview(blocks).cast("B"))
+            handle.write(memoryview(hosts).cast("B"))
+        elapsed = time.perf_counter() - started
+        print(
+            "BOOT_EXEC_NATIVE_PACK_CACHE_SAVED "
+            f"path={path} seconds={elapsed:.3f} bytes={path.stat().st_size} "
+            f"insts={len(insts)} blocks={len(blocks)} hosts={len(hosts)}",
+            flush=True,
+        )
+
+    def _load_packed_cache(
+        self,
+        program,
+        path: Path,
+        *,
+        cache_key: str,
+    ):
+        started = time.perf_counter()
+        try:
+            key_bytes = bytes.fromhex(cache_key)
+        except ValueError as exc:
+            raise VMError("native pack cache key is not hexadecimal") from exc
+        if len(key_bytes) != 32:
+            raise VMError("native pack cache key must be a SHA-256 digest")
+
+        try:
+            handle = path.open("rb")
+            mapped = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_COPY)
+            handle.close()
+        except OSError as exc:
+            raise VMError(f"cannot map native pack cache: {exc}") from exc
+        try:
+            if len(mapped) < _NATIVE_PACK_HEADER_SIZE:
+                raise VMError("native pack cache is truncated")
+            (
+                magic,
+                version,
+                inst_size,
+                block_size,
+                host_size,
+                inst_count,
+                block_count,
+                host_count,
+                halt_code,
+                stored_key,
+            ) = _NATIVE_PACK_HEADER.unpack_from(mapped, 0)
+            if magic != _NATIVE_PACK_MAGIC or version != _NATIVE_PACK_VERSION:
+                raise VMError(
+                    "native pack cache format mismatch: "
+                    f"magic={magic!r} version={version}"
+                )
+            if (
+                inst_size != ctypes.sizeof(CInst)
+                or block_size != ctypes.sizeof(CBlock)
+                or host_size != ctypes.sizeof(ctypes.c_uint64)
+            ):
+                raise VMError("native pack cache ABI layout mismatch")
+            if stored_key != key_bytes:
+                raise VMError("native pack cache fingerprint mismatch")
+            if halt_code != (program.halt_code & MASK64):
+                raise VMError("native pack cache halt code mismatch")
+
+            inst_bytes = inst_count * inst_size
+            block_bytes = block_count * block_size
+            host_bytes = host_count * host_size
+            expected = (
+                _NATIVE_PACK_HEADER_SIZE
+                + inst_bytes
+                + block_bytes
+                + host_bytes
+            )
+            if len(mapped) != expected:
+                raise VMError(
+                    "native pack cache size mismatch: "
+                    f"{len(mapped)} != {expected}"
+                )
+
+            inst_offset = _NATIVE_PACK_HEADER_SIZE
+            block_offset = inst_offset + inst_bytes
+            host_offset = block_offset + block_bytes
+            insts = (CInst * inst_count).from_buffer(mapped, inst_offset)
+            blocks = (CBlock * block_count).from_buffer(mapped, block_offset)
+            if host_count:
+                hosts = (ctypes.c_uint64 * host_count).from_buffer(
+                    mapped, host_offset
+                )
+            else:
+                hosts = (ctypes.c_uint64 * 0)()
+
+            current_hosts = tuple(sorted(program.host_code))
+            cached_hosts = tuple(int(hosts[i]) for i in range(host_count))
+            if cached_hosts != current_hosts:
+                raise VMError("native pack cache host table mismatch")
+        except Exception:
+            mapped.close()
+            raise
+
+        self._packed_mmap = mapped
+        self._packed = (insts, blocks, hosts)
+        elapsed = time.perf_counter() - started
+        print(
+            "BOOT_EXEC_NATIVE_PACK_CACHE_LOADED "
+            f"path={path} seconds={elapsed:.3f} bytes={len(mapped)} "
+            f"insts={inst_count} blocks={block_count} hosts={host_count}",
+            flush=True,
+        )
+        return insts, blocks, hosts
 
     @staticmethod
     def _shape(program):
