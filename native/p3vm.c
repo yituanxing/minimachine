@@ -97,11 +97,6 @@ typedef struct {
 } MMSegment;
 
 typedef struct {
-    uint32_t segment_index;
-    uint32_t block_plus_one;
-} MMCodeIndexEntry;
-
-typedef struct {
     MMSegment *segments;
     size_t segment_count;
     size_t segment_capacity;
@@ -124,10 +119,6 @@ typedef struct {
     size_t cached_segment_index;
     size_t cached_block_index;
     int cached_block_valid;
-
-    uint64_t code_index_base;
-    MMCodeIndexEntry *code_index;
-    size_t code_index_count;
 } MMVM;
 
 static inline uint64_t mask_bits(unsigned bits) {
@@ -360,102 +351,8 @@ static int find_block_in_segment(const MMSegment *segment,
     return 0;
 }
 
-static int rebuild_code_index(MMVM *vm) {
-    uint64_t min_code = UINT64_MAX;
-    uint64_t max_code = 0;
-    size_t total_blocks = 0;
-
-    for (size_t si = 0; si < vm->segment_count; ++si) {
-        const MMSegment *segment = &vm->segments[si];
-        total_blocks += segment->block_count;
-        for (size_t bi = 0; bi < segment->block_count; ++bi) {
-            uint64_t code = segment->blocks[bi].code;
-            if (code < min_code) min_code = code;
-            if (code > max_code) max_code = code;
-        }
-    }
-
-    free(vm->code_index);
-    vm->code_index = NULL;
-    vm->code_index_count = 0;
-    vm->code_index_base = 0;
-
-    if (!total_blocks)
-        return 1;
-
-    /*
-     * Program code addresses are allocated monotonically in 8-byte slots.
-     * Keep the fallback binary search below for defensive compatibility, but
-     * exploit that invariant in the normal Linux/BusyBox path so every BR
-     * target resolves in O(1) instead of O(log blocks).
-     */
-    uint64_t base = min_code & ~UINT64_C(7);
-    if (max_code < base)
-        return 0;
-    uint64_t span_slots = ((max_code - base) >> 3) + 1;
-    if (span_slots > SIZE_MAX / sizeof(MMCodeIndexEntry))
-        return 0;
-
-    MMCodeIndexEntry *index = (MMCodeIndexEntry *)calloc(
-        (size_t)span_slots, sizeof(*index)
-    );
-    if (!index)
-        return 0;
-
-    for (size_t si = 0; si < vm->segment_count; ++si) {
-        const MMSegment *segment = &vm->segments[si];
-        if (si > UINT32_MAX) {
-            free(index);
-            return 0;
-        }
-        for (size_t bi = 0; bi < segment->block_count; ++bi) {
-            uint64_t code = segment->blocks[bi].code;
-            if ((code - base) & UINT64_C(7)) {
-                free(index);
-                return 0;
-            }
-            size_t slot = (size_t)((code - base) >> 3);
-            if (slot >= (size_t)span_slots || bi >= UINT32_MAX) {
-                free(index);
-                return 0;
-            }
-            if (index[slot].block_plus_one != 0) {
-                free(index);
-                return 0;
-            }
-            index[slot].segment_index = (uint32_t)si;
-            index[slot].block_plus_one = (uint32_t)bi + 1u;
-        }
-    }
-
-    vm->code_index_base = base;
-    vm->code_index = index;
-    vm->code_index_count = (size_t)span_slots;
-    return 1;
-}
-
 static int find_block(MMVM *vm, uint64_t code,
                       size_t *segment_index, size_t *idx) {
-    if (vm->code_index &&
-        code >= vm->code_index_base &&
-        ((code - vm->code_index_base) & UINT64_C(7)) == 0) {
-        size_t slot = (size_t)((code - vm->code_index_base) >> 3);
-        if (slot < vm->code_index_count) {
-            MMCodeIndexEntry entry = vm->code_index[slot];
-            if (entry.block_plus_one == 0)
-                return 0;
-            size_t si = (size_t)entry.segment_index;
-            size_t bi = (size_t)entry.block_plus_one - 1;
-            if (si < vm->segment_count &&
-                bi < vm->segments[si].block_count &&
-                vm->segments[si].blocks[bi].code == code) {
-                *segment_index = si;
-                *idx = bi;
-                return 1;
-            }
-        }
-    }
-
     if (vm->segment_count == 1) {
         *segment_index = 0;
         return find_block_in_segment(&vm->segments[0], code, idx);
@@ -580,11 +477,6 @@ MMVM *mm_vm_create(const MMInst *insts, size_t inst_count,
     vm->host_codes = host_codes;
     vm->host_count = host_count;
     vm->halt_code = halt_code;
-    if (!rebuild_code_index(vm)) {
-        free(vm->segments);
-        free(vm);
-        return NULL;
-    }
     return vm;
 }
 
@@ -604,7 +496,7 @@ int mm_vm_replace_program(MMVM *vm,
     vm->host_count = host_count;
     vm->halt_code = halt_code;
     vm->cached_block_valid = 0;
-    return rebuild_code_index(vm);
+    return 1;
 }
 
 int mm_vm_set_host_codes(MMVM *vm,
@@ -638,11 +530,6 @@ int mm_vm_add_segment(MMVM *vm,
     segment->blocks = blocks;
     segment->block_count = block_count;
     vm->cached_block_valid = 0;
-    if (!rebuild_code_index(vm)) {
-        vm->segment_count--;
-        rebuild_code_index(vm);
-        return 0;
-    }
     return 1;
 }
 
@@ -668,7 +555,6 @@ void mm_vm_destroy(MMVM *vm) {
     if (!vm) return;
     clear_pages(vm);
     free(vm->watch_codes);
-    free(vm->code_index);
     free(vm->segments);
     free(vm);
 }
@@ -928,9 +814,9 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
             }
 
             /*
-             * Host targets are sparse.  Resolve the overwhelmingly common
-             * basic-block target first so normal BR execution does not pay a
-             * binary search over hundreds of host service entry points.
+             * Normal P3 branches target linked basic blocks.  Keep the host
+             * service binary search off that dominant path; only consult the
+             * sparse host table after block resolution misses.
              */
             if (contains_code(vm->host_codes, vm->host_count, target)) {
                 r.status = MM_STATUS_HOST;
