@@ -338,26 +338,37 @@ static uint64_t mem_strlen_bytes(MMVM *vm, uint64_t addr) {
 
 static int mem_strncmp_bytes(MMVM *vm, uint64_t a, uint64_t b,
                              uint64_t limit, int bounded) {
-    uint8_t abuf[4096];
-    uint8_t bbuf[4096];
     uint64_t done = 0;
 
     for (;;) {
-        uint64_t chunk = sizeof(abuf);
+        if (bounded && done >= limit)
+            return 0;
+
+        uint64_t aa = a + done;
+        uint64_t ba = b + done;
+        uint64_t aoff = aa & (MM_PAGE_SIZE - 1);
+        uint64_t boff = ba & (MM_PAGE_SIZE - 1);
+        uint64_t chunk = MM_PAGE_SIZE - aoff;
+        uint64_t bchunk = MM_PAGE_SIZE - boff;
+        if (chunk > bchunk)
+            chunk = bchunk;
         if (bounded) {
-            if (done >= limit)
-                return 0;
             uint64_t remaining = limit - done;
             if (chunk > remaining)
                 chunk = remaining;
         }
 
-        mem_read_bytes(vm, a + done, abuf, chunk);
-        mem_read_bytes(vm, b + done, bbuf, chunk);
+        MMPage *ap = get_page(vm, aa >> MM_PAGE_SHIFT, 0);
+        MMPage *bp = get_page(vm, ba >> MM_PAGE_SHIFT, 0);
+        const uint8_t *asrc = ap ? ap->data + aoff : NULL;
+        const uint8_t *bsrc = bp ? bp->data + boff : NULL;
+
         for (uint64_t i = 0; i < chunk; ++i) {
-            if (abuf[i] != bbuf[i])
-                return (int)abuf[i] - (int)bbuf[i];
-            if (abuf[i] == 0)
+            uint8_t av = asrc ? asrc[i] : 0;
+            uint8_t bv = bsrc ? bsrc[i] : 0;
+            if (av != bv)
+                return (int)av - (int)bv;
+            if (av == 0)
                 return 0;
         }
         done += chunk;
