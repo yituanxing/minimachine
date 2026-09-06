@@ -442,16 +442,16 @@ static int find_block(MMVM *vm, uint64_t code,
         size_t slot = (size_t)((code - vm->code_index_base) >> 3);
         if (slot < vm->code_index_count) {
             MMCodeIndexEntry entry = vm->code_index[slot];
-            if (entry.block_plus_one != 0) {
-                size_t si = (size_t)entry.segment_index;
-                size_t bi = (size_t)entry.block_plus_one - 1;
-                if (si < vm->segment_count &&
-                    bi < vm->segments[si].block_count &&
-                    vm->segments[si].blocks[bi].code == code) {
-                    *segment_index = si;
-                    *idx = bi;
-                    return 1;
-                }
+            if (entry.block_plus_one == 0)
+                return 0;
+            size_t si = (size_t)entry.segment_index;
+            size_t bi = (size_t)entry.block_plus_one - 1;
+            if (si < vm->segment_count &&
+                bi < vm->segments[si].block_count &&
+                vm->segments[si].blocks[bi].code == code) {
+                *segment_index = si;
+                *idx = bi;
+                return 1;
             }
         }
     }
@@ -908,11 +908,6 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
                 r.target_code = target;
                 break;
             }
-            if (contains_code(vm->host_codes, vm->host_count, target)) {
-                r.status = MM_STATUS_HOST;
-                r.target_code = target;
-                break;
-            }
             if (contains_code(vm->watch_codes, vm->watch_count, target)) {
                 vm->block_code = target;
                 vm->ip = 0;
@@ -922,19 +917,31 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
             }
 
             size_t target_segment, target_index;
-            if (!find_block(vm, target, &target_segment, &target_index)) {
-                r.status = MM_STATUS_ERROR;
-                r.error = MM_ERR_BAD_TARGET;
+            if (find_block(vm, target, &target_segment, &target_index)) {
+                vm->block_code = target;
+                vm->ip = 0;
+                vm->cached_block_code = target;
+                vm->cached_segment_index = target_segment;
+                vm->cached_block_index = target_index;
+                vm->cached_block_valid = 1;
+                continue;
+            }
+
+            /*
+             * Host targets are sparse.  Resolve the overwhelmingly common
+             * basic-block target first so normal BR execution does not pay a
+             * binary search over hundreds of host service entry points.
+             */
+            if (contains_code(vm->host_codes, vm->host_count, target)) {
+                r.status = MM_STATUS_HOST;
                 r.target_code = target;
                 break;
             }
-            vm->block_code = target;
-            vm->ip = 0;
-            vm->cached_block_code = target;
-            vm->cached_segment_index = target_segment;
-            vm->cached_block_index = target_index;
-            vm->cached_block_valid = 1;
-            continue;
+
+            r.status = MM_STATUS_ERROR;
+            r.error = MM_ERR_BAD_TARGET;
+            r.target_code = target;
+            break;
         }
 
         r.status = MM_STATUS_ERROR;
