@@ -1,0 +1,217 @@
+name: MiniMachine Native Local Target AB
+
+on:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - native/p3vm.c
+      - src/minimachine/native_vm.py
+      - .github/workflows/perf-native-local-target-ab.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      COLD_RUN_ID: "34035294924"
+      P3_REFRESH_RUN_ID: "34036739708"
+      MINIMACHINE_DISABLE_GC: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libp3vm.so
+
+      - name: Download fixed workload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p cold current-cache linux busybox
+          gh run download "$COLD_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-real-cold-$COLD_RUN_ID" \
+            --dir cold
+          gh run download "$P3_REFRESH_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-p3-console-current-$P3_REFRESH_RUN_ID" \
+            --dir current-cache
+          . current-cache/input-run.env
+          gh run download "$LINUX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$LINUX_RUN_ID" \
+            --dir linux
+          . cold/input-runs.env
+          gh run download "$BUSYBOX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-multicall-$BUSYBOX_RUN_ID" \
+            --dir busybox
+
+          test -s cold/busybox-real-kernel-execve.chk.gz
+          test -s cold/busybox-real-init.cpio
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+          test -s linux/llvm/linked.ll
+          test -s busybox/busybox-multicall.bflt
+
+      - name: Build shared metadata and userspace cache
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libp3vm.so
+        run: |
+          python3 scripts/build-native-hot-cache.py \
+            linux/llvm/linked.ll \
+            current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            build/linux-native-hot-cache.pkl.gz
+
+          python3 scripts/build-user-image-cache.py \
+            busybox/busybox-multicall.bflt \
+            build/busybox-user-image.pkl
+
+          cat > build/commands.txt <<'EOF'
+          echo MINIMACHINE_REAL_EXTERNAL_BEGIN
+          /bin/uname -s
+          /bin/ls /etc
+          /bin/cat /etc/inittab
+          echo MINIMACHINE_REAL_EXTERNAL_END
+          exit
+          EOF
+
+      - name: Prewarm both target encodings
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libp3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
+        run: |
+          prewarm_variant() {
+            variant="$1"
+            local_targets="$2"
+            mkdir -p "build/$variant/append"
+
+            MINIMACHINE_NATIVE_LOCAL_TARGETS="$local_targets" \
+              python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+                --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+                --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+                --initramfs cold/busybox-real-init.cpio \
+                --native-vm \
+                --native-pack-cache-out "build/$variant/native-pack.bin" \
+                --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+                --max-steps 1 \
+                --progress-every 0 \
+                > "build/$variant/pack.log" 2>&1
+
+            test -s "build/$variant/native-pack.bin"
+
+            set +e
+            echo exit | \
+              MINIMACHINE_NATIVE_LOCAL_TARGETS="$local_targets" \
+              timeout --signal=TERM 240 \
+              python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+                --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+                --native-hot-cache-in build/linux-native-hot-cache.pkl.gz \
+                --initramfs cold/busybox-real-init.cpio \
+                --native-vm \
+                --native-pack-cache-in "build/$variant/native-pack.bin" \
+                --native-append-pack-cache-out-dir "build/$variant/append" \
+                --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+                --stop-on-panic \
+                --max-steps 0 \
+                --progress-every 0 \
+                > "build/$variant/append-prewarm.log" 2>&1
+            status=${PIPESTATUS[2]}
+            set -e
+            echo "LOCAL_TARGET_PREWARM variant=$variant status=$status"
+            test -s "build/$variant/append/append-000.bin"
+            test -s "build/$variant/append/append-001.bin"
+          }
+
+          prewarm_variant control 0
+          prewarm_variant local-target 1
+
+      - name: Same-runner local-target A/B
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libp3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
+        run: |
+          run_one() {
+            variant="$1"
+            sequence="$2"
+            local_targets="$3"
+            log="build/local-target-ab-${sequence}-${variant}.log"
+            set +e
+            MINIMACHINE_NATIVE_LOCAL_TARGETS="$local_targets" \
+              /usr/bin/time -f "LOCAL_TARGET_AB_WALL variant=${variant} sequence=${sequence} wall=%e user=%U sys=%S rss_kb=%M" \
+              timeout --signal=TERM 240 \
+              python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+                --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+                --native-hot-cache-in build/linux-native-hot-cache.pkl.gz \
+                --initramfs cold/busybox-real-init.cpio \
+                --native-vm \
+                --native-pack-cache-in "build/${variant}/native-pack.bin" \
+                --native-append-pack-cache-in-dir "build/${variant}/append" \
+                --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+                --stop-on-panic \
+                --max-steps 0 \
+                --progress-every 0 \
+                < build/commands.txt > "$log" 2>&1
+            status=$?
+            set -e
+            cat "$log"
+            echo "LOCAL_TARGET_AB_STATUS variant=$variant sequence=$sequence status=$status"
+            test "$status" -eq 0
+            grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' "$log"
+            ! grep -F 'BOOT_EXEC_BLOCKED ' "$log"
+          }
+
+          run_one control 1 0
+          run_one local-target 1 1
+          run_one local-target 2 1
+          run_one control 2 0
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          values = {"control": [], "local-target": []}
+          for path in Path("build").glob("local-target-ab-*.log"):
+              text = path.read_text()
+              m = re.search(
+                  r"LOCAL_TARGET_AB_WALL variant=(control|local-target) "
+                  r"sequence=\d+ wall=([0-9.]+)",
+                  text,
+              )
+              if m:
+                  values[m.group(1)].append(float(m.group(2)))
+          for key in values:
+              assert len(values[key]) == 2, values
+
+          cm = sum(values["control"]) / 2
+          lm = sum(values["local-target"]) / 2
+          delta = lm - cm
+          pct = delta / cm * 100
+          print(
+              f"LOCAL_TARGET_AB_SUMMARY control_mean={cm:.3f} "
+              f"local_target_mean={lm:.3f} delta_s={delta:.3f} "
+              f"delta_pct={pct:.2f}"
+          )
+          PY
+
+      - name: Upload A/B evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-native-local-target-ab-${{ github.run_id }}
+          path: |
+            build/local-target-ab-*.log
+            build/control/pack.log
+            build/local-target/pack.log
+            build/control/append-prewarm.log
+            build/local-target/append-prewarm.log
+          if-no-files-found: warn
+          retention-days: 7
