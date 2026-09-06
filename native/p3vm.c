@@ -62,6 +62,7 @@
 #define MM_INTR_ADD   7
 #define MM_INTR_MUL   8
 #define MM_INTR_ICMP  9
+#define MM_INTR_ALLOCA 10
 
 #define MM_IPRED_EQ   1
 #define MM_IPRED_NE   2
@@ -153,6 +154,8 @@ typedef struct {
     uint64_t *watch_codes;
     size_t watch_count;
     uint64_t halt_code;
+    uint64_t heap_next;
+    uint64_t stack_top;
 
     MMPage *pages[MM_BUCKETS];
 #ifdef MM_DIRECT_PAGES
@@ -577,25 +580,60 @@ static int target_code(MMVM *vm, const MMOperand *o, uint64_t *out) {
 }
 
 
+static int alloc_bytes_native(MMVM *vm,
+                              uint64_t size,
+                              uint64_t align,
+                              uint64_t *out) {
+    if (!vm || !out || align == 0 || (align & (align - 1)) != 0)
+        return 0;
+    uint64_t pad = align - 1;
+    if (vm->heap_next > UINT64_MAX - pad)
+        return 0;
+    uint64_t address = (vm->heap_next + pad) & ~pad;
+    uint64_t amount = size ? size : 1;
+    if (address > UINT64_MAX - amount)
+        return 0;
+    uint64_t next = address + amount;
+    if (vm->stack_top && next >= vm->stack_top)
+        return 0;
+    vm->heap_next = next;
+    *out = address;
+    return 1;
+}
+
 static int execute_host_intrinsic(MMVM *vm,
                                   const MMHostIntrinsic *intr,
                                   uint64_t *ret_pc_out) {
     if (!vm || !intr || intr->op == MM_INTR_NONE)
         return 0;
-    unsigned bits = intr->bits;
-    if (bits < 1 || bits > 64)
-        return 0;
-
     uint64_t frame_size = mem_read(vm, vm->sp + MM_ABI_FRAME_SIZE, 64);
     uint64_t argc = mem_read(vm, vm->sp + MM_ABI_ARG_COUNT, 64);
     uint64_t expected = mem_read(vm, vm->sp + MM_ABI_RESULT_COUNT, 64);
-    if (argc != 2 || expected != 1)
+    uint64_t arg_base = vm->sp + frame_size;
+    uint64_t value = 0;
+
+    if (intr->op == MM_INTR_ALLOCA) {
+        if (argc != 3 || expected != 1)
+            return 0;
+        uint64_t element_size = mem_read(vm, arg_base, 64);
+        uint64_t count = mem_read(vm, arg_base + 8, 64);
+        uint64_t align = mem_read(vm, arg_base + 16, 64);
+        if (align == 0 || (align & (align - 1)) != 0)
+            return 0;
+        if (element_size != 0 && count > UINT64_MAX / element_size)
+            return 0;
+        uint64_t size = element_size * count;
+        if (!alloc_bytes_native(vm, size, align, &value))
+            return 0;
+        goto intrinsic_result;
+    }
+
+    unsigned bits = intr->bits;
+    if (bits < 1 || bits > 64 || argc != 2 || expected != 1)
         return 0;
 
-    uint64_t arg_base = vm->sp + frame_size;
     uint64_t a = mem_read(vm, arg_base, 64) & mask_bits(bits);
     uint64_t b = mem_read(vm, arg_base + 8, 64) & mask_bits(bits);
-    uint64_t value = 0;
 
     switch (intr->op) {
         case MM_INTR_AND:
@@ -649,6 +687,7 @@ static int execute_host_intrinsic(MMVM *vm,
             return 0;
     }
 
+intrinsic_result:
     uint64_t result_ptr = mem_read(vm, vm->sp + MM_ABI_RESULT_PTR, 64);
     mem_write(vm, result_ptr, 64, value);
     if (vm->oom)
@@ -917,6 +956,26 @@ int mm_vm_mem_strcmp(MMVM *vm, uint64_t a, uint64_t b) {
 
 int mm_vm_mem_strncmp(MMVM *vm, uint64_t a, uint64_t b, uint64_t n) {
     return mem_strncmp_bytes(vm, a, b, n, 1);
+}
+
+void mm_vm_set_heap_state(MMVM *vm,
+                          uint64_t heap_next,
+                          uint64_t stack_top) {
+    if (!vm)
+        return;
+    vm->heap_next = heap_next;
+    vm->stack_top = stack_top;
+}
+
+uint64_t mm_vm_get_heap_next(MMVM *vm) {
+    return vm ? vm->heap_next : 0;
+}
+
+int mm_vm_alloc_bytes(MMVM *vm,
+                      uint64_t size,
+                      uint64_t align,
+                      uint64_t *out) {
+    return alloc_bytes_native(vm, size, align, out);
 }
 
 int mm_vm_set_watches(MMVM *vm, const uint64_t *codes, size_t n) {
