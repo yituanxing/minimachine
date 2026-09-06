@@ -530,6 +530,10 @@ class NativeVM(VM):
         self._watch_codes: tuple[int, ...] = ()
         self.native_report_every = 0
         self.native_report_slots: tuple[str, ...] = ()
+        self._native_profile_run_calls = 0
+        self._native_profile_c_ns = 0
+        self._native_profile_host_returns = 0
+        self._native_profile_watch_returns = 0
         if load_initial_memory:
             self._load_initial_memory(program)
         else:
@@ -1321,6 +1325,20 @@ class NativeVM(VM):
             )
         return tuple(lines)
 
+    def host_profile_summary(self) -> tuple[str, ...]:
+        base = super().host_profile_summary()
+        if not getattr(self, "_profile_host", False):
+            return base
+        native_ms = self._native_profile_c_ns / 1_000_000
+        line = (
+            "BOOT_EXEC_NATIVE_PROFILE "
+            f"run_calls={self._native_profile_run_calls} "
+            f"host_returns={self._native_profile_host_returns} "
+            f"watch_returns={self._native_profile_watch_returns} "
+            f"c_run_ms={native_ms:.3f}"
+        )
+        return (line,) + tuple(base)
+
     def run(self, *, max_steps: int = 1_000_000) -> None:
         native_limit = MASK64 if max_steps <= 0 else max_steps
         report_every = int(getattr(self, "native_report_every", 0) or 0)
@@ -1354,7 +1372,17 @@ class NativeVM(VM):
                 )
                 is_report_boundary = batch_limit < native_limit
 
-            result = self._lib.mm_vm_run(self._handle, batch_limit)
+            if getattr(self, "_profile_host", False):
+                native_started = time.perf_counter_ns()
+                result = self._lib.mm_vm_run(self._handle, batch_limit)
+                self._native_profile_c_ns += time.perf_counter_ns() - native_started
+                self._native_profile_run_calls += 1
+                if result.status == MM_STATUS_HOST:
+                    self._native_profile_host_returns += 1
+                elif result.status == MM_STATUS_WATCH:
+                    self._native_profile_watch_returns += 1
+            else:
+                result = self._lib.mm_vm_run(self._handle, batch_limit)
             self.sp = int(result.sp)
             self.steps = int(result.steps)
             self._sync_block(int(result.block_code), int(result.ip))
