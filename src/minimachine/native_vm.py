@@ -439,6 +439,7 @@ class NativeVM(VM):
         pack_cache_key: str | None = None,
         append_pack_cache_in_dir: Path | None = None,
         append_pack_cache_out_dir: Path | None = None,
+        load_initial_memory: bool = True,
     ):
         self._lib = _load_library()
         self._packed = None
@@ -493,7 +494,14 @@ class NativeVM(VM):
         self._watch_codes: tuple[int, ...] = ()
         self.native_report_every = 0
         self.native_report_slots: tuple[str, ...] = ()
-        self._load_initial_memory(program)
+        if load_initial_memory:
+            self._load_initial_memory(program)
+        else:
+            print(
+                "BOOT_EXEC_NATIVE_INITIAL_MEMORY skipped=checkpoint-restore "
+                f"bytes={len(program.initial_memory.bytes)}",
+                flush=True,
+            )
         self._synced_data_end = program._next_data
 
     def __del__(self):
