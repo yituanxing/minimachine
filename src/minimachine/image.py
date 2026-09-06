@@ -610,6 +610,7 @@ def install_module_image(
     external_symbols: dict[str, int] | None = None,
     symbol_aliases: dict[str, str] | None = None,
     linker_contract: LinkerContract | None = None,
+    materialize: bool = True,
 ) -> None:
     external_symbols = external_symbols or {}
     symbol_aliases = dict(symbol_aliases or {})
@@ -663,11 +664,18 @@ def install_module_image(
                 align = obj.align
                 if member_index == 0:
                     align = max(align, group.align)
-                address = program.define_data_symbol(
-                    obj.name,
-                    obj.data,
-                    align=align,
-                )
+                if materialize:
+                    address = program.define_data_symbol(
+                        obj.name,
+                        obj.data,
+                        align=align,
+                    )
+                else:
+                    address = program.reserve_data_symbol(
+                        obj.name,
+                        obj.size,
+                        align=align,
+                    )
                 object_addresses[obj.name] = address
                 claimed.add(index)
                 if start_address is None:
@@ -692,11 +700,18 @@ def install_module_image(
     for index, obj in enumerate(image.objects):
         if index in claimed:
             continue
-        address = program.define_data_symbol(
-            obj.name,
-            obj.data,
-            align=obj.align,
-        )
+        if materialize:
+            address = program.define_data_symbol(
+                obj.name,
+                obj.data,
+                align=obj.align,
+            )
+        else:
+            address = program.reserve_data_symbol(
+                obj.name,
+                obj.size,
+                align=obj.align,
+            )
         object_addresses[obj.name] = address
 
     if linker_contract is not None and linker_contract.semantic_boundaries:
@@ -755,15 +770,16 @@ def install_module_image(
             raise VMError(f"unresolved image aliases: {missing}")
         pending = next_pending
 
-    for obj in image.objects:
-        base = object_addresses[obj.name]
-        for reloc in obj.relocations:
-            value = _resolve_target(program, reloc.target)
-            mask = (1 << (reloc.size * 8)) - 1
-            raw = (value & mask).to_bytes(reloc.size, "little")
-            for i, byte in enumerate(raw):
-                program.initial_memory.write(
-                    base + reloc.offset + i,
-                    8,
-                    byte,
-                )
+    if materialize:
+        for obj in image.objects:
+            base = object_addresses[obj.name]
+            for reloc in obj.relocations:
+                value = _resolve_target(program, reloc.target)
+                mask = (1 << (reloc.size * 8)) - 1
+                raw = (value & mask).to_bytes(reloc.size, "little")
+                for i, byte in enumerate(raw):
+                    program.initial_memory.write(
+                        base + reloc.offset + i,
+                        8,
+                        byte,
+                    )
