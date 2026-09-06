@@ -151,6 +151,13 @@ def _load_library():
         ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint
     ]
     lib.mm_vm_mem_read.restype = ctypes.c_uint64
+    lib.mm_vm_mem_read_blob.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_uint64,
+    ]
+    lib.mm_vm_mem_read_blob.restype = ctypes.c_int
     lib.mm_vm_mem_write.argtypes = [
         ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint, ctypes.c_uint64
     ]
@@ -237,6 +244,20 @@ class NativeMemory:
             value & MASK64,
         )
 
+    def bulk_read(self, src: int, size: int) -> bytes:
+        if size < 0:
+            raise VMError("negative native bulk read size")
+        if not size:
+            return b""
+        buf = (ctypes.c_uint8 * size)()
+        if not self._lib.mm_vm_mem_read_blob(
+            self._handle,
+            src & MASK64,
+            buf,
+            size,
+        ):
+            raise VMError("native bulk read failed")
+        return bytes(buf)
 
     def bulk_write(self, dst: int, data: bytes | bytearray | memoryview) -> None:
         raw = bytes(data)

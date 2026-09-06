@@ -153,6 +153,25 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         program = Program()
         vm = program.new_vm()
 
+        unpack_calls = 0
+        original_unpack = runner.unpack_user_image
+
+        def counted_unpack(data):
+            nonlocal unpack_calls
+            unpack_calls += 1
+            return original_unpack(data)
+
+        rebase_calls = 0
+        original_rebase = runner.rebase_user_program_namespace
+
+        def counted_rebase(image, *, namespace):
+            nonlocal rebase_calls
+            rebase_calls += 1
+            return original_rebase(image, namespace=namespace)
+
+        runner.unpack_user_image = counted_unpack
+        runner.rebase_user_program_namespace = counted_rebase
+
         pc = 0x02000000
         for offset, byte in enumerate(payload):
             vm.memory.write(pc + offset, 8, byte)
@@ -193,6 +212,8 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertNotEqual(first_global, second_global)
         self.assertEqual(vm.memory.read(first_global, 64), 99)
         self.assertEqual(vm.memory.read(second_global, 64), 7)
+        self.assertEqual(unpack_calls, 1)
+        self.assertEqual(rebase_calls, 1)
 
         vm.memory.write(second_global, 64, 1234)
         functions_before = len(program.functions)
@@ -204,6 +225,8 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(program._next_data, data_end_before)
         self.assertEqual(vm.memory.read(second_global, 64), 7)
         self.assertEqual(vm.memory.read(first_global, 64), 99)
+        self.assertEqual(unpack_calls, 1)
+        self.assertEqual(rebase_calls, 1)
 
     def test_runtime_registered_external_descriptor_is_live_immediately(self):
         runner = load_runner()
@@ -1902,6 +1925,14 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         )
         expanded, _ = expand_function(fn)
         return lower_function(expanded)
+
+    def test_native_memory_bulk_read_round_trips_across_page_boundary(self):
+        program = Program()
+        vm = NativeVM(program)
+        address = 0x1FFF0
+        payload = bytes((i * 17 + 3) & 0xFF for i in range(4096))
+        vm.memory.bulk_write(address, payload)
+        self.assertEqual(vm.memory.bulk_read(address, len(payload)), payload)
 
     def test_native_vm_preserves_i64_slot_move_in_initial_program(self):
         program = Program((self._mov64_function("mov64_initial"),))

@@ -621,6 +621,13 @@ uint64_t mm_vm_mem_read(MMVM *vm, uint64_t addr, unsigned bits) {
     return mem_read(vm, addr, bits);
 }
 
+int mm_vm_mem_read_blob(MMVM *vm, uint64_t src,
+                        uint8_t *data, uint64_t n) {
+    if (!vm || (!data && n))
+        return 0;
+    return mem_read_bytes(vm, src, data, n);
+}
+
 void mm_vm_mem_write(MMVM *vm, uint64_t addr,
                      unsigned bits, uint64_t value) {
     mem_write(vm, addr, bits, value);

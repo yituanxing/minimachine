@@ -64,6 +64,14 @@ class SparseMemory:
         for i in range(bits // 8):
             self.bytes[address + i] = (value >> (8 * i)) & 0xFF
 
+    def bulk_read(self, address: int, size: int) -> bytes:
+        if size < 0:
+            raise VMError("negative sparse bulk read size")
+        return bytes(
+            self.bytes.get(address + i, 0)
+            for i in range(size)
+        )
+
 
 HostService = Callable[["VM", tuple[int, ...]], Iterable[int] | int | None]
 

@@ -4242,7 +4242,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 f"regs=0x{regs:x} status=0x{status:x}"
             )
 
-        header = bytes(vm.memory.read(pc + i, 8) for i in range(12))
+        header = vm.memory.bulk_read(pc, 12)
         if header[:4] != b"MMP3":
             raise VMError(
                 "MiniMachine user entry is not an MMP3 payload: "
@@ -4251,7 +4251,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
         size = int.from_bytes(header[8:12], "big")
         if size > 16 * 1024 * 1024:
             raise VMError(f"MiniMachine user payload too large: {size}")
-        payload = bytes(vm.memory.read(pc + i, 8) for i in range(12 + size))
+        payload = vm.memory.bulk_read(pc, 12 + size)
         reference_path = os.environ.get("MINIMACHINE_USER_IMAGE_REFERENCE")
         if reference_path:
             reference_blob = Path(reference_path).read_bytes()
@@ -4307,12 +4307,28 @@ def linux_ecall(vm, args: tuple[int, ...]):
                     "MiniMachine userspace payload differs from reference image: "
                     f"path={reference_path} offset={mismatch}"
                 )
-        try:
-            user_image = unpack_user_image(payload)
-        except UserImageError as exc:
-            raise VMError(f"invalid MiniMachine user payload: {exc}") from exc
-
         payload_hash = hashlib.sha256(payload).hexdigest()
+        image_cache = getattr(vm, "user_payload_image_cache", None)
+        if image_cache is None:
+            image_cache = {}
+            vm.user_payload_image_cache = image_cache
+        user_image = image_cache.get(payload_hash)
+        if user_image is None:
+            try:
+                user_image = unpack_user_image(payload)
+            except UserImageError as exc:
+                raise VMError(f"invalid MiniMachine user payload: {exc}") from exc
+            image_cache[payload_hash] = user_image
+            image_cache_hit = 0
+        else:
+            image_cache_hit = 1
+        print(
+            "BOOT_EXEC_USER_IMAGE_CACHE "
+            f"payload={payload_hash[:16]} hit={image_cache_hit} "
+            f"entries={len(image_cache)}",
+            flush=True,
+        )
+
         instance_table = getattr(vm, "user_exec_instances", None)
         if instance_table is None:
             instance_table = {}
@@ -4326,10 +4342,29 @@ def linux_ecall(vm, args: tuple[int, ...]):
             else None
         )
 
+        namespace_cache = getattr(vm, "user_namespace_image_cache", None)
+        if namespace_cache is None:
+            namespace_cache = {}
+            vm.user_namespace_image_cache = namespace_cache
+
         if instance_namespace is not None:
-            user_image = rebase_user_program_namespace(
-                user_image,
-                namespace=instance_namespace,
+            namespace_key = (payload_hash, instance_namespace)
+            cached_image = namespace_cache.get(namespace_key)
+            if cached_image is None:
+                cached_image = rebase_user_program_namespace(
+                    user_image,
+                    namespace=instance_namespace,
+                )
+                namespace_cache[namespace_key] = cached_image
+                namespace_cache_hit = 0
+            else:
+                namespace_cache_hit = 1
+            user_image = cached_image
+            print(
+                "BOOT_EXEC_USER_NAMESPACE_CACHE "
+                f"payload={payload_hash[:16]} namespace={instance_namespace} "
+                f"hit={namespace_cache_hit} entries={len(namespace_cache)}",
+                flush=True,
             )
         elif not reuse_instance and len(user_image.functions) > 1:
             image_symbols = set()
@@ -4357,10 +4392,12 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 instance_namespace = (
                     f"exec_{current_task:x}_{payload_hash[:12]}"
                 )
+                namespace_key = (payload_hash, instance_namespace)
                 user_image = rebase_user_program_namespace(
                     user_image,
                     namespace=instance_namespace,
                 )
+                namespace_cache[namespace_key] = user_image
                 print(
                     "BOOT_EXEC_USER_INSTANCE_NAMESPACE "
                     f"task=0x{current_task:x} "
