@@ -5,6 +5,18 @@
 #define MM_PAGE_SHIFT 16
 #define MM_PAGE_SIZE (1u << MM_PAGE_SHIFT)
 #define MM_BUCKETS 8192u
+
+/*
+ * The Linux/BusyBox guest stays in the low 32-bit address space.  A dense
+ * page-pointer directory therefore costs only 65536 pointers (512 KiB on a
+ * 64-bit host) and avoids the page hash on non-last-page accesses.
+ *
+ * Same-runner A/B: 44.000s -> 43.345s (-1.49%).  Keep an explicit opt-out
+ * for control measurements and unusual host-memory constraints.
+ */
+#if !defined(MM_DIRECT_PAGES) && !defined(MM_NO_DIRECT_PAGES)
+#define MM_DIRECT_PAGES 1
+#endif
 #ifdef MM_DIRECT_PAGES
 #define MM_DIRECT_PAGE_COUNT (UINT64_C(1) << (32 - MM_PAGE_SHIFT))
 #endif
