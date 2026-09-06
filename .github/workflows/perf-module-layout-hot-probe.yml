@@ -142,6 +142,8 @@ jobs:
           MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
           MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
           MINIMACHINE_DISABLE_GC: "1"
+          MINIMACHINE_PROFILE_HOST: "1"
+          MINIMACHINE_PROFILE_HOST_TOP: "30"
         run: |
           set -o pipefail
           set +e
