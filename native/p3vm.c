@@ -5,6 +5,9 @@
 #define MM_PAGE_SHIFT 16
 #define MM_PAGE_SIZE (1u << MM_PAGE_SHIFT)
 #define MM_BUCKETS 8192u
+#ifdef MM_DIRECT_PAGES
+#define MM_DIRECT_PAGE_COUNT (UINT64_C(1) << (32 - MM_PAGE_SHIFT))
+#endif
 
 #define MM_OP_MOV 1
 #define MM_OP_SUB 2
@@ -107,6 +110,9 @@ typedef struct {
     uint64_t halt_code;
 
     MMPage *pages[MM_BUCKETS];
+#ifdef MM_DIRECT_PAGES
+    MMPage **direct_pages;
+#endif
     uint64_t sp;
     uint64_t block_code;
     uint32_t ip;
@@ -143,10 +149,26 @@ static MMPage *get_page(MMVM *vm, uint64_t no, int create) {
     if (vm->cached_page_valid && vm->cached_page_no == no)
         return vm->cached_page;
 
+#ifdef MM_DIRECT_PAGES
+    if (vm->direct_pages && no < MM_DIRECT_PAGE_COUNT) {
+        MMPage *direct = vm->direct_pages[no];
+        if (direct) {
+            vm->cached_page_no = no;
+            vm->cached_page = direct;
+            vm->cached_page_valid = 1;
+            return direct;
+        }
+    }
+#endif
+
     size_t h = page_hash(no);
     MMPage *p = vm->pages[h];
     while (p) {
         if (p->no == no) {
+#ifdef MM_DIRECT_PAGES
+            if (vm->direct_pages && no < MM_DIRECT_PAGE_COUNT)
+                vm->direct_pages[no] = p;
+#endif
             vm->cached_page_no = no;
             vm->cached_page = p;
             vm->cached_page_valid = 1;
@@ -162,6 +184,10 @@ static MMPage *get_page(MMVM *vm, uint64_t no, int create) {
     p->no = no;
     p->next = vm->pages[h];
     vm->pages[h] = p;
+#ifdef MM_DIRECT_PAGES
+    if (vm->direct_pages && no < MM_DIRECT_PAGE_COUNT)
+        vm->direct_pages[no] = p;
+#endif
     vm->cached_page_no = no;
     vm->cached_page = p;
     vm->cached_page_valid = 1;
@@ -510,6 +536,16 @@ MMVM *mm_vm_create(const MMInst *insts, size_t inst_count,
     }
     vm->segment_capacity = 1;
     vm->segment_count = 1;
+#ifdef MM_DIRECT_PAGES
+    vm->direct_pages = (MMPage **)calloc(
+        (size_t)MM_DIRECT_PAGE_COUNT, sizeof(*vm->direct_pages)
+    );
+    if (!vm->direct_pages) {
+        free(vm->segments);
+        free(vm);
+        return NULL;
+    }
+#endif
     vm->segments[0].insts = insts;
     vm->segments[0].inst_count = inst_count;
     vm->segments[0].blocks = blocks;
@@ -588,6 +624,15 @@ static void clear_pages(MMVM *vm) {
     vm->cached_page = NULL;
     vm->cached_page_no = 0;
     vm->cached_page_valid = 0;
+#ifdef MM_DIRECT_PAGES
+    if (vm->direct_pages) {
+        memset(
+            vm->direct_pages,
+            0,
+            (size_t)MM_DIRECT_PAGE_COUNT * sizeof(*vm->direct_pages)
+        );
+    }
+#endif
     vm->oom = 0;
 }
 
@@ -595,6 +640,9 @@ void mm_vm_destroy(MMVM *vm) {
     if (!vm) return;
     clear_pages(vm);
     free(vm->watch_codes);
+#ifdef MM_DIRECT_PAGES
+    free(vm->direct_pages);
+#endif
     free(vm->segments);
     free(vm);
 }
