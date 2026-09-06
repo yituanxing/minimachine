@@ -39,9 +39,10 @@
 #define MM_COND_ULT 2
 #define MM_COND_SLT 3
 
-#define MM_T_CODE 1
-#define MM_T_SLOT 2
-#define MM_T_MEM  3
+#define MM_T_CODE        1
+#define MM_T_SLOT        2
+#define MM_T_MEM         3
+#define MM_T_LOCAL_BLOCK 4
 
 #define MM_STATUS_LIMIT 0
 #define MM_STATUS_HALT 1
@@ -891,7 +892,33 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
                 break;
             }
 
-            if (!target_code(vm, take ? &in->t : &in->f, &target)) {
+            const MMOperand *chosen = take ? &in->t : &in->f;
+            if (chosen->kind == MM_T_LOCAL_BLOCK) {
+                size_t local_index = (size_t)chosen->value;
+                if (local_index >= segment->block_count) {
+                    r.status = MM_STATUS_ERROR;
+                    r.error = MM_ERR_BAD_TARGET;
+                    break;
+                }
+                const MMBlock *target_block = &segment->blocks[local_index];
+                target = target_block->code;
+                if (contains_code(vm->watch_codes, vm->watch_count, target)) {
+                    vm->block_code = target;
+                    vm->ip = 0;
+                    r.status = MM_STATUS_WATCH;
+                    r.target_code = target;
+                    break;
+                }
+                vm->block_code = target;
+                vm->ip = 0;
+                vm->cached_block_code = target;
+                vm->cached_segment_index = si;
+                vm->cached_block_index = local_index;
+                vm->cached_block_valid = 1;
+                continue;
+            }
+
+            if (!target_code(vm, chosen, &target)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = MM_ERR_BAD_TARGET;
                 break;
