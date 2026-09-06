@@ -9,10 +9,12 @@ on:
       - src/minimachine/native_vm.py
       - src/minimachine/vm.py
       - src/minimachine/user_bundle.py
+      - src/minimachine/user_image_cache.py
       - scripts/run-minimachine-linux.py
       - tests/test_dynamic_user_external_surface.py
       - tests/test_user_external_namespace.py
       - tests/test_user_namespace.py
+      - tests/test_user_image_cache.py
       - .github/workflows/native-dynamic-service-contract.yml
 
 permissions:
@@ -38,4 +40,5 @@ jobs:
             tests.test_dynamic_user_external_surface \
             tests.test_user_external_namespace \
             tests.test_user_namespace \
+            tests.test_user_image_cache \
             -v

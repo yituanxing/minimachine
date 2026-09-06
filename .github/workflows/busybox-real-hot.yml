@@ -136,13 +136,13 @@ jobs:
           /usr/bin/time -f 'BUSYBOX_USER_CACHE_BUILD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
             python3 scripts/build-user-image-cache.py \
               busybox/busybox-multicall.bflt \
-              build/busybox-user-image.pkl.gz
+              build/busybox-user-image.pkl
 
       - name: Replay real BusyBox init and shell
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
           MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
-          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl.gz
+          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
         run: |
           set -o pipefail
           set +e

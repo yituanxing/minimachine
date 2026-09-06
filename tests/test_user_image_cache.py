@@ -32,13 +32,14 @@ class UserImageCacheTests(unittest.TestCase):
         payload, image = self._payload()
         digest = hashlib.sha256(payload).hexdigest()
         with TemporaryDirectory() as tmp:
-            path = Path(tmp) / "user.pkl.gz"
-            save_user_image_cache(image, path, payload_sha256=digest)
-            loaded = load_user_image_cache(path, payload_sha256=digest)
-            self.assertEqual(loaded.entry, image.entry)
-            self.assertEqual(len(loaded.functions), len(image.functions))
-            with self.assertRaises(UserImageCacheError):
-                load_user_image_cache(path, payload_sha256="0" * 64)
+            for name in ("user.pkl", "user.pkl.gz"):
+                path = Path(tmp) / name
+                save_user_image_cache(image, path, payload_sha256=digest)
+                loaded = load_user_image_cache(path, payload_sha256=digest)
+                self.assertEqual(loaded.entry, image.entry)
+                self.assertEqual(len(loaded.functions), len(image.functions))
+                with self.assertRaises(UserImageCacheError):
+                    load_user_image_cache(path, payload_sha256="0" * 64)
 
 
 if __name__ == "__main__":
