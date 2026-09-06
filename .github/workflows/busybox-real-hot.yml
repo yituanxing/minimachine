@@ -145,10 +145,21 @@ jobs:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
           MINIMACHINE_DISABLE_GC: "1"
         run: |
-          if [ -s cold/busybox-real-native-pack.bin ]; then
-            echo "NATIVE_PACK_PREWARM=artifact-hit"
+          set -a
+          . build/hot-inputs.env
+          set +a
+          current_native_pack_sha="$(git log -1 --format=%H -- \
+            src/minimachine/native_vm.py \
+            src/minimachine/runtime.py \
+            src/minimachine/vm.py \
+            scripts/run-minimachine-linux.py)"
+          if [ -s cold/busybox-real-native-pack.bin ] && \
+             [ "${NATIVE_PACK_SHA:-}" = "$current_native_pack_sha" ]; then
+            echo "NATIVE_PACK_PREWARM=artifact-hit sha=$current_native_pack_sha"
             exit 0
           fi
+          echo "NATIVE_PACK_PREWARM=rebuild cold_sha=${NATIVE_PACK_SHA:-missing} current_sha=$current_native_pack_sha"
+          rm -f cold/busybox-real-native-pack.bin
           set -o pipefail
           /usr/bin/time -f 'NATIVE_PACK_PREWARM_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
           python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
