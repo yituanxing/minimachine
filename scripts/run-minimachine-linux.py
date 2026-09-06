@@ -5,7 +5,6 @@ import argparse
 import gc
 import hashlib
 import os
-import pickle
 from dataclasses import fields, is_dataclass
 from functools import cmp_to_key
 from pathlib import Path
@@ -43,11 +42,9 @@ from src.minimachine.kallsyms import install_p3_kallsyms
 from src.minimachine.linker import LinkerContract
 from src.minimachine.lower_p3 import lower_function
 from src.minimachine.program_cache import (
-    PROGRAM_CACHE_VERSION,
     ProgramCache,
     ProgramCacheError,
     load_program_cache,
-    lowering_fingerprint,
     save_program_cache,
 )
 from src.minimachine.runtime import (
@@ -5925,38 +5922,6 @@ def current_instruction(vm):
     return block.instructions[vm.ip]
 
 
-def load_program_cache_input(
-    path: Path,
-    *,
-    image_sha256: str,
-) -> ProgramCache:
-    if path.suffix != ".raw":
-        return load_program_cache(path, image_sha256=image_sha256)
-    try:
-        with path.open("rb") as handle:
-            payload = pickle.load(handle)
-    except (OSError, EOFError, pickle.PickleError) as exc:
-        raise ProgramCacheError(f"cannot read raw P3 program cache: {exc}") from exc
-    if payload.get("version") != PROGRAM_CACHE_VERSION:
-        raise ProgramCacheError(
-            "P3 program cache version mismatch: "
-            f"{payload.get('version')} != {PROGRAM_CACHE_VERSION}"
-        )
-    actual_lowering = payload.get("lowering_sha256")
-    expected_lowering = lowering_fingerprint()
-    if actual_lowering != expected_lowering:
-        raise ProgramCacheError(
-            "P3 program cache lowering fingerprint mismatch: "
-            f"{actual_lowering} != {expected_lowering}"
-        )
-    cache = payload.get("cache")
-    if not isinstance(cache, ProgramCache):
-        raise ProgramCacheError("P3 program cache payload has wrong type")
-    if cache.image_sha256 != image_sha256:
-        raise ProgramCacheError("P3 program cache linked-image fingerprint mismatch")
-    return cache
-
-
 def main() -> int:
     runner_started = time.perf_counter()
     gc_disabled = os.environ.get("MINIMACHINE_DISABLE_GC", "").lower() in {
@@ -5976,7 +5941,7 @@ def main() -> int:
 
     if args.program_cache_in is not None:
         try:
-            cached = load_program_cache_input(
+            cached = load_program_cache(
                 args.program_cache_in,
                 image_sha256=linked_image_sha256,
             )
