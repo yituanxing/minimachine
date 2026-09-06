@@ -13,7 +13,7 @@ from .vm import MASK64, Program, VM, VMError
 
 
 _NATIVE_STRING_BULK = os.environ.get(
-    "MINIMACHINE_NATIVE_STRING_BULK", "1"
+    "MINIMACHINE_NATIVE_STRING_BULK", "0"
 ).lower() not in {"0", "false", "no", "off"}
 
 
