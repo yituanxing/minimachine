@@ -25,9 +25,9 @@ jobs:
       - name: Build control and direct-page VMs
         run: |
           mkdir -p build
-          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared -DMM_NO_DIRECT_PAGES \
             native/p3vm.c -o build/libp3vm-control.so
-          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared -DMM_DIRECT_PAGES \
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
             native/p3vm.c -o build/libp3vm-direct-pages.so
 
       - name: Download fixed workload
