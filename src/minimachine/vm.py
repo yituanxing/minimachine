@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import re
+import time
 from typing import Callable, Iterable
 
 from . import muir, p3
@@ -224,6 +226,13 @@ class VM:
         # (vstart, vtype, vl, vcsr, vlenb)
         self.vector_state = (0, 0, 0, 0, 0)
         self.heap_next = HEAP_BASE
+        self._profile_host = os.environ.get("MINIMACHINE_PROFILE_HOST", "") not in {
+            "",
+            "0",
+            "false",
+            "False",
+        }
+        self._host_profile: dict[str, list[int]] = {}
 
     def enter_function(
         self,
@@ -467,7 +476,23 @@ class VM:
             for i in range(argc)
         )
 
-        raw_result = callback(self, args)
+        if self._profile_host:
+            callback_started = time.perf_counter_ns()
+            try:
+                raw_result = callback(self, args)
+            finally:
+                elapsed_ns = time.perf_counter_ns() - callback_started
+                stats = self._host_profile.get(symbol)
+                if stats is None:
+                    # calls, total_ns, max_ns
+                    self._host_profile[symbol] = [1, elapsed_ns, elapsed_ns]
+                else:
+                    stats[0] += 1
+                    stats[1] += elapsed_ns
+                    if elapsed_ns > stats[2]:
+                        stats[2] = elapsed_ns
+        else:
+            raw_result = callback(self, args)
         if raw_result is HOST_CONTROL_TRANSFER:
             return
         if raw_result is None:
@@ -490,6 +515,36 @@ class VM:
         ret_pc = self.memory.read(self.sp + RET_PC, 64)
         self.sp = caller_sp
         self._set_code(ret_pc)
+
+    def host_profile_summary(self) -> tuple[str, ...]:
+        if not self._profile_host:
+            return ()
+        try:
+            top = max(1, int(os.environ.get("MINIMACHINE_PROFILE_HOST_TOP", "30")))
+        except ValueError:
+            top = 30
+
+        ranked = sorted(
+            self._host_profile.items(),
+            key=lambda item: (-item[1][1], -item[1][0], item[0]),
+        )
+        total_calls = sum(stats[0] for _, stats in ranked)
+        total_ns = sum(stats[1] for _, stats in ranked)
+        lines = [
+            "BOOT_EXEC_HOST_PROFILE_TOTAL "
+            f"symbols={len(ranked)} calls={total_calls} "
+            f"callback_ms={total_ns / 1_000_000:.3f}"
+        ]
+        for rank, (symbol, stats) in enumerate(ranked[:top], 1):
+            calls, callback_ns, max_ns = stats
+            avg_us = callback_ns / calls / 1_000
+            lines.append(
+                "BOOT_EXEC_HOST_PROFILE "
+                f"rank={rank} symbol={symbol} calls={calls} "
+                f"callback_ms={callback_ns / 1_000_000:.3f} "
+                f"avg_us={avg_us:.3f} max_us={max_ns / 1_000:.3f}"
+            )
+        return tuple(lines)
 
     def step(self) -> None:
         if self.halted:
