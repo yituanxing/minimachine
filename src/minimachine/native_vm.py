@@ -234,6 +234,14 @@ def _load_library():
         ctypes.c_void_p, ctypes.c_uint64
     ]
     lib.mm_vm_mem_strlen.restype = ctypes.c_uint64
+    lib.mm_vm_mem_strcmp.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64
+    ]
+    lib.mm_vm_mem_strcmp.restype = ctypes.c_int
+    lib.mm_vm_mem_strncmp.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64
+    ]
+    lib.mm_vm_mem_strncmp.restype = ctypes.c_int
     lib.mm_vm_mem_page_count.argtypes = [ctypes.c_void_p]
     lib.mm_vm_mem_page_count.restype = ctypes.c_size_t
     lib.mm_vm_mem_export_pages.argtypes = [
@@ -372,6 +380,27 @@ class NativeMemory:
             self._lib.mm_vm_mem_strlen(
                 self._handle,
                 ptr & MASK64,
+            )
+        )
+
+    def bulk_strcmp(self, a: int, b: int) -> int:
+        return int(
+            self._lib.mm_vm_mem_strcmp(
+                self._handle,
+                a & MASK64,
+                b & MASK64,
+            )
+        )
+
+    def bulk_strncmp(self, a: int, b: int, size: int) -> int:
+        if size < 0:
+            raise VMError("negative native strncmp size")
+        return int(
+            self._lib.mm_vm_mem_strncmp(
+                self._handle,
+                a & MASK64,
+                b & MASK64,
+                size,
             )
         )
 
