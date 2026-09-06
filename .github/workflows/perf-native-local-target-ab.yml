@@ -123,7 +123,7 @@ jobs:
                 --max-steps 0 \
                 --progress-every 0 \
                 > "build/$variant/append-prewarm.log" 2>&1
-            status=${PIPESTATUS[2]}
+            status=${PIPESTATUS[1]}
             set -e
             echo "LOCAL_TARGET_PREWARM variant=$variant status=$status"
             test -s "build/$variant/append/append-000.bin"
