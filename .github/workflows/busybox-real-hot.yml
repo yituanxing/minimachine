@@ -91,13 +91,10 @@ jobs:
               test -s cold/input-runs.env || continue
               test -s cold/busybox-real-init.cpio || continue
               test -s cold/busybox-real-kernel-execve.chk.gz || continue
-              test -s cold/busybox-real-native-pack.bin || continue
               cold_lowering="$(sed -n 's/^LOWERING_SHA=//p' cold/input-runs.env)"
               cold_linux="$(sed -n 's/^LINUX_SHA=//p' cold/input-runs.env)"
-              cold_native_pack="$(sed -n 's/^NATIVE_PACK_SHA=//p' cold/input-runs.env)"
               if [ "$cold_lowering" = "$lowering_sha" ] && \
-                 [ "$cold_linux" = "$linux_sha" ] && \
-                 [ "$cold_native_pack" = "$native_pack_sha" ]; then
+                 [ "$cold_linux" = "$linux_sha" ]; then
                 found="$run_id"
                 break
               fi
@@ -142,6 +139,30 @@ jobs:
           test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
           test -s linux/llvm/linked.ll
           test -s busybox/busybox-multicall.bflt
+
+      - name: Prewarm native packed image when cold artifact is legacy
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_DISABLE_GC: "1"
+        run: |
+          if [ -s cold/busybox-real-native-pack.bin ]; then
+            echo "NATIVE_PACK_PREWARM=artifact-hit"
+            exit 0
+          fi
+          set -o pipefail
+          /usr/bin/time -f 'NATIVE_PACK_PREWARM_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-out cold/busybox-real-native-pack.bin \
+            --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+            --max-steps 1 \
+            --progress-every 0 \
+            2>&1 | tee build/native-pack-prewarm.log
+          test -s cold/busybox-real-native-pack.bin
+          grep -F 'BOOT_EXEC_NATIVE_PACK_CACHE_SAVED ' build/native-pack-prewarm.log
 
       - name: Build trusted BusyBox userspace image cache
         run: |
