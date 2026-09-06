@@ -7219,6 +7219,10 @@ def main() -> int:
         f"total_s={time.perf_counter() - runner_started:.3f}",
         flush=True,
     )
+    host_profile_summary = getattr(vm, "host_profile_summary", None)
+    if host_profile_summary is not None:
+        for line in host_profile_summary():
+            print(line, flush=True)
     return 0
 
 
