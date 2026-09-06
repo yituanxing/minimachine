@@ -6212,6 +6212,7 @@ def main() -> int:
             pack_cache_key=pack_cache_key,
             append_pack_cache_in_dir=args.native_append_pack_cache_in_dir,
             append_pack_cache_out_dir=args.native_append_pack_cache_out_dir,
+            load_initial_memory=args.checkpoint_in is None,
         )
         vm.native_report_every = max(0, args.native_report_every)
         vm.native_report_slots = tuple(args.native_report_slot)
