@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 from src.minimachine.checkpoint import image_fingerprint
 from src.minimachine.native_hot_cache import save_native_hot_cache
