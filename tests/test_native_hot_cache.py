@@ -31,11 +31,12 @@ class NativeHotCacheTests(unittest.TestCase):
                     "entry",
                     [
                         muir.Br(
+                            muir.Width.I64,
                             muir.Cond.EQ,
                             muir.Imm(0),
                             muir.Imm(0),
-                            "done",
-                            "done",
+                            muir.Target(label="done"),
+                            muir.Target(label="done"),
                         )
                     ],
                 ),
