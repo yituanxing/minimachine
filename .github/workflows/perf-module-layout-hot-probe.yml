@@ -4,6 +4,11 @@ on:
   push:
     branches: [work/native-p3-vm]
     paths:
+      - native/p3vm.c
+      - src/minimachine/native_vm.py
+      - src/minimachine/vm.py
+      - src/minimachine/image.py
+      - scripts/run-minimachine-linux.py
       - .github/workflows/perf-module-layout-hot-probe.yml
   workflow_dispatch:
 
