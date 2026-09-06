@@ -1,0 +1,193 @@
+name: MiniMachine Native Memory AB
+
+on:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/perf-native-memory-ab.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      COLD_RUN_ID: "34035294924"
+      P3_REFRESH_RUN_ID: "34036739708"
+      MINIMACHINE_DISABLE_GC: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build control and direct-page VMs
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libp3vm-control.so
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared -DMM_DIRECT_PAGES \
+            native/p3vm.c -o build/libp3vm-direct-pages.so
+
+      - name: Download fixed workload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p cold current-cache linux busybox
+          gh run download "$COLD_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-real-cold-$COLD_RUN_ID" \
+            --dir cold
+          gh run download "$P3_REFRESH_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-p3-console-current-$P3_REFRESH_RUN_ID" \
+            --dir current-cache
+          . current-cache/input-run.env
+          gh run download "$LINUX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$LINUX_RUN_ID" \
+            --dir linux
+          . cold/input-runs.env
+          gh run download "$BUSYBOX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-multicall-$BUSYBOX_RUN_ID" \
+            --dir busybox
+          test -s cold/busybox-real-kernel-execve.chk.gz
+          test -s cold/busybox-real-init.cpio
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+          test -s linux/llvm/linked.ll
+          test -s busybox/busybox-multicall.bflt
+
+      - name: Build shared hot artifacts
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libp3vm-control.so
+        run: |
+          python3 scripts/build-native-hot-cache.py \
+            linux/llvm/linked.ll \
+            current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            build/linux-native-hot-cache.pkl.gz
+
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-out build/native-pack.bin \
+            --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+            --max-steps 1 \
+            --progress-every 0 \
+            > build/pack.log 2>&1
+
+          python3 scripts/build-user-image-cache.py \
+            busybox/busybox-multicall.bflt \
+            build/busybox-user-image.pkl
+
+          mkdir -p build/native-append-pack-cache
+          export MINIMACHINE_USER_IMAGE_REFERENCE="$GITHUB_WORKSPACE/busybox/busybox-multicall.bflt"
+          export MINIMACHINE_USER_IMAGE_CACHE="$GITHUB_WORKSPACE/build/busybox-user-image.pkl"
+          set +e
+          echo exit | timeout --signal=TERM 240 \
+            python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+              --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+              --native-hot-cache-in build/linux-native-hot-cache.pkl.gz \
+              --initramfs cold/busybox-real-init.cpio \
+              --native-vm \
+              --native-pack-cache-in build/native-pack.bin \
+              --native-append-pack-cache-out-dir build/native-append-pack-cache \
+              --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+              --stop-on-panic \
+              --max-steps 0 \
+              --progress-every 0 \
+              > build/append-prewarm.log 2>&1
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "MEMORY_AB_PREWARM_STATUS=$status"
+          test -s build/native-append-pack-cache/append-000.bin
+          test -s build/native-append-pack-cache/append-001.bin
+
+          cat > build/commands.txt <<'EOF'
+          echo MINIMACHINE_REAL_EXTERNAL_BEGIN
+          /bin/uname -s
+          /bin/ls /etc
+          /bin/cat /etc/inittab
+          echo MINIMACHINE_REAL_EXTERNAL_END
+          exit
+          EOF
+
+      - name: Same-runner memory A/B
+        run: |
+          export MINIMACHINE_USER_IMAGE_REFERENCE="$GITHUB_WORKSPACE/busybox/busybox-multicall.bflt"
+          export MINIMACHINE_USER_IMAGE_CACHE="$GITHUB_WORKSPACE/build/busybox-user-image.pkl"
+
+          run_one() {
+            variant="$1"
+            sequence="$2"
+            lib="$3"
+            log="build/memory-ab-${sequence}-${variant}.log"
+            set +e
+            MINIMACHINE_NATIVE_LIB="$lib" \
+              /usr/bin/time -f "MEMORY_AB_WALL variant=${variant} sequence=${sequence} wall=%e user=%U sys=%S rss_kb=%M" \
+              timeout --signal=TERM 240 \
+              python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+                --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+                --native-hot-cache-in build/linux-native-hot-cache.pkl.gz \
+                --initramfs cold/busybox-real-init.cpio \
+                --native-vm \
+                --native-pack-cache-in build/native-pack.bin \
+                --native-append-pack-cache-in-dir build/native-append-pack-cache \
+                --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+                --stop-on-panic \
+                --max-steps 0 \
+                --progress-every 0 \
+                < build/commands.txt > "$log" 2>&1
+            status=$?
+            set -e
+            cat "$log"
+            echo "MEMORY_AB_STATUS variant=$variant sequence=$sequence status=$status"
+            test "$status" -eq 0
+            grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' "$log"
+            ! grep -F 'BOOT_EXEC_BLOCKED ' "$log"
+          }
+
+          run_one control 1 "$GITHUB_WORKSPACE/build/libp3vm-control.so"
+          run_one direct-pages 1 "$GITHUB_WORKSPACE/build/libp3vm-direct-pages.so"
+          run_one direct-pages 2 "$GITHUB_WORKSPACE/build/libp3vm-direct-pages.so"
+          run_one control 2 "$GITHUB_WORKSPACE/build/libp3vm-control.so"
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          values = {"control": [], "direct-pages": []}
+          for path in Path("build").glob("memory-ab-*.log"):
+              text = path.read_text()
+              m = re.search(
+                  r"MEMORY_AB_WALL variant=(control|direct-pages) "
+                  r"sequence=\d+ wall=([0-9.]+)",
+                  text,
+              )
+              if m:
+                  values[m.group(1)].append(float(m.group(2)))
+          for key in values:
+              assert len(values[key]) == 2, values
+          cm = sum(values["control"]) / 2
+          dm = sum(values["direct-pages"]) / 2
+          delta = dm - cm
+          pct = delta / cm * 100
+          print(
+              f"MEMORY_AB_SUMMARY control_mean={cm:.3f} "
+              f"direct_pages_mean={dm:.3f} delta_s={delta:.3f} "
+              f"delta_pct={pct:.2f}"
+          )
+          PY
+
+      - name: Upload A/B evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-native-memory-ab-${{ github.run_id }}
+          path: |
+            build/memory-ab-*.log
+            build/append-prewarm.log
+          if-no-files-found: warn
+          retention-days: 7
