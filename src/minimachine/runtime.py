@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
 import re
 import struct
 from typing import Iterable
@@ -9,6 +10,11 @@ from typing import Iterable
 from . import muir
 from .abi import CALLER_SP, RET_PC
 from .vm import MASK64, Program, VM, VMError
+
+
+_NATIVE_STRING_BULK = os.environ.get(
+    "MINIMACHINE_NATIVE_STRING_BULK", "1"
+).lower() not in {"0", "false", "no", "off"}
 
 
 @dataclass(frozen=True)
@@ -1593,7 +1599,7 @@ def direct_runtime_callback(symbol: str):
                 raise VMError("strcmp expects a,b")
             a, b = args
             bulk = getattr(vm.memory, "bulk_strcmp", None)
-            if bulk is not None:
+            if _NATIVE_STRING_BULK and bulk is not None:
                 return bulk(a, b) & MASK64
             i = 0
             while True:
@@ -1612,7 +1618,7 @@ def direct_runtime_callback(symbol: str):
                 raise VMError("strncmp expects a,b,size")
             a, b, size = args
             bulk = getattr(vm.memory, "bulk_strncmp", None)
-            if bulk is not None:
+            if _NATIVE_STRING_BULK and bulk is not None:
                 return bulk(a, b, size) & MASK64
             for i in range(size):
                 av = vm.memory.read(a + i, 8)
