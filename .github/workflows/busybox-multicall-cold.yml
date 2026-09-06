@@ -141,12 +141,20 @@ jobs:
           test -s linux/llvm/linked.ll
           test -s linux/out/minimachine-initramfs.cpio
 
-      - name: Download lowering-matched BusyBox multicall image
+      - name: Download generation-matched BusyBox multicall image
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           . build/input-runs.env
-          test -n "$LOWERING_SHA"
+
+          busybox_sha="$(git log -1 --format=%H -- \
+            src/minimachine/legalize.py \
+            tests/test_legalizer.py \
+            src/minimachine/user_image.py \
+            src/minimachine/user_bundle.py \
+            scripts/build-minimachine-busybox.py \
+            .github/workflows/busybox-multicall-bundle.yml)"
+          test -n "$busybox_sha"
 
           run_id=""
           for attempt in $(seq 1 60); do
@@ -156,16 +164,19 @@ jobs:
               --branch work/native-p3-vm \
               --limit 50 \
               --json databaseId,headSha,status,conclusion \
-              --jq ".[] | select(.headSha == \"$LOWERING_SHA\" and .status == \"completed\" and .conclusion == \"success\") | .databaseId" \
+              --jq ".[] | select(.headSha == \"$busybox_sha\" and .status == \"completed\" and .conclusion == \"success\") | .databaseId" \
               | head -1)"
             if [ -n "$run_id" ]; then
               break
             fi
-            echo "waiting for lowering-matched BusyBox bundle attempt=$attempt sha=$LOWERING_SHA"
+            echo "waiting for generation-matched BusyBox bundle attempt=$attempt sha=$busybox_sha"
             sleep 10
           done
           test -n "$run_id"
-          echo "BUSYBOX_RUN_ID=$run_id" | tee -a build/input-runs.env
+          {
+            echo "BUSYBOX_SHA=$busybox_sha"
+            echo "BUSYBOX_RUN_ID=$run_id"
+          } | tee -a build/input-runs.env
 
           gh run download "$run_id" \
             --repo "$GITHUB_REPOSITORY" \
