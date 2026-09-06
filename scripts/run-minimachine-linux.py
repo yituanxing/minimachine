@@ -6180,7 +6180,15 @@ def main() -> int:
             image,
             symbol_aliases=dict(linker_contract.aliases),
             linker_contract=linker_contract,
+            materialize=not checkpoint_layout_only,
         )
+        if checkpoint_layout_only:
+            print(
+                "BOOT_EXEC_IMAGE_LAYOUT "
+                f"objects={len(image.objects)} bytes={image.byte_size} "
+                f"relocs={image.relocation_count} materialized=0",
+                flush=True,
+            )
     except (ImageError, VMError, ValueError) as exc:
         print(f"BOOT_EXEC_BLOCKED stage=image error={exc}")
         return 1
