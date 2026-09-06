@@ -7,7 +7,9 @@ on:
     paths:
       - native/p3vm.c
       - src/minimachine/native_vm.py
+      - src/minimachine/native_hot_cache.py
       - src/minimachine/checkpoint.py
+      - tests/test_native_hot_cache.py
       - .github/workflows/native-checkpoint-roundtrip.yml
 
 jobs:
@@ -37,7 +39,9 @@ jobs:
           PY
 
       - name: Checkpoint unit contracts
-        run: python3 -m unittest tests.test_checkpoint -v
+        run: |
+          python3 -m unittest tests.test_checkpoint -v
+          python3 -m unittest tests.test_native_hot_cache -v
 
       - name: Native packed-cache round trip
         env:
