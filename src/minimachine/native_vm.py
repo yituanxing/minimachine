@@ -432,12 +432,20 @@ class NativeVM(VM):
         pack_cache_in: Path | None = None,
         pack_cache_out: Path | None = None,
         pack_cache_key: str | None = None,
+        append_pack_cache_in_dir: Path | None = None,
+        append_pack_cache_out_dir: Path | None = None,
     ):
         self._lib = _load_library()
         self._packed = None
         self._packed_mmap = None
         self._extra_packed = []
+        self._append_pack_mmaps = []
         self._host_packed = None
+        self._pack_cache_key = pack_cache_key
+        self._append_pack_cache_in_dir = append_pack_cache_in_dir
+        self._append_pack_cache_out_dir = append_pack_cache_out_dir
+        self._append_pack_index = 0
+        self.native_append_cache_context = None
         if pack_cache_in is not None:
             if pack_cache_key is None:
                 raise VMError("native pack cache input requires a cache key")
@@ -502,6 +510,7 @@ class NativeVM(VM):
         hosts,
         *,
         cache_key: str,
+        log_label: str = "BOOT_EXEC_NATIVE_PACK_CACHE_SAVED",
     ) -> None:
         started = time.perf_counter()
         try:
@@ -531,7 +540,7 @@ class NativeVM(VM):
             handle.write(memoryview(hosts).cast("B"))
         elapsed = time.perf_counter() - started
         print(
-            "BOOT_EXEC_NATIVE_PACK_CACHE_SAVED "
+            f"{log_label} "
             f"path={path} seconds={elapsed:.3f} bytes={path.stat().st_size} "
             f"insts={len(insts)} blocks={len(blocks)} hosts={len(hosts)}",
             flush=True,
@@ -629,6 +638,127 @@ class NativeVM(VM):
         elapsed = time.perf_counter() - started
         print(
             "BOOT_EXEC_NATIVE_PACK_CACHE_LOADED "
+            f"path={path} seconds={elapsed:.3f} bytes={len(mapped)} "
+            f"insts={inst_count} blocks={block_count} hosts={host_count}",
+            flush=True,
+        )
+        return insts, blocks, hosts
+
+    def _append_cache_key(
+        self,
+        *,
+        index: int,
+        new_block_codes,
+        current_hosts,
+    ) -> str | None:
+        context = getattr(self, "native_append_cache_context", None)
+        if not context:
+            return None
+        digest = hashlib.sha256()
+        digest.update((self._pack_cache_key or "-").encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(context).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(
+            struct.pack(
+                "<QQQQ",
+                index,
+                int(self.program._next_data) & MASK64,
+                len(new_block_codes),
+                len(current_hosts),
+            )
+        )
+        for code in new_block_codes:
+            digest.update(struct.pack("<Q", int(code) & MASK64))
+        for code in sorted(current_hosts):
+            digest.update(struct.pack("<Q", int(code) & MASK64))
+        return digest.hexdigest()
+
+    @staticmethod
+    def _append_cache_path(directory: Path, index: int) -> Path:
+        return directory / f"append-{index:03d}.bin"
+
+    def _load_append_packed_cache(
+        self,
+        path: Path,
+        *,
+        cache_key: str,
+        current_hosts,
+    ):
+        started = time.perf_counter()
+        key_bytes = bytes.fromhex(cache_key)
+        if len(key_bytes) != 32:
+            raise VMError("native append pack cache key must be SHA-256")
+        try:
+            handle = path.open("rb")
+            mapped = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_COPY)
+            handle.close()
+        except OSError as exc:
+            raise VMError(f"cannot map native append pack cache: {exc}") from exc
+        try:
+            if len(mapped) < _NATIVE_PACK_HEADER_SIZE:
+                raise VMError("native append pack cache is truncated")
+            (
+                magic,
+                version,
+                inst_size,
+                block_size,
+                host_size,
+                inst_count,
+                block_count,
+                host_count,
+                halt_code,
+                stored_key,
+            ) = _NATIVE_PACK_HEADER.unpack_from(mapped, 0)
+            if magic != _NATIVE_PACK_MAGIC or version != _NATIVE_PACK_VERSION:
+                raise VMError("native append pack cache format mismatch")
+            if (
+                inst_size != ctypes.sizeof(CInst)
+                or block_size != ctypes.sizeof(CBlock)
+                or host_size != ctypes.sizeof(ctypes.c_uint64)
+            ):
+                raise VMError("native append pack cache ABI layout mismatch")
+            if stored_key != key_bytes:
+                raise VMError("native append pack cache fingerprint mismatch")
+            if halt_code != (self.program.halt_code & MASK64):
+                raise VMError("native append pack cache halt code mismatch")
+
+            inst_bytes = inst_count * inst_size
+            block_bytes = block_count * block_size
+            host_bytes = host_count * host_size
+            expected = (
+                _NATIVE_PACK_HEADER_SIZE
+                + inst_bytes
+                + block_bytes
+                + host_bytes
+            )
+            if len(mapped) != expected:
+                raise VMError(
+                    "native append pack cache size mismatch: "
+                    f"{len(mapped)} != {expected}"
+                )
+            inst_offset = _NATIVE_PACK_HEADER_SIZE
+            block_offset = inst_offset + inst_bytes
+            host_offset = block_offset + block_bytes
+            insts = (CInst * inst_count).from_buffer(mapped, inst_offset)
+            blocks = (CBlock * block_count).from_buffer(mapped, block_offset)
+            if host_count:
+                hosts = (ctypes.c_uint64 * host_count).from_buffer(
+                    mapped, host_offset
+                )
+            else:
+                hosts = (ctypes.c_uint64 * 0)()
+            cached_hosts = tuple(int(hosts[i]) for i in range(host_count))
+            if cached_hosts != tuple(sorted(current_hosts)):
+                raise VMError("native append pack cache host table mismatch")
+        except Exception:
+            mapped.close()
+            raise
+
+        self._append_pack_mmaps.append(mapped)
+        elapsed = time.perf_counter() - started
+        print(
+            "BOOT_EXEC_NATIVE_APPEND_CACHE_LOADED "
             f"path={path} seconds={elapsed:.3f} bytes={len(mapped)} "
             f"insts={inst_count} blocks={block_count} hosts={host_count}",
             flush=True,
@@ -959,12 +1089,55 @@ class NativeVM(VM):
                 (code, self.program.code_block[code])
                 for code in new_block_codes
             ]
-            insts, blocks, hosts = self._pack_program(
-                self.program,
-                ordered_blocks,
-                retain=False,
-                log_label="BOOT_EXEC_NATIVE_APPEND_PACK",
+            append_index = self._append_pack_index
+            append_key = self._append_cache_key(
+                index=append_index,
+                new_block_codes=new_block_codes,
+                current_hosts=current_hosts,
             )
+            append_cache_path = (
+                self._append_cache_path(
+                    self._append_pack_cache_in_dir,
+                    append_index,
+                )
+                if self._append_pack_cache_in_dir is not None
+                else None
+            )
+            if (
+                append_cache_path is not None
+                and append_cache_path.is_file()
+                and append_key is not None
+            ):
+                insts, blocks, hosts = self._load_append_packed_cache(
+                    append_cache_path,
+                    cache_key=append_key,
+                    current_hosts=current_hosts,
+                )
+            else:
+                insts, blocks, hosts = self._pack_program(
+                    self.program,
+                    ordered_blocks,
+                    retain=False,
+                    log_label="BOOT_EXEC_NATIVE_APPEND_PACK",
+                )
+                if (
+                    self._append_pack_cache_out_dir is not None
+                    and append_key is not None
+                ):
+                    out_path = self._append_cache_path(
+                        self._append_pack_cache_out_dir,
+                        append_index,
+                    )
+                    self._save_packed_cache(
+                        self.program,
+                        out_path,
+                        insts,
+                        blocks,
+                        hosts,
+                        cache_key=append_key,
+                        log_label="BOOT_EXEC_NATIVE_APPEND_CACHE_SAVED",
+                    )
+            self._append_pack_index += 1
             if not self._lib.mm_vm_add_segment(
                 self._handle,
                 insts,
