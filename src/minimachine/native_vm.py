@@ -5,6 +5,7 @@ import hashlib
 import mmap
 import os
 from pathlib import Path
+import re
 import struct
 import time
 
@@ -36,6 +37,28 @@ MM_T_SLOT = 2
 MM_T_MEM = 3
 MM_T_LOCAL_BLOCK = 4
 
+MM_INTR_NONE = 0
+MM_INTR_AND = 1
+MM_INTR_OR = 2
+MM_INTR_XOR = 3
+MM_INTR_SHL = 4
+MM_INTR_LSHR = 5
+MM_INTR_ASHR = 6
+MM_INTR_ADD = 7
+MM_INTR_MUL = 8
+MM_INTR_ICMP = 9
+
+MM_IPRED_EQ = 1
+MM_IPRED_NE = 2
+MM_IPRED_ULT = 3
+MM_IPRED_ULE = 4
+MM_IPRED_UGT = 5
+MM_IPRED_UGE = 6
+MM_IPRED_SLT = 7
+MM_IPRED_SLE = 8
+MM_IPRED_SGT = 9
+MM_IPRED_SGE = 10
+
 MM_STATUS_LIMIT = 0
 MM_STATUS_HALT = 1
 MM_STATUS_HOST = 2
@@ -51,6 +74,12 @@ _NATIVE_PACK_HEADER_SIZE = _NATIVE_PACK_HEADER.size
 def _native_local_targets_enabled() -> bool:
     return os.environ.get(
         "MINIMACHINE_NATIVE_LOCAL_TARGETS", "0"
+    ).lower() not in {"0", "false", "no", "off", ""}
+
+
+def _native_host_intrinsics_enabled() -> bool:
+    return os.environ.get(
+        "MINIMACHINE_NATIVE_HOST_INTRINSICS", "0"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
@@ -131,6 +160,15 @@ class CBlock(ctypes.Structure):
     ]
 
 
+class CHostIntrinsic(ctypes.Structure):
+    _fields_ = [
+        ("op", ctypes.c_uint8),
+        ("bits", ctypes.c_uint8),
+        ("pred", ctypes.c_uint8),
+        ("_pad", ctypes.c_uint8),
+    ]
+
+
 class CRunResult(ctypes.Structure):
     _fields_ = [
         ("status", ctypes.c_int),
@@ -194,6 +232,12 @@ def _load_library():
         ctypes.c_size_t,
     ]
     lib.mm_vm_set_host_codes.restype = ctypes.c_int
+    lib.mm_vm_set_host_intrinsics.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(CHostIntrinsic),
+        ctypes.c_size_t,
+    ]
+    lib.mm_vm_set_host_intrinsics.restype = ctypes.c_int
     lib.mm_vm_load_bytes.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_uint64),
@@ -532,6 +576,8 @@ class NativeVM(VM):
         self._handle = handle
         memory = NativeMemory(self._lib, handle)
         super().__init__(program, memory, stack_top=stack_top)
+        self._host_intrinsic_packed = None
+        self._install_native_host_intrinsics()
         self._program_shape = self._shape(program)
         self._packed_block_codes = set(program.code_block)
         self._packed_function_names = set(program.functions)
@@ -562,6 +608,82 @@ class NativeVM(VM):
             except Exception:
                 pass
             self._handle = None
+
+    @staticmethod
+    def _native_intrinsic_for_symbol(symbol: str) -> CHostIntrinsic:
+        out = CHostIntrinsic()
+        if not _native_host_intrinsics_enabled():
+            return out
+
+        binary_ops = {
+            "and": MM_INTR_AND,
+            "or": MM_INTR_OR,
+            "xor": MM_INTR_XOR,
+            "shl": MM_INTR_SHL,
+            "lshr": MM_INTR_LSHR,
+            "ashr": MM_INTR_ASHR,
+            "add": MM_INTR_ADD,
+            "mul": MM_INTR_MUL,
+        }
+        match = re.fullmatch(
+            r"__mm_(and|or|xor|shl|lshr|ashr|add|mul)_(\d+)",
+            symbol,
+        )
+        if match:
+            op_name, bits_text = match.groups()
+            bits = int(bits_text)
+            if 1 <= bits <= 64:
+                out.op = binary_ops[op_name]
+                out.bits = bits
+            return out
+
+        match = re.fullmatch(r"__mm_icmp_([a-z]+)_(\d+)", symbol)
+        if match:
+            pred_name, bits_text = match.groups()
+            bits = int(bits_text)
+            pred = {
+                "eq": MM_IPRED_EQ,
+                "ne": MM_IPRED_NE,
+                "ult": MM_IPRED_ULT,
+                "ule": MM_IPRED_ULE,
+                "ugt": MM_IPRED_UGT,
+                "uge": MM_IPRED_UGE,
+                "slt": MM_IPRED_SLT,
+                "sle": MM_IPRED_SLE,
+                "sgt": MM_IPRED_SGT,
+                "sge": MM_IPRED_SGE,
+            }.get(pred_name)
+            if pred is not None and 1 <= bits <= 64:
+                out.op = MM_INTR_ICMP
+                out.bits = bits
+                out.pred = pred
+            return out
+
+        return out
+
+    def _install_native_host_intrinsics(self) -> None:
+        host_codes = sorted(self.program.host_code)
+        array = (CHostIntrinsic * len(host_codes))()
+        mapped = 0
+        for index, code in enumerate(host_codes):
+            symbol = self.program.host_code[code]
+            descriptor = self._native_intrinsic_for_symbol(symbol)
+            array[index] = descriptor
+            if descriptor.op != MM_INTR_NONE:
+                mapped += 1
+        if not self._lib.mm_vm_set_host_intrinsics(
+            self._handle,
+            array,
+            len(array),
+        ):
+            raise VMError("cannot install native host intrinsic table")
+        self._host_intrinsic_packed = array
+        if _native_host_intrinsics_enabled():
+            print(
+                "BOOT_EXEC_NATIVE_HOST_INTRINSICS "
+                f"mapped={mapped} hosts={len(host_codes)}",
+                flush=True,
+            )
 
     def _save_packed_cache(
         self,
@@ -1155,6 +1277,7 @@ class NativeVM(VM):
             ):
                 raise VMError("cannot append native P3 host service table")
             self._host_packed = host_array
+            self._install_native_host_intrinsics()
             self._sync_appended_initial_memory()
             self._trace_user_descriptor_after_sync("host-append")
             self._packed_host_codes = current_hosts
@@ -1245,6 +1368,7 @@ class NativeVM(VM):
                 ):
                     raise VMError("cannot append native P3 host service table")
                 self._host_packed = hosts
+                self._install_native_host_intrinsics()
             self._sync_appended_initial_memory()
             self._trace_user_descriptor_after_sync("segment-append")
 
@@ -1275,6 +1399,7 @@ class NativeVM(VM):
             raise VMError("cannot refresh native P3 program")
         self._extra_packed.clear()
         self._host_packed = None
+        self._install_native_host_intrinsics()
         self._sync_appended_initial_memory()
         self._trace_user_descriptor_after_sync("program-replace")
         self._packed_block_codes = current_blocks
