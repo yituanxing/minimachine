@@ -127,9 +127,11 @@ jobs:
             variant="$1"
             sequence="$2"
             lib="$3"
+            string_bulk="${4:-1}"
             log="build/ab-${sequence}-${variant}.log"
             set +e
             MINIMACHINE_NATIVE_LIB="$lib" \
+            MINIMACHINE_NATIVE_STRING_BULK="$string_bulk" \
               /usr/bin/time -f "AB_WALL variant=${variant} sequence=${sequence} wall=%e user=%U sys=%S rss_kb=%M" \
               timeout --signal=TERM 240 \
               python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
@@ -153,10 +155,15 @@ jobs:
             ! grep -F 'BOOT_EXEC_BLOCKED ' "$log"
           }
 
-          run_one control 1 "$GITHUB_WORKSPACE/build/libp3vm-control.so"
-          run_one candidate 1 "$GITHUB_WORKSPACE/build/libp3vm-candidate.so"
-          run_one candidate 2 "$GITHUB_WORKSPACE/build/libp3vm-candidate.so"
-          run_one control 2 "$GITHUB_WORKSPACE/build/libp3vm-control.so"
+          run_one control 1 "$GITHUB_WORKSPACE/build/libp3vm-control.so" 1
+          run_one candidate 1 "$GITHUB_WORKSPACE/build/libp3vm-candidate.so" 1
+          run_one candidate 2 "$GITHUB_WORKSPACE/build/libp3vm-candidate.so" 1
+          run_one control 2 "$GITHUB_WORKSPACE/build/libp3vm-control.so" 1
+
+          run_one string-python 1 "$GITHUB_WORKSPACE/build/libp3vm-candidate.so" 0
+          run_one string-native 1 "$GITHUB_WORKSPACE/build/libp3vm-candidate.so" 1
+          run_one string-native 2 "$GITHUB_WORKSPACE/build/libp3vm-candidate.so" 1
+          run_one string-python 2 "$GITHUB_WORKSPACE/build/libp3vm-candidate.so" 0
 
           python3 - <<'PY'
           import re
@@ -177,6 +184,28 @@ jobs:
           print(
               f"AB_SUMMARY control_mean={cm:.3f} candidate_mean={nm:.3f} "
               f"delta_s={delta:.3f} delta_pct={pct:.2f}"
+          )
+
+          string_values = {"string-python": [], "string-native": []}
+          for path in Path("build").glob("ab-*.log"):
+              text = path.read_text()
+              m = re.search(
+                  r"AB_WALL variant=(string-python|string-native) "
+                  r"sequence=\d+ wall=([0-9.]+)",
+                  text,
+              )
+              if m:
+                  string_values[m.group(1)].append(float(m.group(2)))
+          for key in string_values:
+              string_values[key].sort()
+              assert len(string_values[key]) == 2, string_values
+          pm = sum(string_values["string-python"]) / 2
+          sm = sum(string_values["string-native"]) / 2
+          sdelta = sm - pm
+          spct = sdelta / pm * 100
+          print(
+              f"STRING_AB_SUMMARY python_mean={pm:.3f} native_mean={sm:.3f} "
+              f"delta_s={sdelta:.3f} delta_pct={spct:.2f}"
           )
           PY
 
