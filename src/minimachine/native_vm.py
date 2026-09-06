@@ -79,7 +79,7 @@ def _native_local_targets_enabled() -> bool:
 
 def _native_host_intrinsics_enabled() -> bool:
     return os.environ.get(
-        "MINIMACHINE_NATIVE_HOST_INTRINSICS", "0"
+        "MINIMACHINE_NATIVE_HOST_INTRINSICS", "1"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
