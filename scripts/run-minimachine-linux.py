@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import os
 from dataclasses import fields, is_dataclass
@@ -5913,6 +5914,16 @@ def current_instruction(vm):
 
 def main() -> int:
     runner_started = time.perf_counter()
+    gc_disabled = os.environ.get("MINIMACHINE_DISABLE_GC", "").lower() in {
+        "1", "true", "yes", "on"
+    }
+    if gc_disabled:
+        gc.disable()
+        print(
+            "BOOT_EXEC_GC mode=disabled "
+            f"thresholds={gc.get_threshold()}",
+            flush=True,
+        )
     args = parse_args()
     llvm_text = args.input.read_text()
     linked_image_sha256 = image_fingerprint(llvm_text)
