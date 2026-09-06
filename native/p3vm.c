@@ -58,6 +58,35 @@
 #define MM_ERR_BAD_TARGET 5
 #define MM_ERR_OOM 6
 
+#define MM_INTR_NONE  0
+#define MM_INTR_AND   1
+#define MM_INTR_OR    2
+#define MM_INTR_XOR   3
+#define MM_INTR_SHL   4
+#define MM_INTR_LSHR  5
+#define MM_INTR_ASHR  6
+#define MM_INTR_ADD   7
+#define MM_INTR_MUL   8
+#define MM_INTR_ICMP  9
+
+#define MM_IPRED_EQ   1
+#define MM_IPRED_NE   2
+#define MM_IPRED_ULT  3
+#define MM_IPRED_ULE  4
+#define MM_IPRED_UGT  5
+#define MM_IPRED_UGE  6
+#define MM_IPRED_SLT  7
+#define MM_IPRED_SLE  8
+#define MM_IPRED_SGT  9
+#define MM_IPRED_SGE 10
+
+#define MM_ABI_CALLER_SP    0
+#define MM_ABI_RET_PC       8
+#define MM_ABI_FRAME_SIZE  24
+#define MM_ABI_RESULT_PTR  32
+#define MM_ABI_RESULT_COUNT 40
+#define MM_ABI_ARG_COUNT   56
+
 typedef struct MMPage {
     uint64_t no;
     uint8_t *data;
@@ -106,6 +135,13 @@ typedef struct {
 } MMRunResult;
 
 typedef struct {
+    uint8_t op;
+    uint8_t bits;
+    uint8_t pred;
+    uint8_t _pad;
+} MMHostIntrinsic;
+
+typedef struct {
     const MMInst *insts;
     size_t inst_count;
     const MMBlock *blocks;
@@ -118,6 +154,8 @@ typedef struct {
     size_t segment_capacity;
     const uint64_t *host_codes;
     size_t host_count;
+    MMHostIntrinsic *host_intrinsics;
+    size_t host_intrinsic_count;
     uint64_t *watch_codes;
     size_t watch_count;
     uint64_t halt_code;
@@ -453,16 +491,24 @@ static int find_block(MMVM *vm, uint64_t code,
     return 0;
 }
 
-static int contains_code(const uint64_t *codes, size_t n, uint64_t code) {
+static int find_code_index(const uint64_t *codes, size_t n,
+                           uint64_t code, size_t *idx) {
     size_t lo = 0, hi = n;
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
         uint64_t c = codes[mid];
-        if (c == code) return 1;
+        if (c == code) {
+            if (idx) *idx = mid;
+            return 1;
+        }
         if (c < code) lo = mid + 1;
         else hi = mid;
     }
     return 0;
+}
+
+static int contains_code(const uint64_t *codes, size_t n, uint64_t code) {
+    return find_code_index(codes, n, code, NULL);
 }
 
 static int read_value(MMVM *vm, const MMOperand *o, uint64_t *out) {
@@ -536,6 +582,91 @@ static int target_code(MMVM *vm, const MMOperand *o, uint64_t *out) {
     }
 }
 
+
+static int execute_host_intrinsic(MMVM *vm,
+                                  const MMHostIntrinsic *intr,
+                                  uint64_t *ret_pc_out) {
+    if (!vm || !intr || intr->op == MM_INTR_NONE)
+        return 0;
+    unsigned bits = intr->bits;
+    if (bits < 1 || bits > 64)
+        return 0;
+
+    uint64_t frame_size = mem_read(vm, vm->sp + MM_ABI_FRAME_SIZE, 64);
+    uint64_t argc = mem_read(vm, vm->sp + MM_ABI_ARG_COUNT, 64);
+    uint64_t expected = mem_read(vm, vm->sp + MM_ABI_RESULT_COUNT, 64);
+    if (argc != 2 || expected != 1)
+        return 0;
+
+    uint64_t arg_base = vm->sp + frame_size;
+    uint64_t a = mem_read(vm, arg_base, 64) & mask_bits(bits);
+    uint64_t b = mem_read(vm, arg_base + 8, 64) & mask_bits(bits);
+    uint64_t value = 0;
+
+    switch (intr->op) {
+        case MM_INTR_AND:
+            value = a & b;
+            break;
+        case MM_INTR_OR:
+            value = a | b;
+            break;
+        case MM_INTR_XOR:
+            value = a ^ b;
+            break;
+        case MM_INTR_ADD:
+            value = (a + b) & mask_bits(bits);
+            break;
+        case MM_INTR_MUL:
+            value = (a * b) & mask_bits(bits);
+            break;
+        case MM_INTR_SHL:
+            value = b >= bits ? 0 : ((a << b) & mask_bits(bits));
+            break;
+        case MM_INTR_LSHR:
+            value = b >= bits ? 0 : (a >> b);
+            break;
+        case MM_INTR_ASHR:
+            value = b >= bits
+                ? 0
+                : ((uint64_t)(sext64(a, bits) >> b) & mask_bits(bits));
+            break;
+        case MM_INTR_ICMP: {
+            int truth;
+            int64_t sa = sext64(a, bits);
+            int64_t sb = sext64(b, bits);
+            switch (intr->pred) {
+                case MM_IPRED_EQ:  truth = (a == b); break;
+                case MM_IPRED_NE:  truth = (a != b); break;
+                case MM_IPRED_ULT: truth = (a < b); break;
+                case MM_IPRED_ULE: truth = (a <= b); break;
+                case MM_IPRED_UGT: truth = (a > b); break;
+                case MM_IPRED_UGE: truth = (a >= b); break;
+                case MM_IPRED_SLT: truth = (sa < sb); break;
+                case MM_IPRED_SLE: truth = (sa <= sb); break;
+                case MM_IPRED_SGT: truth = (sa > sb); break;
+                case MM_IPRED_SGE: truth = (sa >= sb); break;
+                default:
+                    return 0;
+            }
+            value = (uint64_t)truth;
+            break;
+        }
+        default:
+            return 0;
+    }
+
+    uint64_t result_ptr = mem_read(vm, vm->sp + MM_ABI_RESULT_PTR, 64);
+    mem_write(vm, result_ptr, 64, value);
+    if (vm->oom)
+        return 0;
+
+    uint64_t caller_sp = mem_read(vm, vm->sp + MM_ABI_CALLER_SP, 64);
+    uint64_t ret_pc = mem_read(vm, vm->sp + MM_ABI_RET_PC, 64);
+    vm->sp = caller_sp;
+    *ret_pc_out = ret_pc;
+    return 1;
+}
+
 MMVM *mm_vm_create(const MMInst *insts, size_t inst_count,
                    const MMBlock *blocks, size_t block_count,
                    const uint64_t *host_codes, size_t host_count,
@@ -583,6 +714,9 @@ int mm_vm_replace_program(MMVM *vm,
     vm->segment_count = 1;
     vm->host_codes = host_codes;
     vm->host_count = host_count;
+    free(vm->host_intrinsics);
+    vm->host_intrinsics = NULL;
+    vm->host_intrinsic_count = 0;
     vm->halt_code = halt_code;
     vm->cached_block_valid = 0;
     return 1;
@@ -595,6 +729,27 @@ int mm_vm_set_host_codes(MMVM *vm,
         return 0;
     vm->host_codes = host_codes;
     vm->host_count = host_count;
+    free(vm->host_intrinsics);
+    vm->host_intrinsics = NULL;
+    vm->host_intrinsic_count = 0;
+    return 1;
+}
+
+int mm_vm_set_host_intrinsics(MMVM *vm,
+                              const MMHostIntrinsic *intrinsics,
+                              size_t count) {
+    if (!vm || count != vm->host_count)
+        return 0;
+    MMHostIntrinsic *copy = NULL;
+    if (count) {
+        copy = (MMHostIntrinsic *)malloc(count * sizeof(*copy));
+        if (!copy)
+            return 0;
+        memcpy(copy, intrinsics, count * sizeof(*copy));
+    }
+    free(vm->host_intrinsics);
+    vm->host_intrinsics = copy;
+    vm->host_intrinsic_count = count;
     return 1;
 }
 
@@ -653,6 +808,7 @@ void mm_vm_destroy(MMVM *vm) {
     if (!vm) return;
     clear_pages(vm);
     free(vm->watch_codes);
+    free(vm->host_intrinsics);
 #ifdef MM_DIRECT_PAGES
     free(vm->direct_pages);
 #endif
@@ -869,6 +1025,7 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
 
         if (in->opcode == MM_OP_BR) {
             uint64_t a, b, target;
+            size_t host_index, target_segment, target_index;
             if (!read_value(vm, &in->a, &a) ||
                 !read_value(vm, &in->b, &b)) {
                 r.status = MM_STATUS_ERROR;
@@ -924,12 +1081,30 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
                 break;
             }
 
+dispatch_code_target:
             if (target == vm->halt_code) {
                 r.status = MM_STATUS_HALT;
                 r.target_code = target;
                 break;
             }
-            if (contains_code(vm->host_codes, vm->host_count, target)) {
+            if (find_code_index(
+                    vm->host_codes, vm->host_count, target, &host_index)) {
+                if (
+                    vm->host_intrinsics
+                    && host_index < vm->host_intrinsic_count
+                    && vm->host_intrinsics[host_index].op != MM_INTR_NONE
+                ) {
+                    if (!execute_host_intrinsic(
+                            vm,
+                            &vm->host_intrinsics[host_index],
+                            &target)) {
+                        r.status = MM_STATUS_ERROR;
+                        r.error = MM_ERR_BAD_VALUE;
+                        r.target_code = target;
+                        break;
+                    }
+                    goto dispatch_code_target;
+                }
                 r.status = MM_STATUS_HOST;
                 r.target_code = target;
                 break;
@@ -942,7 +1117,6 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
                 break;
             }
 
-            size_t target_segment, target_index;
             if (!find_block(vm, target, &target_segment, &target_index)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = MM_ERR_BAD_TARGET;
