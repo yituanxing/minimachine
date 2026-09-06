@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import atexit
 import os
 import re
 import time
@@ -233,6 +234,9 @@ class VM:
             "False",
         }
         self._host_profile: dict[str, list[int]] = {}
+        self._host_profile_flushed = False
+        if self._profile_host:
+            atexit.register(self.flush_host_profile)
 
     def enter_function(
         self,
@@ -515,6 +519,13 @@ class VM:
         ret_pc = self.memory.read(self.sp + RET_PC, 64)
         self.sp = caller_sp
         self._set_code(ret_pc)
+
+    def flush_host_profile(self) -> None:
+        if not self._profile_host or self._host_profile_flushed:
+            return
+        self._host_profile_flushed = True
+        for line in self.host_profile_summary():
+            print(line, flush=True)
 
     def host_profile_summary(self) -> tuple[str, ...]:
         if not self._profile_host:
