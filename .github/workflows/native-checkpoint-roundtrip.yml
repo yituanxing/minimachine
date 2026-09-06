@@ -39,6 +39,47 @@ jobs:
       - name: Checkpoint unit contracts
         run: python3 -m unittest tests.test_checkpoint -v
 
+      - name: Native packed-cache round trip
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from src.minimachine import muir
+          from src.minimachine.abi import expand_function
+          from src.minimachine.lower_p3 import lower_function
+          from src.minimachine.vm import Program
+          from src.minimachine.native_vm import NativeVM
+
+          fn = muir.Function(
+              "cached",
+              [muir.Block("entry", [muir.Ret(muir.Imm(42))])],
+              set(),
+              (),
+          )
+          expanded, _ = expand_function(fn)
+          program = Program([lower_function(expanded)])
+          path = Path("/tmp/native-pack.bin")
+          key = "11" * 32
+
+          cold = NativeVM(
+              program,
+              pack_cache_out=path,
+              pack_cache_key=key,
+          )
+          assert cold.run_function("cached", ()) == (42,)
+          assert path.stat().st_size > 128
+
+          hot = NativeVM(
+              program,
+              pack_cache_in=path,
+              pack_cache_key=key,
+          )
+          assert hot.run_function("cached", ()) == (42,)
+          assert hot._packed_mmap is not None
+          print("NATIVE_PACK_CACHE_ROUNDTRIP PASS", path.stat().st_size)
+          PY
+
       - name: Native checkpoint save restore
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
