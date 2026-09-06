@@ -34,6 +34,7 @@ MM_COND_SLT = 3
 MM_T_CODE = 1
 MM_T_SLOT = 2
 MM_T_MEM = 3
+MM_T_LOCAL_BLOCK = 4
 
 MM_STATUS_LIMIT = 0
 MM_STATUS_HALT = 1
@@ -45,6 +46,12 @@ _NATIVE_PACK_MAGIC = b"MMP3NP1\0"
 _NATIVE_PACK_VERSION = 1
 _NATIVE_PACK_HEADER = struct.Struct("<8sIIIIQQQQ32s40x")
 _NATIVE_PACK_HEADER_SIZE = _NATIVE_PACK_HEADER.size
+
+
+def _native_local_targets_enabled() -> bool:
+    return os.environ.get(
+        "MINIMACHINE_NATIVE_LOCAL_TARGETS", "0"
+    ).lower() not in {"0", "false", "no", "off", ""}
 
 
 def native_pack_schema_fingerprint() -> str:
@@ -82,6 +89,8 @@ def native_pack_cache_key(
     digest.update((initramfs_sha256 or "-").encode("ascii"))
     digest.update(b"\0")
     digest.update(native_pack_schema_fingerprint().encode("ascii"))
+    digest.update(b"\0local-targets=")
+    digest.update(b"1" if _native_local_targets_enabled() else b"0")
     return digest.hexdigest()
 
 
@@ -966,13 +975,18 @@ class NativeVM(VM):
         linked,
         program,
         host_by_symbol,
+        local_block_index,
     ):
         out = COperand()
         if target.is_direct():
+            key = (function_name, target.label)
+            local_index = local_block_index.get(key)
+            if _native_local_targets_enabled() and local_index is not None:
+                out.kind = MM_T_LOCAL_BLOCK
+                out.value = local_index
+                return out
             out.kind = MM_T_CODE
-            out.value = program.block_code[
-                (function_name, target.label)
-            ]
+            out.value = program.block_code[key]
             return out
         if target.is_external():
             code = host_by_symbol.get(target.symbol)
@@ -1014,6 +1028,10 @@ class NativeVM(VM):
             ordered_blocks = sorted(program.code_block.items())
         else:
             ordered_blocks = list(ordered_blocks)
+        local_block_index = {
+            pair: index
+            for index, (_, pair) in enumerate(ordered_blocks)
+        }
         total_insts = 0
         for _, (function_name, block_name) in ordered_blocks:
             linked = program.functions[function_name]
@@ -1070,6 +1088,7 @@ class NativeVM(VM):
                         linked,
                         program,
                         host_by_symbol,
+                        local_block_index,
                     )
                     out.f = self._target(
                         inst.false_target,
@@ -1077,6 +1096,7 @@ class NativeVM(VM):
                         linked,
                         program,
                         host_by_symbol,
+                        local_block_index,
                     )
                 else:
                     raise VMError(
@@ -1101,7 +1121,8 @@ class NativeVM(VM):
             f"seconds={elapsed:.3f} insts={total_insts} "
             f"blocks={len(ordered_blocks)} hosts={len(host_codes)} "
             f"inst_bytes={ctypes.sizeof(CInst) * total_insts} "
-            f"block_bytes={ctypes.sizeof(CBlock) * len(ordered_blocks)}",
+            f"block_bytes={ctypes.sizeof(CBlock) * len(ordered_blocks)} "
+            f"local_targets={int(_native_local_targets_enabled())}",
             flush=True,
         )
         return inst_array, block_array, host_array
