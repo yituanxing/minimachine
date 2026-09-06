@@ -130,6 +130,16 @@ def parse_args():
         type=Path,
         help="save the fully resolved native P3 packed image for reuse",
     )
+    p.add_argument(
+        "--native-append-pack-cache-in-dir",
+        type=Path,
+        help="load mmap-backed cached native P3 append segments from this directory",
+    )
+    p.add_argument(
+        "--native-append-pack-cache-out-dir",
+        type=Path,
+        help="save dynamically appended native P3 segments into this directory",
+    )
     p.add_argument("--max-steps", type=int, default=10_000_000)
     p.add_argument("--progress-every", type=int, default=250_000)
     p.add_argument(
@@ -4641,6 +4651,11 @@ def linux_ecall(vm, args: tuple[int, ...]):
             flush=True,
         )
 
+        if hasattr(vm, "native_append_cache_context"):
+            vm.native_append_cache_context = (
+                f"{payload_hash}:{instance_namespace or 'base'}:"
+                f"{user_data_base:x}:{user_data_end:x}"
+            )
         print(
             "BOOT_EXEC_USER_HANDOFF "
             f"regs=0x{regs:x} pc=0x{pc:x} user_sp=0x{user_sp:x} "
@@ -6195,6 +6210,8 @@ def main() -> int:
             pack_cache_in=args.native_pack_cache_in,
             pack_cache_out=args.native_pack_cache_out,
             pack_cache_key=pack_cache_key,
+            append_pack_cache_in_dir=args.native_append_pack_cache_in_dir,
+            append_pack_cache_out_dir=args.native_append_pack_cache_out_dir,
         )
         vm.native_report_every = max(0, args.native_report_every)
         vm.native_report_slots = tuple(args.native_report_slot)
