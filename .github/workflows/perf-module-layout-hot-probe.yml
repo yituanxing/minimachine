@@ -1,0 +1,185 @@
+name: MiniMachine Module Layout Hot Probe
+
+on:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/perf-module-layout-hot-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      COLD_RUN_ID: "34035294924"
+      P3_REFRESH_RUN_ID: "34036739708"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download trusted checkpoint and current P3 cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p cold current-cache
+          gh run download "$COLD_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-real-cold-$COLD_RUN_ID" \
+            --dir cold
+          gh run download "$P3_REFRESH_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-p3-console-current-$P3_REFRESH_RUN_ID" \
+            --dir current-cache
+
+          test -s cold/input-runs.env
+          test -s cold/busybox-real-init.cpio
+          test -s cold/busybox-real-kernel-execve.chk.gz
+          test -s current-cache/input-run.env
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+
+          . current-cache/input-run.env
+          test -n "$LINUX_RUN_ID"
+          gh run download "$LINUX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$LINUX_RUN_ID" \
+            --dir linux
+
+          . cold/input-runs.env
+          test -n "$BUSYBOX_RUN_ID"
+          gh run download "$BUSYBOX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-multicall-$BUSYBOX_RUN_ID" \
+            --dir busybox
+
+          test -s linux/llvm/linked.ll
+          test -s busybox/busybox-multicall.bflt
+
+      - name: Build slim metadata cache
+        env:
+          MINIMACHINE_DISABLE_GC: "1"
+        run: |
+          python3 scripts/build-native-hot-cache.py \
+            linux/llvm/linked.ll \
+            current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            build/linux-native-hot-cache.pkl.gz
+          test -s build/linux-native-hot-cache.pkl.gz
+
+      - name: Build current native packed image
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_DISABLE_GC: "1"
+        run: |
+          set -o pipefail
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-out build/current-native-pack.bin \
+            --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+            --max-steps 1 \
+            --progress-every 0 \
+            2>&1 | tee build/base-pack.log
+          test -s build/current-native-pack.bin
+          grep -F 'BOOT_EXEC_IMAGE_LAYOUT ' build/base-pack.log
+          grep -F 'materialized=0' build/base-pack.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/base-pack.log
+
+      - name: Build BusyBox userspace cache
+        run: |
+          python3 scripts/build-user-image-cache.py \
+            busybox/busybox-multicall.bflt \
+            build/busybox-user-image.pkl
+          test -s build/busybox-user-image.pkl
+
+      - name: Prewarm append segments
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
+          MINIMACHINE_DISABLE_GC: "1"
+        run: |
+          mkdir -p build/native-append-pack-cache
+          set +e
+          echo 'exit' | timeout --signal=TERM 240 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --native-hot-cache-in build/linux-native-hot-cache.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-in build/current-native-pack.bin \
+            --native-append-pack-cache-out-dir build/native-append-pack-cache \
+            --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/append-prewarm.log
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "MODULE_LAYOUT_APPEND_PREWARM_STATUS=$status"
+          test -s build/native-append-pack-cache/append-000.bin
+          test -s build/native-append-pack-cache/append-001.bin
+
+      - name: Timed real BusyBox replay
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
+          MINIMACHINE_DISABLE_GC: "1"
+        run: |
+          set -o pipefail
+          set +e
+          {
+            echo 'echo MINIMACHINE_REAL_EXTERNAL_BEGIN'
+            echo '/bin/uname -s'
+            echo '/bin/ls /etc'
+            echo '/bin/cat /etc/inittab'
+            echo 'echo MINIMACHINE_REAL_EXTERNAL_END'
+            echo 'exit'
+          } | \
+          /usr/bin/time -f 'MODULE_LAYOUT_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 240 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --native-hot-cache-in build/linux-native-hot-cache.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-in build/current-native-pack.bin \
+            --native-append-pack-cache-in-dir build/native-append-pack-cache \
+            --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/module-layout-hot.log
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "MODULE_LAYOUT_HOT_STATUS=$status" | tee -a build/module-layout-hot.log
+
+          grep -F 'BOOT_EXEC_IMAGE_LAYOUT ' build/module-layout-hot.log
+          grep -F 'materialized=0' build/module-layout-hot.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/module-layout-hot.log
+          grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' build/module-layout-hot.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/module-layout-hot.log
+          grep -F 'MODULE_LAYOUT_HOT_STATUS=0' build/module-layout-hot.log
+
+      - name: Upload probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-module-layout-hot-probe-${{ github.run_id }}
+          path: |
+            build/base-pack.log
+            build/append-prewarm.log
+            build/module-layout-hot.log
+          if-no-files-found: warn
+          retention-days: 7
