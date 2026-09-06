@@ -305,15 +305,20 @@ class NativeMemory:
         return bytes(buf)
 
     def bulk_write(self, dst: int, data: bytes | bytearray | memoryview) -> None:
-        raw = bytes(data)
-        if not raw:
+        if not data:
             return
-        buf = (ctypes.c_uint8 * len(raw)).from_buffer_copy(raw)
+        if isinstance(data, bytearray):
+            size = len(data)
+            buf = (ctypes.c_uint8 * size).from_buffer(data)
+        else:
+            raw = bytes(data)
+            size = len(raw)
+            buf = (ctypes.c_uint8 * size).from_buffer_copy(raw)
         if not self._lib.mm_vm_mem_write_blob(
             self._handle,
             dst & MASK64,
             buf,
-            len(raw),
+            size,
         ):
             raise VMError("native bulk write failed")
 
@@ -773,20 +778,50 @@ class NativeVM(VM):
             len(program.host_code),
         )
 
+    def _write_sparse_initial_items(self, items) -> tuple[int, int]:
+        start = None
+        previous = None
+        data = bytearray()
+        total = 0
+        runs = 0
+
+        def flush() -> None:
+            nonlocal start, previous, data, runs
+            if start is None or not data:
+                return
+            self.memory.bulk_write(start, data)
+            runs += 1
+            start = None
+            previous = None
+            data = bytearray()
+
+        for address, value in items:
+            address = int(address) & MASK64
+            if (
+                start is None
+                or previous is None
+                or address != ((previous + 1) & MASK64)
+                or len(data) >= 4 * 1024 * 1024
+            ):
+                flush()
+                start = address
+            data.append(int(value) & 0xFF)
+            previous = address
+            total += 1
+        flush()
+        return total, runs
+
     def _load_initial_memory(self, program) -> None:
-        items = list(program.initial_memory.bytes.items())
-        if not items:
-            return
-        addresses = (ctypes.c_uint64 * len(items))(
-            *(address & MASK64 for address, _ in items)
+        started = time.perf_counter()
+        total, runs = self._write_sparse_initial_items(
+            program.initial_memory.bytes.items()
         )
-        values = (ctypes.c_uint8 * len(items))(
-            *(value & 0xFF for _, value in items)
+        print(
+            "BOOT_EXEC_NATIVE_INITIAL_MEMORY "
+            f"seconds={time.perf_counter() - started:.3f} "
+            f"bytes={total} runs={runs}",
+            flush=True,
         )
-        if not self._lib.mm_vm_load_bytes(
-            self._handle, addresses, values, len(items)
-        ):
-            raise VMError("cannot load native P3 initial memory")
 
     def _sync_appended_initial_memory(self) -> int:
         start = self._synced_data_end
@@ -794,32 +829,18 @@ class NativeVM(VM):
         if end <= start:
             return 0
 
-        items = [
+        total, runs = self._write_sparse_initial_items(
             (address, value)
             for address, value in self.program.initial_memory.bytes.items()
             if start <= address < end
-        ]
-        if items:
-            addresses = (ctypes.c_uint64 * len(items))(
-                *(address & MASK64 for address, _ in items)
-            )
-            values = (ctypes.c_uint8 * len(items))(
-                *(value & 0xFF for _, value in items)
-            )
-            if not self._lib.mm_vm_load_bytes(
-                self._handle,
-                addresses,
-                values,
-                len(items),
-            ):
-                raise VMError("cannot sync appended native P3 data")
+        )
         self._synced_data_end = end
         print(
             "BOOT_EXEC_NATIVE_DATA_APPEND "
-            f"start=0x{start:x} end=0x{end:x} bytes={len(items)}",
+            f"start=0x{start:x} end=0x{end:x} bytes={total} runs={runs}",
             flush=True,
         )
-        return len(items)
+        return total
 
     def _trace_user_descriptor_after_sync(self, stage: str) -> None:
         symbol = "__mm_user_ext_getcwd"
