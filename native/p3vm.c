@@ -842,15 +842,11 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
                 r.target_code = target;
                 break;
             }
-
-#ifdef MM_HOST_FIRST
             if (contains_code(vm->host_codes, vm->host_count, target)) {
                 r.status = MM_STATUS_HOST;
                 r.target_code = target;
                 break;
             }
-#endif
-
             if (contains_code(vm->watch_codes, vm->watch_count, target)) {
                 vm->block_code = target;
                 vm->ip = 0;
@@ -860,33 +856,19 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
             }
 
             size_t target_segment, target_index;
-            if (find_block(vm, target, &target_segment, &target_index)) {
-                vm->block_code = target;
-                vm->ip = 0;
-                vm->cached_block_code = target;
-                vm->cached_segment_index = target_segment;
-                vm->cached_block_index = target_index;
-                vm->cached_block_valid = 1;
-                continue;
-            }
-
-#ifndef MM_HOST_FIRST
-            /*
-             * Normal P3 branches target linked basic blocks.  Keep the host
-             * service binary search off that dominant path; only consult the
-             * sparse host table after block resolution misses.
-             */
-            if (contains_code(vm->host_codes, vm->host_count, target)) {
-                r.status = MM_STATUS_HOST;
+            if (!find_block(vm, target, &target_segment, &target_index)) {
+                r.status = MM_STATUS_ERROR;
+                r.error = MM_ERR_BAD_TARGET;
                 r.target_code = target;
                 break;
             }
-#endif
-
-            r.status = MM_STATUS_ERROR;
-            r.error = MM_ERR_BAD_TARGET;
-            r.target_code = target;
-            break;
+            vm->block_code = target;
+            vm->ip = 0;
+            vm->cached_block_code = target;
+            vm->cached_segment_index = target_segment;
+            vm->cached_block_index = target_index;
+            vm->cached_block_valid = 1;
+            continue;
         }
 
         r.status = MM_STATUS_ERROR;
