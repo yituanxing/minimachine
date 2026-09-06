@@ -6,6 +6,9 @@ on:
     branches: [work/native-p3-vm]
     paths:
       - scripts/run-minimachine-linux.py
+      - src/minimachine/native_vm.py
+      - src/minimachine/runtime.py
+      - src/minimachine/vm.py
       - scripts/build-user-image-cache.py
       - src/minimachine/user_image_cache.py
       - linux-overlay/arch/minimachine/**
@@ -60,8 +63,14 @@ jobs:
             scripts/build-minimachine-initramfs.py \
             scripts/check-minimachine-boot.sh \
             .github/workflows/initramfs-build.yml)"
+          native_pack_sha="$(git log -1 --format=%H -- \
+            src/minimachine/native_vm.py \
+            src/minimachine/runtime.py \
+            src/minimachine/vm.py \
+            scripts/run-minimachine-linux.py)"
           test -n "$lowering_sha"
           test -n "$linux_sha"
+          test -n "$native_pack_sha"
 
           found=""
           for attempt in $(seq 1 60); do
@@ -82,10 +91,13 @@ jobs:
               test -s cold/input-runs.env || continue
               test -s cold/busybox-real-init.cpio || continue
               test -s cold/busybox-real-kernel-execve.chk.gz || continue
+              test -s cold/busybox-real-native-pack.bin || continue
               cold_lowering="$(sed -n 's/^LOWERING_SHA=//p' cold/input-runs.env)"
               cold_linux="$(sed -n 's/^LINUX_SHA=//p' cold/input-runs.env)"
+              cold_native_pack="$(sed -n 's/^NATIVE_PACK_SHA=//p' cold/input-runs.env)"
               if [ "$cold_lowering" = "$lowering_sha" ] && \
-                 [ "$cold_linux" = "$linux_sha" ]; then
+                 [ "$cold_linux" = "$linux_sha" ] && \
+                 [ "$cold_native_pack" = "$native_pack_sha" ]; then
                 found="$run_id"
                 break
               fi
@@ -93,7 +105,7 @@ jobs:
             if [ -n "$found" ]; then
               break
             fi
-            echo "waiting for generation-matched BusyBox cold attempt=$attempt lowering=$lowering_sha linux=$linux_sha"
+            echo "waiting for generation-matched BusyBox cold attempt=$attempt lowering=$lowering_sha linux=$linux_sha native_pack=$native_pack_sha"
             sleep 10
           done
           test -n "$found"
@@ -162,6 +174,7 @@ jobs:
             --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
             --initramfs cold/busybox-real-init.cpio \
             --native-vm \
+            --native-pack-cache-in cold/busybox-real-native-pack.bin \
             --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
             --stop-on-panic \
             --max-steps 0 \
@@ -189,6 +202,7 @@ jobs:
 
       - name: Assert real BusyBox frontier
         run: |
+          grep -F 'BOOT_EXEC_NATIVE_PACK_CACHE_LOADED ' build/busybox-hot.log
           grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/busybox-hot.log
           for pattern in \
             'program cache lowering fingerprint mismatch' \
