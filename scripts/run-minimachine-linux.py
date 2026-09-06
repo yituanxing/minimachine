@@ -6087,6 +6087,8 @@ def main() -> int:
         )
     register_traps(program, reasons)
 
+    checkpoint_layout_only = bool(args.native_vm and args.checkpoint_in is not None)
+
     missing_helpers = tuple(getattr(program, "runtime_missing_helpers", ()))
     missing_systems = tuple(getattr(program, "runtime_missing_systems", ()))
     if missing_helpers or missing_systems:
@@ -6119,32 +6121,56 @@ def main() -> int:
     initramfs_sha256 = None
     if args.initramfs is not None:
         try:
-            initramfs_data = args.initramfs.read_bytes()
+            if checkpoint_layout_only:
+                initramfs_size = args.initramfs.stat().st_size
+                digest = hashlib.sha256()
+                with args.initramfs.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                initramfs_sha256 = digest.hexdigest()
+                initramfs_data = None
+            else:
+                initramfs_data = args.initramfs.read_bytes()
+                initramfs_size = len(initramfs_data)
+                initramfs_sha256 = hashlib.sha256(initramfs_data).hexdigest()
         except OSError as exc:
             print(f"BOOT_EXEC_BLOCKED stage=initramfs error={exc}")
             return 1
-        if not initramfs_data:
+        if initramfs_size <= 0:
             print("BOOT_EXEC_BLOCKED stage=initramfs error=empty image")
             return 1
-        initramfs_sha256 = hashlib.sha256(initramfs_data).hexdigest()
         try:
-            initramfs_start = program.define_data_symbol(
-                "__initramfs_start",
-                initramfs_data,
-                align=4,
-            )
-            initramfs_size_addr = program.define_data_symbol(
-                "__initramfs_size",
-                len(initramfs_data).to_bytes(8, "little"),
-                align=8,
-            )
+            if checkpoint_layout_only:
+                initramfs_start = program.reserve_data_symbol(
+                    "__initramfs_start",
+                    initramfs_size,
+                    align=4,
+                )
+                initramfs_size_addr = program.reserve_data_symbol(
+                    "__initramfs_size",
+                    8,
+                    align=8,
+                )
+            else:
+                assert initramfs_data is not None
+                initramfs_start = program.define_data_symbol(
+                    "__initramfs_start",
+                    initramfs_data,
+                    align=4,
+                )
+                initramfs_size_addr = program.define_data_symbol(
+                    "__initramfs_size",
+                    initramfs_size.to_bytes(8, "little"),
+                    align=8,
+                )
         except VMError as exc:
             print(f"BOOT_EXEC_BLOCKED stage=initramfs error={exc}")
             return 1
         print(
             "BOOT_EXEC_INITRAMFS "
-            f"path={args.initramfs} bytes={len(initramfs_data)} "
-            f"start=0x{initramfs_start:x} size_symbol=0x{initramfs_size_addr:x}",
+            f"path={args.initramfs} bytes={initramfs_size} "
+            f"start=0x{initramfs_start:x} size_symbol=0x{initramfs_size_addr:x} "
+            f"materialized={int(not checkpoint_layout_only)}",
             flush=True,
         )
 
