@@ -55,6 +55,10 @@ from src.minimachine.runtime import (
 )
 from src.minimachine.user_bundle import rebase_user_program_namespace
 from src.minimachine.user_image import UserImageError, unpack_user_image
+from src.minimachine.user_image_cache import (
+    UserImageCacheError,
+    load_user_image_cache,
+)
 from src.minimachine.verify import verify_muir, verify_p3
 from src.minimachine.vm import HOST_CONTROL_TRANSFER, Program, VMError
 
@@ -4314,10 +4318,27 @@ def linux_ecall(vm, args: tuple[int, ...]):
             vm.user_payload_image_cache = image_cache
         user_image = image_cache.get(payload_hash)
         if user_image is None:
-            try:
-                user_image = unpack_user_image(payload)
-            except UserImageError as exc:
-                raise VMError(f"invalid MiniMachine user payload: {exc}") from exc
+            disk_cache_path = os.environ.get("MINIMACHINE_USER_IMAGE_CACHE")
+            if disk_cache_path:
+                try:
+                    user_image = load_user_image_cache(
+                        Path(disk_cache_path),
+                        payload_sha256=payload_hash,
+                    )
+                except UserImageCacheError as exc:
+                    raise VMError(
+                        f"cannot load MiniMachine userspace image cache: {exc}"
+                    ) from exc
+                print(
+                    "BOOT_EXEC_USER_IMAGE_DISK_CACHE "
+                    f"path={disk_cache_path} payload={payload_hash[:16]} hit=1",
+                    flush=True,
+                )
+            else:
+                try:
+                    user_image = unpack_user_image(payload)
+                except UserImageError as exc:
+                    raise VMError(f"invalid MiniMachine user payload: {exc}") from exc
             image_cache[payload_hash] = user_image
             image_cache_hit = 0
         else:

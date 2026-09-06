@@ -6,6 +6,8 @@ on:
     branches: [work/native-p3-vm]
     paths:
       - scripts/run-minimachine-linux.py
+      - scripts/build-user-image-cache.py
+      - src/minimachine/user_image_cache.py
       - linux-overlay/arch/minimachine/**
       - scripts/build-minimachine-initramfs.py
       - scripts/check-minimachine-boot.sh
@@ -129,10 +131,18 @@ jobs:
           test -s linux/llvm/linked.ll
           test -s busybox/busybox-multicall.bflt
 
+      - name: Build trusted BusyBox userspace image cache
+        run: |
+          /usr/bin/time -f 'BUSYBOX_USER_CACHE_BUILD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 scripts/build-user-image-cache.py \
+              busybox/busybox-multicall.bflt \
+              build/busybox-user-image.pkl.gz
+
       - name: Replay real BusyBox init and shell
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
           MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl.gz
         run: |
           set -o pipefail
           set +e
