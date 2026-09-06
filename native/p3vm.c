@@ -335,6 +335,35 @@ static uint64_t mem_strlen_bytes(MMVM *vm, uint64_t addr) {
     }
 }
 
+
+static int mem_strncmp_bytes(MMVM *vm, uint64_t a, uint64_t b,
+                             uint64_t limit, int bounded) {
+    uint8_t abuf[4096];
+    uint8_t bbuf[4096];
+    uint64_t done = 0;
+
+    for (;;) {
+        uint64_t chunk = sizeof(abuf);
+        if (bounded) {
+            if (done >= limit)
+                return 0;
+            uint64_t remaining = limit - done;
+            if (chunk > remaining)
+                chunk = remaining;
+        }
+
+        mem_read_bytes(vm, a + done, abuf, chunk);
+        mem_read_bytes(vm, b + done, bbuf, chunk);
+        for (uint64_t i = 0; i < chunk; ++i) {
+            if (abuf[i] != bbuf[i])
+                return (int)abuf[i] - (int)bbuf[i];
+            if (abuf[i] == 0)
+                return 0;
+        }
+        done += chunk;
+    }
+}
+
 static int find_block_in_segment(const MMSegment *segment,
                                  uint64_t code, size_t *idx) {
     size_t lo = 0, hi = segment->block_count;
@@ -658,6 +687,14 @@ int mm_vm_mem_compare(MMVM *vm, uint64_t a, uint64_t b, uint64_t n) {
 
 uint64_t mm_vm_mem_strlen(MMVM *vm, uint64_t addr) {
     return mem_strlen_bytes(vm, addr);
+}
+
+int mm_vm_mem_strcmp(MMVM *vm, uint64_t a, uint64_t b) {
+    return mem_strncmp_bytes(vm, a, b, 0, 0);
+}
+
+int mm_vm_mem_strncmp(MMVM *vm, uint64_t a, uint64_t b, uint64_t n) {
+    return mem_strncmp_bytes(vm, a, b, n, 1);
 }
 
 int mm_vm_set_watches(MMVM *vm, const uint64_t *codes, size_t n) {
