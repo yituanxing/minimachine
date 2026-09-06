@@ -179,11 +179,23 @@ class Program:
             raise VMError("empty system operation")
         self.register_service("__mm_sys_" + tag, callback)
 
-    def define_data_symbol(self, symbol: str, data: bytes, *, align: int = 8) -> int:
+    def reserve_data_symbol(
+        self,
+        symbol: str,
+        size: int,
+        *,
+        align: int = 8,
+    ) -> int:
         if symbol in self.symbol_addresses:
             raise VMError(f"duplicate program symbol: {symbol}")
-        address = self._alloc_data(len(data), align)
+        if size < 0:
+            raise VMError(f"negative data symbol size: {symbol}={size}")
+        address = self._alloc_data(size, align)
         self.symbol_addresses[symbol] = address
+        return address
+
+    def define_data_symbol(self, symbol: str, data: bytes, *, align: int = 8) -> int:
+        address = self.reserve_data_symbol(symbol, len(data), align=align)
         for i, byte in enumerate(data):
             self.initial_memory.write(address + i, 8, byte)
         return address
