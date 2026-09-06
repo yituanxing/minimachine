@@ -1,0 +1,153 @@
+name: MiniMachine Native Host Profile
+
+on:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/perf-native-host-profile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      COLD_RUN_ID: "34035294924"
+      P3_REFRESH_RUN_ID: "34036739708"
+      MINIMACHINE_DISABLE_GC: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download fixed workload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p cold current-cache linux busybox
+          gh run download "$COLD_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-real-cold-$COLD_RUN_ID" \
+            --dir cold
+          gh run download "$P3_REFRESH_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-p3-console-current-$P3_REFRESH_RUN_ID" \
+            --dir current-cache
+          . current-cache/input-run.env
+          gh run download "$LINUX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$LINUX_RUN_ID" \
+            --dir linux
+          . cold/input-runs.env
+          gh run download "$BUSYBOX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-multicall-$BUSYBOX_RUN_ID" \
+            --dir busybox
+          test -s cold/busybox-real-kernel-execve.chk.gz
+          test -s cold/busybox-real-init.cpio
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+          test -s linux/llvm/linked.ll
+          test -s busybox/busybox-multicall.bflt
+
+      - name: Build hot artifacts
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 scripts/build-native-hot-cache.py \
+            linux/llvm/linked.ll \
+            current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            build/linux-native-hot-cache.pkl.gz
+
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-out build/native-pack.bin \
+            --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+            --max-steps 1 \
+            --progress-every 0 \
+            > build/pack.log 2>&1
+
+          python3 scripts/build-user-image-cache.py \
+            busybox/busybox-multicall.bflt \
+            build/busybox-user-image.pkl
+
+          mkdir -p build/native-append-pack-cache
+          export MINIMACHINE_USER_IMAGE_REFERENCE="$GITHUB_WORKSPACE/busybox/busybox-multicall.bflt"
+          export MINIMACHINE_USER_IMAGE_CACHE="$GITHUB_WORKSPACE/build/busybox-user-image.pkl"
+          set +e
+          echo exit | timeout --signal=TERM 240 \
+            python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+              --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+              --native-hot-cache-in build/linux-native-hot-cache.pkl.gz \
+              --initramfs cold/busybox-real-init.cpio \
+              --native-vm \
+              --native-pack-cache-in build/native-pack.bin \
+              --native-append-pack-cache-out-dir build/native-append-pack-cache \
+              --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+              --stop-on-panic \
+              --max-steps 0 \
+              --progress-every 0 \
+              > build/append-prewarm.log 2>&1
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "HOST_PROFILE_PREWARM_STATUS=$status"
+          test -s build/native-append-pack-cache/append-000.bin
+          test -s build/native-append-pack-cache/append-001.bin
+
+      - name: Profile real BusyBox replay
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
+          MINIMACHINE_NATIVE_HOST_PROFILE: "1"
+        run: |
+          cat > build/commands.txt <<'EOF'
+          echo MINIMACHINE_REAL_EXTERNAL_BEGIN
+          /bin/uname -s
+          /bin/ls /etc
+          /bin/cat /etc/inittab
+          echo MINIMACHINE_REAL_EXTERNAL_END
+          exit
+          EOF
+
+          set -o pipefail
+          /usr/bin/time -f 'HOST_PROFILE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            timeout --signal=TERM 240 \
+            python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+              --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+              --native-hot-cache-in build/linux-native-hot-cache.pkl.gz \
+              --initramfs cold/busybox-real-init.cpio \
+              --native-vm \
+              --native-pack-cache-in build/native-pack.bin \
+              --native-append-pack-cache-in-dir build/native-append-pack-cache \
+              --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+              --stop-on-panic \
+              --max-steps 0 \
+              --progress-every 0 \
+              < build/commands.txt 2>&1 | tee build/host-profile.log
+
+          grep -F 'BOOT_EXEC_NATIVE_HOST_PROFILE ' build/host-profile.log
+          grep -F 'BOOT_EXEC_NATIVE_HOST_PROFILE_SYMBOL ' build/host-profile.log
+          grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' build/host-profile.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/host-profile.log
+
+      - name: Upload profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-native-host-profile-${{ github.run_id }}
+          path: |
+            build/host-profile.log
+            build/append-prewarm.log
+          if-no-files-found: warn
+          retention-days: 7
