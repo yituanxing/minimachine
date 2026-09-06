@@ -120,6 +120,16 @@ def parse_args():
         action="store_true",
         help="execute strict P3 with the C native VM backend",
     )
+    p.add_argument(
+        "--native-pack-cache-in",
+        type=Path,
+        help="mmap a generation-matched prepacked native P3 image",
+    )
+    p.add_argument(
+        "--native-pack-cache-out",
+        type=Path,
+        help="save the fully resolved native P3 packed image for reuse",
+    )
     p.add_argument("--max-steps", type=int, default=10_000_000)
     p.add_argument("--progress-every", type=int, default=250_000)
     p.add_argument(
@@ -6166,9 +6176,26 @@ def main() -> int:
         program.register_service("__mm_user_syscall", user_syscall)
 
     if args.native_vm:
-        from src.minimachine.native_vm import NativeVM
+        from src.minimachine.native_vm import (
+            NativeVM,
+            native_pack_cache_key,
+        )
         native_init_started = time.perf_counter()
-        vm = NativeVM(program)
+        pack_cache_key = native_pack_cache_key(
+            image_sha256=linked_image_sha256,
+            initramfs_sha256=initramfs_sha256,
+        )
+        print(
+            "BOOT_EXEC_NATIVE_PACK_CACHE_KEY "
+            f"sha256={pack_cache_key}",
+            flush=True,
+        )
+        vm = NativeVM(
+            program,
+            pack_cache_in=args.native_pack_cache_in,
+            pack_cache_out=args.native_pack_cache_out,
+            pack_cache_key=pack_cache_key,
+        )
         vm.native_report_every = max(0, args.native_report_every)
         vm.native_report_slots = tuple(args.native_report_slot)
         print("BOOT_EXEC_BACKEND backend=native-c", flush=True)
