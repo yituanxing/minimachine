@@ -1592,6 +1592,9 @@ def direct_runtime_callback(symbol: str):
             if len(args) != 2:
                 raise VMError("strcmp expects a,b")
             a, b = args
+            bulk = getattr(vm.memory, "bulk_strcmp", None)
+            if bulk is not None:
+                return bulk(a, b) & MASK64
             i = 0
             while True:
                 av = vm.memory.read(a + i, 8)
@@ -1608,6 +1611,9 @@ def direct_runtime_callback(symbol: str):
             if len(args) != 3:
                 raise VMError("strncmp expects a,b,size")
             a, b, size = args
+            bulk = getattr(vm.memory, "bulk_strncmp", None)
+            if bulk is not None:
+                return bulk(a, b, size) & MASK64
             for i in range(size):
                 av = vm.memory.read(a + i, 8)
                 bv = vm.memory.read(b + i, 8)
