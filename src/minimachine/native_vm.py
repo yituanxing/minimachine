@@ -481,6 +481,13 @@ class NativeVM(VM):
         self._append_pack_cache_out_dir = append_pack_cache_out_dir
         self._append_pack_index = 0
         self.native_append_cache_context = None
+        self._host_profile_enabled = os.environ.get(
+            "MINIMACHINE_NATIVE_HOST_PROFILE", ""
+        ).lower() in {"1", "true", "yes", "on"}
+        self._host_profile_counts: dict[str, int] = {}
+        self._host_profile_seconds: dict[str, float] = {}
+        self._host_profile_total_calls = 0
+        self._host_profile_total_seconds = 0.0
         if pack_cache_in is not None:
             if pack_cache_key is None:
                 raise VMError("native pack cache input requires a cache key")
@@ -1287,6 +1294,33 @@ class NativeVM(VM):
         self.current_block = block
         self.ip = int(ip)
 
+    def host_profile_summary(self, *, limit: int = 24) -> tuple[str, ...]:
+        if not self._host_profile_enabled:
+            return ()
+        rows = sorted(
+            self._host_profile_seconds,
+            key=lambda name: (
+                -self._host_profile_seconds[name],
+                -self._host_profile_counts.get(name, 0),
+                name,
+            ),
+        )
+        lines = [
+            "BOOT_EXEC_NATIVE_HOST_PROFILE "
+            f"calls={self._host_profile_total_calls} "
+            f"seconds={self._host_profile_total_seconds:.6f} "
+            f"symbols={len(rows)}"
+        ]
+        for name in rows[:max(0, limit)]:
+            count = self._host_profile_counts.get(name, 0)
+            seconds = self._host_profile_seconds.get(name, 0.0)
+            lines.append(
+                "BOOT_EXEC_NATIVE_HOST_PROFILE_SYMBOL "
+                f"name={name} calls={count} seconds={seconds:.6f} "
+                f"avg_us={(seconds / count * 1_000_000) if count else 0.0:.3f}"
+            )
+        return tuple(lines)
+
     def run(self, *, max_steps: int = 1_000_000) -> None:
         native_limit = MASK64 if max_steps <= 0 else max_steps
         report_every = int(getattr(self, "native_report_every", 0) or 0)
@@ -1413,7 +1447,25 @@ class NativeVM(VM):
                 self.halted = True
                 return
             if result.status == MM_STATUS_HOST:
-                self._set_code(int(result.target_code))
+                target_code = int(result.target_code)
+                if self._host_profile_enabled:
+                    symbol = self.program.host_code.get(
+                        target_code,
+                        f"<0x{target_code:x}>",
+                    )
+                    started = time.perf_counter()
+                    self._set_code(target_code)
+                    elapsed = time.perf_counter() - started
+                    self._host_profile_counts[symbol] = (
+                        self._host_profile_counts.get(symbol, 0) + 1
+                    )
+                    self._host_profile_seconds[symbol] = (
+                        self._host_profile_seconds.get(symbol, 0.0) + elapsed
+                    )
+                    self._host_profile_total_calls += 1
+                    self._host_profile_total_seconds += elapsed
+                else:
+                    self._set_code(target_code)
                 continue
             if result.status == MM_STATUS_WATCH:
                 target_code = int(result.target_code)
