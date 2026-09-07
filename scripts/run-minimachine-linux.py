@@ -4398,6 +4398,8 @@ def linux_ecall(vm, args: tuple[int, ...]):
             namespace_cache = {}
             vm.user_namespace_image_cache = namespace_cache
 
+        fast_namespace_rebase = True
+
         if instance_namespace is not None:
             namespace_key = (payload_hash, instance_namespace)
             cached_image = namespace_cache.get(namespace_key)
@@ -4405,6 +4407,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 cached_image = rebase_user_program_namespace(
                     user_image,
                     namespace=instance_namespace,
+                    fast=fast_namespace_rebase,
                 )
                 namespace_cache[namespace_key] = cached_image
                 namespace_cache_hit = 0
@@ -4447,6 +4450,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 user_image = rebase_user_program_namespace(
                     user_image,
                     namespace=instance_namespace,
+                    fast=fast_namespace_rebase,
                 )
                 namespace_cache[namespace_key] = user_image
                 print(
@@ -4454,7 +4458,8 @@ def linux_ecall(vm, args: tuple[int, ...]):
                     f"task=0x{current_task:x} "
                     f"payload={payload_hash[:16]} "
                     f"namespace={instance_namespace} "
-                    f"collisions={len(collisions)}",
+                    f"collisions={len(collisions)} "
+                    f"fast_rebase={int(fast_namespace_rebase)}",
                     flush=True,
                 )
 
