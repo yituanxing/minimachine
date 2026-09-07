@@ -63,6 +63,7 @@ from src.minimachine.user_image import UserImageError, unpack_user_image
 from src.minimachine.user_image_cache import (
     UserImageCacheError,
     load_user_image_cache,
+    save_user_image_cache,
 )
 from src.minimachine.verify import verify_muir, verify_p3
 from src.minimachine.vm import HOST_CONTROL_TRANSFER, Program, VMError
@@ -4398,23 +4399,67 @@ def linux_ecall(vm, args: tuple[int, ...]):
             namespace_cache = {}
             vm.user_namespace_image_cache = namespace_cache
 
-        if instance_namespace is not None:
-            namespace_key = (payload_hash, instance_namespace)
+        def load_or_build_namespace_image(base_image, namespace: str):
+            namespace_key = (payload_hash, namespace)
             cached_image = namespace_cache.get(namespace_key)
-            if cached_image is None:
-                cached_image = rebase_user_program_namespace(
-                    user_image,
-                    namespace=instance_namespace,
+            if cached_image is not None:
+                return cached_image, "memory"
+
+            cache_path = None
+            cache_root = os.environ.get("MINIMACHINE_USER_NAMESPACE_CACHE_DIR")
+            if cache_root:
+                cache_path = Path(cache_root) / (
+                    f"{payload_hash}-{namespace}.pkl"
                 )
-                namespace_cache[namespace_key] = cached_image
-                namespace_cache_hit = 0
-            else:
-                namespace_cache_hit = 1
+                if cache_path.is_file():
+                    try:
+                        cached_image = load_user_image_cache(
+                            cache_path,
+                            payload_sha256=payload_hash,
+                        )
+                    except UserImageCacheError as exc:
+                        raise VMError(
+                            "cannot load MiniMachine userspace namespace cache: "
+                            f"{exc}"
+                        ) from exc
+                    namespace_cache[namespace_key] = cached_image
+                    print(
+                        "BOOT_EXEC_USER_NAMESPACE_DISK_CACHE "
+                        f"path={cache_path} payload={payload_hash[:16]} "
+                        f"namespace={namespace} hit=1",
+                        flush=True,
+                    )
+                    return cached_image, "disk"
+
+            cached_image = rebase_user_program_namespace(
+                base_image,
+                namespace=namespace,
+            )
+            namespace_cache[namespace_key] = cached_image
+            if cache_path is not None:
+                save_user_image_cache(
+                    cached_image,
+                    cache_path,
+                    payload_sha256=payload_hash,
+                )
+                print(
+                    "BOOT_EXEC_USER_NAMESPACE_DISK_CACHE "
+                    f"path={cache_path} payload={payload_hash[:16]} "
+                    f"namespace={namespace} hit=0",
+                    flush=True,
+                )
+            return cached_image, "rebase"
+
+        if instance_namespace is not None:
+            cached_image, namespace_cache_source = load_or_build_namespace_image(
+                user_image,
+                instance_namespace,
+            )
             user_image = cached_image
             print(
                 "BOOT_EXEC_USER_NAMESPACE_CACHE "
                 f"payload={payload_hash[:16]} namespace={instance_namespace} "
-                f"hit={namespace_cache_hit} entries={len(namespace_cache)}",
+                f"source={namespace_cache_source} entries={len(namespace_cache)}",
                 flush=True,
             )
         elif not reuse_instance and len(user_image.functions) > 1:
@@ -4443,18 +4488,19 @@ def linux_ecall(vm, args: tuple[int, ...]):
                 instance_namespace = (
                     f"exec_{current_task:x}_{payload_hash[:12]}"
                 )
-                namespace_key = (payload_hash, instance_namespace)
-                user_image = rebase_user_program_namespace(
-                    user_image,
-                    namespace=instance_namespace,
+                user_image, namespace_cache_source = (
+                    load_or_build_namespace_image(
+                        user_image,
+                        instance_namespace,
+                    )
                 )
-                namespace_cache[namespace_key] = user_image
                 print(
                     "BOOT_EXEC_USER_INSTANCE_NAMESPACE "
                     f"task=0x{current_task:x} "
                     f"payload={payload_hash[:16]} "
                     f"namespace={instance_namespace} "
-                    f"collisions={len(collisions)}",
+                    f"collisions={len(collisions)} "
+                    f"source={namespace_cache_source}",
                     flush=True,
                 )
 
