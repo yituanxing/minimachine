@@ -1491,45 +1491,44 @@ class NativeVM(VM):
         self.ip = int(ip)
 
     def host_profile_summary(self, *, limit: int = 24) -> tuple[str, ...]:
-        if not self._host_profile_enabled:
-            return ()
-        rows = sorted(
-            self._host_profile_seconds,
-            key=lambda name: (
-                -self._host_profile_seconds[name],
-                -self._host_profile_counts.get(name, 0),
-                name,
-            ),
-        )
-        lines = [
-            "BOOT_EXEC_NATIVE_HOST_PROFILE "
-            f"calls={self._host_profile_total_calls} "
-            f"seconds={self._host_profile_total_seconds:.6f} "
-            f"symbols={len(rows)}"
-        ]
-        for name in rows[:max(0, limit)]:
-            count = self._host_profile_counts.get(name, 0)
-            seconds = self._host_profile_seconds.get(name, 0.0)
-            lines.append(
-                "BOOT_EXEC_NATIVE_HOST_PROFILE_SYMBOL "
-                f"name={name} calls={count} seconds={seconds:.6f} "
-                f"avg_us={(seconds / count * 1_000_000) if count else 0.0:.3f}"
-            )
-        return tuple(lines)
+        lines: list[str] = []
 
-    def host_profile_summary(self) -> tuple[str, ...]:
-        base = super().host_profile_summary()
-        if not getattr(self, "_profile_host", False):
-            return base
-        native_ms = self._native_profile_c_ns / 1_000_000
-        line = (
-            "BOOT_EXEC_NATIVE_PROFILE "
-            f"run_calls={self._native_profile_run_calls} "
-            f"host_returns={self._native_profile_host_returns} "
-            f"watch_returns={self._native_profile_watch_returns} "
-            f"c_run_ms={native_ms:.3f}"
-        )
-        return (line,) + tuple(base)
+        if getattr(self, "_profile_host", False):
+            native_ms = self._native_profile_c_ns / 1_000_000
+            lines.append(
+                "BOOT_EXEC_NATIVE_PROFILE "
+                f"run_calls={self._native_profile_run_calls} "
+                f"host_returns={self._native_profile_host_returns} "
+                f"watch_returns={self._native_profile_watch_returns} "
+                f"c_run_ms={native_ms:.3f}"
+            )
+            lines.extend(super().host_profile_summary())
+
+        if self._host_profile_enabled:
+            rows = sorted(
+                self._host_profile_seconds,
+                key=lambda name: (
+                    -self._host_profile_seconds[name],
+                    -self._host_profile_counts.get(name, 0),
+                    name,
+                ),
+            )
+            lines.append(
+                "BOOT_EXEC_NATIVE_HOST_PROFILE "
+                f"calls={self._host_profile_total_calls} "
+                f"seconds={self._host_profile_total_seconds:.6f} "
+                f"symbols={len(rows)}"
+            )
+            for name in rows[:max(0, limit)]:
+                count = self._host_profile_counts.get(name, 0)
+                seconds = self._host_profile_seconds.get(name, 0.0)
+                lines.append(
+                    "BOOT_EXEC_NATIVE_HOST_PROFILE_SYMBOL "
+                    f"name={name} calls={count} seconds={seconds:.6f} "
+                    f"avg_us={(seconds / count * 1_000_000) if count else 0.0:.3f}"
+                )
+
+        return tuple(lines)
 
     def run(self, *, max_steps: int = 1_000_000) -> None:
         native_limit = MASK64 if max_steps <= 0 else max_steps
