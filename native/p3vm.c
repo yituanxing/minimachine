@@ -63,6 +63,7 @@
 #define MM_INTR_MUL   8
 #define MM_INTR_ICMP  9
 #define MM_INTR_ALLOCA 10
+#define MM_INTR_FREE   11
 
 #define MM_IPRED_EQ   1
 #define MM_IPRED_NE   2
@@ -156,6 +157,9 @@ typedef struct {
     uint64_t halt_code;
     uint64_t heap_next;
     uint64_t stack_top;
+    uint64_t *freed_ptrs;
+    size_t freed_count;
+    size_t freed_capacity;
 
     MMPage *pages[MM_BUCKETS];
 #ifdef MM_DIRECT_PAGES
@@ -601,6 +605,26 @@ static int alloc_bytes_native(MMVM *vm,
     return 1;
 }
 
+static int record_freed_ptr(MMVM *vm, uint64_t ptr) {
+    if (!vm || ptr == 0)
+        return 1;
+    if (vm->freed_count == vm->freed_capacity) {
+        size_t next_capacity = vm->freed_capacity ? vm->freed_capacity * 2 : 256;
+        if (next_capacity < vm->freed_capacity)
+            return 0;
+        uint64_t *next = (uint64_t *)realloc(
+            vm->freed_ptrs, next_capacity * sizeof(*next)
+        );
+        if (!next)
+            return 0;
+        vm->freed_ptrs = next;
+        vm->freed_capacity = next_capacity;
+    }
+    vm->freed_ptrs[vm->freed_count++] = ptr;
+    return 1;
+}
+
+
 static int execute_host_intrinsic(MMVM *vm,
                                   const MMHostIntrinsic *intr,
                                   uint64_t *ret_pc_out) {
@@ -626,6 +650,15 @@ static int execute_host_intrinsic(MMVM *vm,
         if (!alloc_bytes_native(vm, size, align, &value))
             return 0;
         goto intrinsic_result;
+    }
+
+    if (intr->op == MM_INTR_FREE) {
+        if (argc != 1 || expected != 0)
+            return 0;
+        uint64_t ptr = mem_read(vm, arg_base, 64);
+        if (!record_freed_ptr(vm, ptr))
+            return 0;
+        goto intrinsic_return;
     }
 
     unsigned bits = intr->bits;
@@ -693,6 +726,7 @@ intrinsic_result:
     if (vm->oom)
         return 0;
 
+intrinsic_return:
     uint64_t caller_sp = mem_read(vm, vm->sp + MM_ABI_CALLER_SP, 64);
     uint64_t ret_pc = mem_read(vm, vm->sp + MM_ABI_RET_PC, 64);
     vm->sp = caller_sp;
@@ -842,11 +876,25 @@ void mm_vm_destroy(MMVM *vm) {
     clear_pages(vm);
     free(vm->watch_codes);
     free(vm->host_intrinsics);
+    free(vm->freed_ptrs);
 #ifdef MM_DIRECT_PAGES
     free(vm->direct_pages);
 #endif
     free(vm->segments);
     free(vm);
+}
+
+size_t mm_vm_freed_count(MMVM *vm) {
+    return vm ? vm->freed_count : 0;
+}
+
+const uint64_t *mm_vm_freed_data(MMVM *vm) {
+    return (vm && vm->freed_count) ? vm->freed_ptrs : NULL;
+}
+
+void mm_vm_clear_freed(MMVM *vm) {
+    if (vm)
+        vm->freed_count = 0;
 }
 
 int mm_vm_load_bytes(MMVM *vm,

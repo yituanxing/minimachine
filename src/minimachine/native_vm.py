@@ -48,6 +48,7 @@ MM_INTR_ADD = 7
 MM_INTR_MUL = 8
 MM_INTR_ICMP = 9
 MM_INTR_ALLOCA = 10
+MM_INTR_FREE = 11
 
 MM_IPRED_EQ = 1
 MM_IPRED_NE = 2
@@ -81,6 +82,12 @@ def _native_local_targets_enabled() -> bool:
 def _native_host_intrinsics_enabled() -> bool:
     return os.environ.get(
         "MINIMACHINE_NATIVE_HOST_INTRINSICS", "1"
+    ).lower() not in {"0", "false", "no", "off", ""}
+
+
+def _native_free_intrinsic_enabled() -> bool:
+    return os.environ.get(
+        "MINIMACHINE_NATIVE_FREE_INTRINSIC", "0"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
@@ -252,6 +259,12 @@ def _load_library():
         ctypes.POINTER(ctypes.c_uint64),
     ]
     lib.mm_vm_alloc_bytes.restype = ctypes.c_int
+    lib.mm_vm_freed_count.argtypes = [ctypes.c_void_p]
+    lib.mm_vm_freed_count.restype = ctypes.c_size_t
+    lib.mm_vm_freed_data.argtypes = [ctypes.c_void_p]
+    lib.mm_vm_freed_data.restype = ctypes.POINTER(ctypes.c_uint64)
+    lib.mm_vm_clear_freed.argtypes = [ctypes.c_void_p]
+    lib.mm_vm_clear_freed.restype = None
     lib.mm_vm_load_bytes.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_uint64),
@@ -651,6 +664,19 @@ class NativeVM(VM):
         self._sync_python_heap_state()
         return int(address.value)
 
+    def _sync_native_frees(self) -> None:
+        count = int(self._lib.mm_vm_freed_count(self._handle))
+        if count == 0:
+            return
+        data = self._lib.mm_vm_freed_data(self._handle)
+        if not data:
+            raise VMError("native free queue is unavailable")
+        allocations = getattr(self, "user_allocations", None)
+        if allocations is not None:
+            for index in range(count):
+                allocations.pop(int(data[index]), None)
+        self._lib.mm_vm_clear_freed(self._handle)
+
     @staticmethod
     def _native_intrinsic_for_symbol(symbol: str) -> CHostIntrinsic:
         out = CHostIntrinsic()
@@ -659,6 +685,13 @@ class NativeVM(VM):
 
         if symbol == "__mm_alloca":
             out.op = MM_INTR_ALLOCA
+            return out
+
+        if (
+            _native_free_intrinsic_enabled()
+            and (symbol == "__mm_user_ext_free" or symbol.endswith("_ext_free"))
+        ):
+            out.op = MM_INTR_FREE
             return out
 
         binary_ops = {
@@ -711,12 +744,15 @@ class NativeVM(VM):
         host_codes = sorted(self.program.host_code)
         array = (CHostIntrinsic * len(host_codes))()
         mapped = 0
+        free_mapped = 0
         for index, code in enumerate(host_codes):
             symbol = self.program.host_code[code]
             descriptor = self._native_intrinsic_for_symbol(symbol)
             array[index] = descriptor
             if descriptor.op != MM_INTR_NONE:
                 mapped += 1
+            if descriptor.op == MM_INTR_FREE:
+                free_mapped += 1
         if not self._lib.mm_vm_set_host_intrinsics(
             self._handle,
             array,
@@ -727,7 +763,8 @@ class NativeVM(VM):
         if _native_host_intrinsics_enabled():
             print(
                 "BOOT_EXEC_NATIVE_HOST_INTRINSICS "
-                f"mapped={mapped} hosts={len(host_codes)}",
+                f"mapped={mapped} hosts={len(host_codes)} "
+                f"free_mapped={free_mapped}",
                 flush=True,
             )
 
@@ -1578,6 +1615,7 @@ class NativeVM(VM):
             self.sp = int(result.sp)
             self.steps = int(result.steps)
             self._sync_python_heap_state()
+            self._sync_native_frees()
             self._sync_block(int(result.block_code), int(result.ip))
 
             if result.status == MM_STATUS_LIMIT:

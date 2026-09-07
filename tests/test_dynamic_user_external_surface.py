@@ -3,6 +3,7 @@ from __future__ import annotations
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
+import os
 import sys
 import struct
 import unittest
@@ -2035,6 +2036,54 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             (second_expected,),
         )
         self.assertEqual(vm.heap_next, second_expected + 32)
+
+
+    def test_native_vm_batches_dynamic_free_intrinsic_without_losing_bookkeeping(self):
+        ptr = 0x12345000
+        program = Program()
+
+        def should_not_run(_vm, _args):
+            raise AssertionError("free fell back to Python host callback")
+
+        program.register_service("__mm_exec_test_ext_free", should_not_run)
+        result = muir.Slot("result")
+        fn = muir.Function(
+            "__mm_native_free_caller",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Call(
+                            muir.Callee(symbol="__mm_exec_test_ext_free"),
+                            (muir.Imm(ptr),),
+                            None,
+                        ),
+                        muir.Mov(muir.Width.I64, result, muir.Imm(1)),
+                        muir.Ret(result),
+                    ],
+                )
+            ],
+            {"result"},
+        )
+        expanded, _ = expand_function(fn)
+        program.add_function(lower_function(expanded))
+
+        old = os.environ.get("MINIMACHINE_NATIVE_FREE_INTRINSIC")
+        os.environ["MINIMACHINE_NATIVE_FREE_INTRINSIC"] = "1"
+        try:
+            vm = NativeVM(program)
+        finally:
+            if old is None:
+                os.environ.pop("MINIMACHINE_NATIVE_FREE_INTRINSIC", None)
+            else:
+                os.environ["MINIMACHINE_NATIVE_FREE_INTRINSIC"] = old
+
+        vm.user_allocations = {ptr: 64}
+        self.assertEqual(
+            vm.run_function("__mm_native_free_caller", result_count=1),
+            (1,),
+        )
+        self.assertNotIn(ptr, vm.user_allocations)
 
 if __name__ == "__main__":
     unittest.main()
