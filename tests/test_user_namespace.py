@@ -82,6 +82,12 @@ class UserNamespaceTests(unittest.TestCase):
             named,
             namespace="user_task_b91880",
         )
+        fast_rebased = rebase_user_program_namespace(
+            named,
+            namespace="user_task_b91880",
+            fast=True,
+        )
+        self.assertEqual(fast_rebased, rebased)
 
         self.assertEqual(rebased.entry, "__mm_user_task_b91880_main")
         self.assertEqual(
