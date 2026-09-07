@@ -116,6 +116,115 @@ def _rewrite_function(
     return rewritten
 
 
+def _rewrite_value_fast(value, mapping: dict[str, str]):
+    if isinstance(value, muir.Symbol):
+        name = mapping.get(value.name)
+        return value if name is None or name == value.name else muir.Symbol(name)
+    if isinstance(value, muir.Reloc):
+        symbol = mapping.get(value.symbol)
+        return (
+            value
+            if symbol is None or symbol == value.symbol
+            else muir.Reloc(symbol, value.addend)
+        )
+    if isinstance(value, muir.BlockAddr):
+        function = mapping.get(value.function)
+        return (
+            value
+            if function is None or function == value.function
+            else muir.BlockAddr(function, value.label)
+        )
+    return value
+
+
+def _rewrite_address_fast(address: muir.Address, mapping: dict[str, str]):
+    base = _rewrite_value_fast(address.base, mapping)
+    if base is address.base:
+        return address
+    return muir.Address(base, address.offset)
+
+
+def _rewrite_operand_fast(operand, mapping: dict[str, str]):
+    if isinstance(operand, p3.Mem):
+        address = _rewrite_address_fast(operand.address, mapping)
+        if address is operand.address:
+            return operand
+        return p3.Mem(address, operand.width)
+    return _rewrite_value_fast(operand, mapping)
+
+
+def _rewrite_target_fast(target: muir.Target, mapping: dict[str, str]):
+    if target.label is not None or target.slot is not None:
+        return target
+    if target.symbol is not None:
+        symbol = mapping.get(target.symbol)
+        if symbol is None or symbol == target.symbol:
+            return target
+        return muir.Target(symbol=symbol)
+    if target.address is not None:
+        address = _rewrite_address_fast(target.address, mapping)
+        if address is target.address:
+            return target
+        return muir.Target(address=address)
+    raise ValueError("cannot rewrite empty P3 target")
+
+
+def _rewrite_instruction_fast(inst, mapping: dict[str, str]):
+    if isinstance(inst, p3.Mov):
+        dst = _rewrite_operand_fast(inst.dst, mapping)
+        src = _rewrite_operand_fast(inst.src, mapping)
+        if dst is inst.dst and src is inst.src:
+            return inst
+        return p3.Mov(inst.width, dst, src, inst.extend, inst.src_bits)
+    if isinstance(inst, p3.Sub):
+        a = _rewrite_value_fast(inst.a, mapping)
+        b = _rewrite_value_fast(inst.b, mapping)
+        if a is inst.a and b is inst.b:
+            return inst
+        return p3.Sub(inst.width, inst.dst, a, b)
+    if isinstance(inst, p3.Br):
+        a = _rewrite_value_fast(inst.a, mapping)
+        b = _rewrite_value_fast(inst.b, mapping)
+        true_target = _rewrite_target_fast(inst.true_target, mapping)
+        false_target = _rewrite_target_fast(inst.false_target, mapping)
+        if (
+            a is inst.a
+            and b is inst.b
+            and true_target is inst.true_target
+            and false_target is inst.false_target
+        ):
+            return inst
+        return p3.Br(
+            inst.width,
+            inst.cond,
+            a,
+            b,
+            true_target,
+            false_target,
+        )
+    raise TypeError(f"unsupported P3 instruction: {type(inst).__name__}")
+
+
+def _rewrite_function_fast(
+    function: p3.Function,
+    mapping: dict[str, str],
+) -> p3.Function:
+    return p3.Function(
+        mapping.get(function.name, function.name),
+        [
+            p3.Block(
+                block.label,
+                [
+                    _rewrite_instruction_fast(inst, mapping)
+                    for inst in block.instructions
+                ],
+            )
+            for block in function.blocks
+        ],
+        set(function.frame_slots),
+    )
+
+
 def _rewrite_image_target(
     target: SymbolExpr | BlockExpr,
     mapping: dict[str, str],
@@ -179,6 +288,80 @@ def _rewrite_image(
     )
 
 
+def _rewrite_image_target_fast(
+    target: SymbolExpr | BlockExpr,
+    mapping: dict[str, str],
+):
+    if isinstance(target, SymbolExpr):
+        symbol = mapping.get(target.symbol)
+        if symbol is None or symbol == target.symbol:
+            return target
+        return SymbolExpr(symbol, target.addend)
+    function = mapping.get(target.function)
+    if function is None or function == target.function:
+        return target
+    return BlockExpr(function, target.label, target.addend)
+
+
+def _rewrite_image_fast(
+    image: ModuleImage | None,
+    mapping: dict[str, str],
+) -> ModuleImage | None:
+    if image is None:
+        return None
+
+    objects = []
+    for obj in image.objects:
+        name = mapping.get(obj.name, obj.name)
+        relocations = []
+        relocations_changed = False
+        for reloc in obj.relocations:
+            target = _rewrite_image_target_fast(reloc.target, mapping)
+            if target is reloc.target:
+                relocations.append(reloc)
+            else:
+                relocations_changed = True
+                relocations.append(Relocation(reloc.offset, reloc.size, target))
+        if name == obj.name and not relocations_changed:
+            objects.append(obj)
+        else:
+            objects.append(
+                ImageObject(
+                    name,
+                    obj.ty,
+                    obj.data,
+                    obj.align,
+                    obj.section,
+                    obj.constant,
+                    tuple(relocations),
+                )
+            )
+
+    aliases = []
+    for alias in image.aliases:
+        name = mapping.get(alias.name, alias.name)
+        symbol = mapping.get(alias.target.symbol, alias.target.symbol)
+        if name == alias.name and symbol == alias.target.symbol:
+            aliases.append(alias)
+        else:
+            aliases.append(
+                ImageAlias(name, SymbolExpr(symbol, alias.target.addend))
+            )
+
+    return ModuleImage(
+        objects=tuple(objects),
+        aliases=tuple(aliases),
+        external_data=tuple(
+            mapping.get(name, name) for name in image.external_data
+        ),
+        external_functions=tuple(
+            mapping.get(name, name) for name in image.external_functions
+        ),
+        skipped_linker_metadata=image.skipped_linker_metadata,
+        undef_bytes=image.undef_bytes,
+    )
+
+
 def namespace_user_program(
     program: UserProgramImage,
     *,
@@ -216,6 +399,7 @@ def rebase_user_program_namespace(
     program: UserProgramImage,
     *,
     namespace: str,
+    fast: bool = False,
 ) -> UserProgramImage:
     if (
         not namespace
@@ -271,13 +455,15 @@ def rebase_user_program_namespace(
         if name.startswith(old_external):
             mapping[name] = new_external + name[len(old_external):]
 
+    rewrite_function = _rewrite_function_fast if fast else _rewrite_function
+    rewrite_image = _rewrite_image_fast if fast else _rewrite_image
     return UserProgramImage(
         entry=mapping.get(program.entry, program.entry),
         functions=tuple(
-            _rewrite_function(function, mapping)
+            rewrite_function(function, mapping)
             for function in program.functions
         ),
-        image=_rewrite_image(program.image, mapping),
+        image=rewrite_image(program.image, mapping),
         entry_args=program.entry_args,
         runtime_helpers=program.runtime_helpers,
     )
