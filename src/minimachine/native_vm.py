@@ -87,7 +87,7 @@ def _native_host_intrinsics_enabled() -> bool:
 
 def _native_free_intrinsic_enabled() -> bool:
     return os.environ.get(
-        "MINIMACHINE_NATIVE_FREE_INTRINSIC", "0"
+        "MINIMACHINE_NATIVE_FREE_INTRINSIC", "1"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
