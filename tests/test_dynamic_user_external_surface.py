@@ -1990,5 +1990,51 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
             program.initial_memory.read(descriptor, 64),
         )
 
+
+    def test_native_vm_executes_alloca_intrinsic_and_keeps_heap_synchronized(self):
+        program = Program()
+
+        def should_not_run(_vm, _args):
+            raise AssertionError("__mm_alloca fell back to Python host callback")
+
+        program.register_service("__mm_alloca", should_not_run)
+        result = muir.Slot("result")
+        fn = muir.Function(
+            "__mm_native_alloca_caller",
+            [
+                muir.Block(
+                    "entry",
+                    [
+                        muir.Call(
+                            muir.Callee(symbol="__mm_alloca"),
+                            (muir.Imm(4), muir.Imm(8), muir.Imm(16)),
+                            result,
+                        ),
+                        muir.Ret(result),
+                    ],
+                )
+            ],
+            {"result"},
+        )
+        expanded, _ = expand_function(fn)
+        program.add_function(lower_function(expanded))
+
+        vm = NativeVM(program)
+        first_expected = (vm.heap_next + 15) & ~15
+        self.assertEqual(
+            vm.run_function("__mm_native_alloca_caller", result_count=1),
+            (first_expected,),
+        )
+        self.assertEqual(vm.heap_next, first_expected + 32)
+
+        external = vm.alloc_bytes(3, align=1)
+        self.assertEqual(external, first_expected + 32)
+        second_expected = (vm.heap_next + 15) & ~15
+        self.assertEqual(
+            vm.run_function("__mm_native_alloca_caller", result_count=1),
+            (second_expected,),
+        )
+        self.assertEqual(vm.heap_next, second_expected + 32)
+
 if __name__ == "__main__":
     unittest.main()

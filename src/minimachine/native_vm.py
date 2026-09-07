@@ -47,6 +47,7 @@ MM_INTR_ASHR = 6
 MM_INTR_ADD = 7
 MM_INTR_MUL = 8
 MM_INTR_ICMP = 9
+MM_INTR_ALLOCA = 10
 
 MM_IPRED_EQ = 1
 MM_IPRED_NE = 2
@@ -238,6 +239,19 @@ def _load_library():
         ctypes.c_size_t,
     ]
     lib.mm_vm_set_host_intrinsics.restype = ctypes.c_int
+    lib.mm_vm_set_heap_state.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64
+    ]
+    lib.mm_vm_set_heap_state.restype = None
+    lib.mm_vm_get_heap_next.argtypes = [ctypes.c_void_p]
+    lib.mm_vm_get_heap_next.restype = ctypes.c_uint64
+    lib.mm_vm_alloc_bytes.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_uint64),
+    ]
+    lib.mm_vm_alloc_bytes.restype = ctypes.c_int
     lib.mm_vm_load_bytes.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_uint64),
@@ -576,6 +590,7 @@ class NativeVM(VM):
         self._handle = handle
         memory = NativeMemory(self._lib, handle)
         super().__init__(program, memory, stack_top=stack_top)
+        self._sync_native_heap_state()
         self._host_intrinsic_packed = None
         self._install_native_host_intrinsics()
         self._program_shape = self._shape(program)
@@ -609,10 +624,41 @@ class NativeVM(VM):
                 pass
             self._handle = None
 
+    def _sync_native_heap_state(self) -> None:
+        self._lib.mm_vm_set_heap_state(
+            self._handle,
+            int(self.heap_next) & MASK64,
+            int(self.stack_top) & MASK64,
+        )
+
+    def _sync_python_heap_state(self) -> None:
+        self.heap_next = int(self._lib.mm_vm_get_heap_next(self._handle))
+
+    def alloc_bytes(self, size: int, *, align: int = 8) -> int:
+        if size < 0:
+            raise VMError("negative allocation size")
+        if align <= 0 or (align & (align - 1)):
+            raise VMError("allocation alignment must be a power of two")
+        self._sync_native_heap_state()
+        address = ctypes.c_uint64()
+        if not self._lib.mm_vm_alloc_bytes(
+            self._handle,
+            int(size),
+            int(align),
+            ctypes.byref(address),
+        ):
+            raise VMError("VM heap collided with stack")
+        self._sync_python_heap_state()
+        return int(address.value)
+
     @staticmethod
     def _native_intrinsic_for_symbol(symbol: str) -> CHostIntrinsic:
         out = CHostIntrinsic()
         if not _native_host_intrinsics_enabled():
+            return out
+
+        if symbol == "__mm_alloca":
+            out.op = MM_INTR_ALLOCA
             return out
 
         binary_ops = {
@@ -1496,6 +1542,7 @@ class NativeVM(VM):
                 raise VMError(f"step limit exceeded: {native_limit}")
 
             self._ensure_program_current()
+            self._sync_native_heap_state()
             code = self._current_code()
             self._lib.mm_vm_set_state(
                 self._handle,
@@ -1531,6 +1578,7 @@ class NativeVM(VM):
                 result = self._lib.mm_vm_run(self._handle, batch_limit)
             self.sp = int(result.sp)
             self.steps = int(result.steps)
+            self._sync_python_heap_state()
             self._sync_block(int(result.block_code), int(result.ip))
 
             if result.status == MM_STATUS_LIMIT:
