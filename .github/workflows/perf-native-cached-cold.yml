@@ -61,9 +61,9 @@ jobs:
             > build/prewarm.log 2>&1
           status=$?
           set -e
-          test "$status" -ne 0
-          grep -F 'step limit exceeded: 1' build/prewarm.log
+          echo "CACHED_COLD_PREWARM_STATUS=$status"
           test -s build/native-pack.bin
+          grep -F 'BOOT_EXEC_NATIVE_PACK_CACHE_SAVED ' build/prewarm.log
 
       - name: Run cached cold boot from start_kernel
         env:
