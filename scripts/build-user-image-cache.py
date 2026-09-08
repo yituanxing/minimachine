@@ -27,6 +27,11 @@ def main() -> int:
     )
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--slim-metadata",
+        action="store_true",
+        help="drop P3 instruction bodies for native append-cache replay",
+    )
     args = parser.parse_args()
 
     blob = args.input.read_bytes()
@@ -51,11 +56,13 @@ def main() -> int:
         image,
         args.output,
         payload_sha256=digest,
+        slim_metadata=args.slim_metadata,
     )
     print(
         "USER_IMAGE_CACHE_BUILT "
         f"input={args.input} output={args.output} "
-        f"payload_sha256={digest} functions={len(image.functions)}"
+        f"payload_sha256={digest} functions={len(image.functions)} "
+        f"slim_metadata={int(args.slim_metadata)}"
     )
     return 0
 
