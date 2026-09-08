@@ -66,6 +66,7 @@
 #define MM_INTR_FREE   11
 #define MM_INTR_EXPECT 12
 #define MM_INTR_PTR_ADD_SCALED 13
+#define MM_INTR_ROR32 14
 
 #define MM_IPRED_EQ   1
 #define MM_IPRED_NE   2
@@ -677,6 +678,17 @@ static int execute_host_intrinsic(MMVM *vm,
         uint64_t base = mem_read(vm, arg_base, 64);
         uint64_t index = mem_read(vm, arg_base + 8, 64);
         value = base + index * (uint64_t)intr->imm;
+        goto intrinsic_result;
+    }
+
+    if (intr->op == MM_INTR_ROR32) {
+        if (argc != 2 || expected != 1)
+            return 0;
+        uint32_t word = (uint32_t)mem_read(vm, arg_base, 64);
+        unsigned shift = (unsigned)(mem_read(vm, arg_base + 8, 64) & 31u);
+        value = (uint64_t)(uint32_t)(
+            (word >> shift) | (word << ((32u - shift) & 31u))
+        );
         goto intrinsic_result;
     }
 
