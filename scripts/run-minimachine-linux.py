@@ -4607,7 +4607,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
             for function in functions:
                 verify_p3(function)
             for function in functions:
-                vm.program.add_function(function)
+                vm.program.add_function(function, verify=False)
             trace_user_external_descriptor(vm, "getcwd", "functions-added")
 
             if user_image.image is not None:
