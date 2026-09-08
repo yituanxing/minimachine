@@ -4681,6 +4681,10 @@ def user_syscall(vm, args: tuple[int, ...]):
     return result
 
 
+_LINUX_SEMANTIC_STACK_BYTES = 0x01000000
+_LINUX_SEMANTIC_STACK_START_GAP = 0x40000000
+
+
 def _linux_semantic_call_stack_top(vm, task: int, depth: int) -> int:
     stacks = getattr(vm, "linux_task_semantic_stacks", None)
     if stacks is None:
