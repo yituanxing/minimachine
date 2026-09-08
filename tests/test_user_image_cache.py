@@ -28,6 +28,55 @@ class UserImageCacheTests(unittest.TestCase):
         payload = pack_user_program(image)
         return payload, unpack_user_image(payload)
 
+    def test_slim_metadata_cache_preserves_link_shape(self):
+        payload, image = self._payload()
+        digest = hashlib.sha256(payload).hexdigest()
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-slim.pkl"
+            save_user_image_cache(
+                image,
+                path,
+                payload_sha256=digest,
+                slim_metadata=True,
+            )
+            loaded = load_user_image_cache(
+                path,
+                payload_sha256=digest,
+                require_slim_metadata=True,
+            )
+            with self.assertRaises(UserImageCacheError):
+                load_user_image_cache(
+                    path,
+                    payload_sha256=digest,
+                    require_slim_metadata=False,
+                )
+            self.assertEqual(loaded.entry, image.entry)
+            self.assertEqual(
+                [fn.name for fn in loaded.functions],
+                [fn.name for fn in image.functions],
+            )
+            self.assertEqual(
+                [
+                    [block.label for block in fn.blocks]
+                    for fn in loaded.functions
+                ],
+                [
+                    [block.label for block in fn.blocks]
+                    for fn in image.functions
+                ],
+            )
+            self.assertEqual(
+                [fn.frame_slots for fn in loaded.functions],
+                [fn.frame_slots for fn in image.functions],
+            )
+            self.assertTrue(
+                all(
+                    not block.instructions
+                    for fn in loaded.functions
+                    for block in fn.blocks
+                )
+            )
+
     def test_round_trip_is_payload_bound(self):
         payload, image = self._payload()
         digest = hashlib.sha256(payload).hexdigest()
@@ -35,7 +84,11 @@ class UserImageCacheTests(unittest.TestCase):
             for name in ("user.pkl", "user.pkl.gz"):
                 path = Path(tmp) / name
                 save_user_image_cache(image, path, payload_sha256=digest)
-                loaded = load_user_image_cache(path, payload_sha256=digest)
+                loaded = load_user_image_cache(
+                    path,
+                    payload_sha256=digest,
+                    require_slim_metadata=False,
+                )
                 self.assertEqual(loaded.entry, image.entry)
                 self.assertEqual(len(loaded.functions), len(image.functions))
                 with self.assertRaises(UserImageCacheError):

@@ -27,7 +27,19 @@ def main() -> int:
     )
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--slim-metadata",
+        action="store_true",
+        help="drop P3 instruction bodies for native append-cache replay",
+    )
+    parser.add_argument(
+        "--slim-output",
+        type=Path,
+        help="also write a slim metadata cache from the same parsed image",
+    )
     args = parser.parse_args()
+    if args.slim_metadata and args.slim_output is not None:
+        raise SystemExit("--slim-metadata and --slim-output are mutually exclusive")
 
     blob = args.input.read_bytes()
     if len(blob) < BFLT_HEADER_SIZE:
@@ -51,11 +63,21 @@ def main() -> int:
         image,
         args.output,
         payload_sha256=digest,
+        slim_metadata=args.slim_metadata,
     )
+    if args.slim_output is not None:
+        save_user_image_cache(
+            image,
+            args.slim_output,
+            payload_sha256=digest,
+            slim_metadata=True,
+        )
     print(
         "USER_IMAGE_CACHE_BUILT "
         f"input={args.input} output={args.output} "
-        f"payload_sha256={digest} functions={len(image.functions)}"
+        f"payload_sha256={digest} functions={len(image.functions)} "
+        f"slim_metadata={int(args.slim_metadata)} "
+        f"slim_output={args.slim_output if args.slim_output is not None else '-'}"
     )
     return 0
 
