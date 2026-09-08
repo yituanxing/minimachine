@@ -165,10 +165,14 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         rebase_calls = 0
         original_rebase = runner.rebase_user_program_namespace
 
-        def counted_rebase(image, *, namespace):
+        def counted_rebase(image, *, namespace, fast=False):
             nonlocal rebase_calls
             rebase_calls += 1
-            return original_rebase(image, namespace=namespace)
+            return original_rebase(
+                image,
+                namespace=namespace,
+                fast=fast,
+            )
 
         runner.unpack_user_image = counted_unpack
         runner.rebase_user_program_namespace = counted_rebase
