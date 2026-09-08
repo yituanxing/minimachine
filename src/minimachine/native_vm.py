@@ -52,6 +52,8 @@ MM_INTR_FREE = 11
 MM_INTR_EXPECT = 12
 MM_INTR_PTR_ADD_SCALED = 13
 MM_INTR_ROR32 = 14
+MM_INTR_LOAD_I128 = 15
+MM_INTR_STORE_I128 = 16
 
 MM_IPRED_EQ = 1
 MM_IPRED_NE = 2
@@ -103,6 +105,12 @@ def _native_simple_intrinsics_enabled() -> bool:
 def _native_ror32_intrinsic_enabled() -> bool:
     return os.environ.get(
         "MINIMACHINE_NATIVE_ROR32_INTRINSIC", "1"
+    ).lower() not in {"0", "false", "no", "off", ""}
+
+
+def _native_i128_intrinsics_enabled() -> bool:
+    return os.environ.get(
+        "MINIMACHINE_NATIVE_I128_INTRINSICS", "0"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
@@ -716,6 +724,14 @@ class NativeVM(VM):
         ):
             out.op = MM_INTR_ROR32
             return out
+
+        if _native_i128_intrinsics_enabled():
+            if symbol == "__mm_load_i128":
+                out.op = MM_INTR_LOAD_I128
+                return out
+            if symbol == "__mm_store_i128":
+                out.op = MM_INTR_STORE_I128
+                return out
 
         if _native_simple_intrinsics_enabled():
             if re.fullmatch(
