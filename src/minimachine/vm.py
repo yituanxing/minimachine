@@ -121,8 +121,14 @@ class Program:
         self._next_data = start + size
         return start
 
-    def add_function(self, function: p3.Function) -> None:
-        verify_p3(function)
+    def add_function(
+        self,
+        function: p3.Function,
+        *,
+        verify: bool = True,
+    ) -> None:
+        if verify:
+            verify_p3(function)
         if function.name in self.functions or function.name in self.symbol_addresses:
             raise VMError(f"duplicate program symbol: {function.name}")
 
