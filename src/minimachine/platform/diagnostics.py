@@ -323,7 +323,3 @@ def probe_linux_memory_helpers(vm) -> None:
             f"end={vm.memory.read(zone_end, 64)}",
             flush=True,
         )
-
-
-_LINUX_SEMANTIC_STACK_BYTES = 0x01000000
-_LINUX_SEMANTIC_STACK_START_GAP = 0x40000000
