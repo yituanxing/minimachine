@@ -17,6 +17,14 @@ class NativeHotCacheError(RuntimeError):
     pass
 
 
+def _open_cache(path: Path, mode: str):
+    if path.suffix == ".gz":
+        if "w" in mode:
+            return gzip.open(path, mode, compresslevel=3)
+        return gzip.open(path, mode)
+    return path.open(mode)
+
+
 def native_hot_cache_fingerprint() -> str:
     root = Path(__file__).resolve().parent
     digest = hashlib.sha256()
@@ -92,7 +100,7 @@ def save_native_hot_cache(cache: ProgramCache, path: Path) -> None:
         "cache": slim_program_cache(cache),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(path, "wb", compresslevel=3) as handle:
+    with _open_cache(path, "wb") as handle:
         pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
@@ -102,7 +110,7 @@ def load_native_hot_cache(
     image_sha256: str,
 ) -> ProgramCache:
     try:
-        with gzip.open(path, "rb") as handle:
+        with _open_cache(path, "rb") as handle:
             payload = pickle.load(handle)
     except (OSError, EOFError, pickle.PickleError) as exc:
         raise NativeHotCacheError(
