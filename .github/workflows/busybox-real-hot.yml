@@ -236,6 +236,39 @@ jobs:
           test -s build/native-append-pack-cache/append-001.bin
           test "$(grep -c 'BOOT_EXEC_NATIVE_APPEND_CACHE_SAVED ' build/native-append-prewarm.log)" -ge 2
 
+      - name: Prewarm direct-syscall native append segments
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
+          MINIMACHINE_DIRECT_SYSCALL_FALLBACK: "1"
+          MINIMACHINE_DISABLE_GC: "1"
+        run: |
+          rm -rf build/native-append-pack-cache-direct
+          mkdir -p build/native-append-pack-cache-direct
+          set -o pipefail
+          set +e
+          echo 'exit' | \
+          timeout --signal=TERM 240 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --native-hot-cache-in build/linux-native-hot-cache.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-in cold/busybox-real-native-pack.bin \
+            --native-append-pack-cache-out-dir build/native-append-pack-cache-direct \
+            --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            > build/native-append-prewarm-direct.log 2>&1
+          status=${PIPESTATUS[1]}
+          set -e
+          echo "DIRECT_APPEND_PREWARM_STATUS=$status"
+          test -s build/native-append-pack-cache-direct/append-000.bin
+          test -s build/native-append-pack-cache-direct/append-001.bin
+          test "$(grep -c 'BOOT_EXEC_NATIVE_APPEND_CACHE_SAVED ' build/native-append-prewarm-direct.log)" -ge 2
+
       - name: Replay BusyBox direct-syscall control
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
@@ -298,7 +331,7 @@ jobs:
             --initramfs cold/busybox-real-init.cpio \
             --native-vm \
             --native-pack-cache-in cold/busybox-real-native-pack.bin \
-            --native-append-pack-cache-in-dir build/native-append-pack-cache \
+            --native-append-pack-cache-in-dir build/native-append-pack-cache-direct \
             --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
             --stop-on-panic \
             --max-steps 0 \
