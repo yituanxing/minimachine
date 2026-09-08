@@ -3,7 +3,7 @@ name: MiniMachine BusyBox Real Software Hot
 on:
   workflow_dispatch:
   push:
-    branches: [work/native-p3-vm, research/slim-user-image-cache]
+    branches: [work/native-p3-vm, research/slim-user-image-cache, research/native-expect-ptr-intrinsics]
     paths:
       - scripts/run-minimachine-linux.py
       - scripts/build-native-hot-cache.py
@@ -41,7 +41,7 @@ jobs:
           fetch-depth: 0
 
       - name: Validate userspace cache and namespace equivalence
-        run: python3 -m unittest tests.test_user_namespace tests.test_user_image_cache
+        run: python3 -m unittest tests.test_user_namespace tests.test_user_image_cache tests.test_native_intrinsics
 
       - name: Build native VM
         run: |
@@ -210,7 +210,9 @@ jobs:
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
           MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
-          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
+          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image-slim.pkl
+          MINIMACHINE_USER_IMAGE_CACHE_SLIM: "1"
+          MINIMACHINE_NATIVE_SIMPLE_INTRINSICS: "0"
           MINIMACHINE_DISABLE_GC: "1"
         run: |
           rm -rf build/native-append-pack-cache
@@ -239,7 +241,7 @@ jobs:
           test -s build/native-append-pack-cache/append-001.bin
           test "$(grep -c 'BOOT_EXEC_NATIVE_APPEND_CACHE_SAVED ' build/native-append-prewarm.log)" -ge 2
 
-      - name: Replay BusyBox full-cache control
+      - name: Replay simple-intrinsic control
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
           MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
@@ -256,7 +258,7 @@ jobs:
             echo 'echo MINIMACHINE_REAL_EXTERNAL_END'
             echo 'exit'
           } | \
-          /usr/bin/time -f 'SLIM_USER_AB_WALL variant=control wall=%e user=%U sys=%S rss_kb=%M' \
+          /usr/bin/time -f 'SIMPLE_INTR_AB_WALL variant=control wall=%e user=%U sys=%S rss_kb=%M' \
           timeout --signal=TERM 540 \
           python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
             --linker-contract configs/linux-6.6.143-minimachine-linker.json \
@@ -269,11 +271,11 @@ jobs:
             --stop-on-panic \
             --max-steps 0 \
             --progress-every 0 \
-            2>&1 | tee build/slim-user-control.log
+            2>&1 | tee build/simple-intr-control.log
           status=${PIPESTATUS[1]}
           set -e
-          echo "SLIM_USER_AB_STATUS variant=control status=$status" | tee -a build/slim-user-control.log
-          grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' build/slim-user-control.log
+          echo "SIMPLE_INTR_AB_STATUS variant=control status=$status" | tee -a build/simple-intr-control.log
+          grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' build/simple-intr-control.log
 
       - name: Replay real BusyBox init and shell
         env:
@@ -281,6 +283,7 @@ jobs:
           MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
           MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image-slim.pkl
           MINIMACHINE_USER_IMAGE_CACHE_SLIM: "1"
+          MINIMACHINE_NATIVE_SIMPLE_INTRINSICS: "1"
           MINIMACHINE_DISABLE_GC: "1"
         run: |
           set -o pipefail
@@ -311,30 +314,31 @@ jobs:
           set -e
           echo "BUSYBOX_HOT_STATUS=$status" | tee -a build/busybox-hot.log
 
-      - name: Report slim userspace cache A/B
+      - name: Report simple native intrinsic A/B
         run: |
           python3 - <<'PY'
           import re
           from pathlib import Path
 
-          control = Path("build/slim-user-control.log").read_text()
+          control = Path("build/simple-intr-control.log").read_text()
           candidate = Path("build/busybox-hot.log").read_text()
-          cm = re.search(r"SLIM_USER_AB_WALL variant=control wall=([0-9.]+)", control)
+          cm = re.search(r"SIMPLE_INTR_AB_WALL variant=control wall=([0-9.]+)", control)
           nm = re.search(r"BUSYBOX_HOT_WALL=([0-9.]+)", candidate)
           if not cm or not nm:
-              raise SystemExit("missing slim userspace cache A/B timing")
+              raise SystemExit("missing simple native intrinsic A/B timing")
           cv = float(cm.group(1))
           nv = float(nm.group(1))
           delta = nv - cv
           pct = delta * 100.0 / cv
           print(
-              f"SLIM_USER_AB_SUMMARY control={cv:.3f} candidate={nv:.3f} "
+              f"SIMPLE_INTR_AB_SUMMARY control={cv:.3f} candidate={nv:.3f} "
               f"delta_s={delta:.3f} delta_pct={pct:.2f}"
           )
           PY
+          grep -F 'BOOT_EXEC_USER_SLIM_CACHE ' build/simple-intr-control.log
           grep -F 'BOOT_EXEC_USER_SLIM_CACHE ' build/busybox-hot.log
-          grep -F 'BOOT_EXEC_USER_IMAGE_DISK_CACHE ' build/slim-user-control.log | head -1
-          grep -F 'BOOT_EXEC_USER_IMAGE_DISK_CACHE ' build/busybox-hot.log | head -1
+          grep -F 'BOOT_EXEC_NATIVE_HOST_INTRINSICS ' build/simple-intr-control.log | tail -2
+          grep -F 'BOOT_EXEC_NATIVE_HOST_INTRINSICS ' build/busybox-hot.log | tail -2
 
       - name: Report BusyBox hot frontier
         if: always()
