@@ -7,6 +7,8 @@ on:
       - .github/workflows/perf-native-host-profile.yml
       - native/p3vm.c
       - src/minimachine/native_vm.py
+      - src/minimachine/user_bundle.py
+      - scripts/run-minimachine-linux.py
   workflow_dispatch:
 
 permissions:
