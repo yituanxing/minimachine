@@ -4604,10 +4604,10 @@ def linux_ecall(vm, args: tuple[int, ...]):
                         + ",".join(collisions[:8])
                     )
 
-            # Program.add_function() performs the canonical P3 verification.
-            # Do not pre-verify the same function list here a second time.
             for function in functions:
-                vm.program.add_function(function)
+                verify_p3(function)
+            for function in functions:
+                vm.program.add_function(function, verify=False)
             trace_user_external_descriptor(vm, "getcwd", "functions-added")
 
             if user_image.image is not None:
