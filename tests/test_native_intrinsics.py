@@ -8,6 +8,7 @@ from src.minimachine.native_vm import (
     MM_INTR_EXPECT,
     MM_INTR_NONE,
     MM_INTR_PTR_ADD_SCALED,
+    MM_INTR_ROR32,
     NativeVM,
 )
 
@@ -30,6 +31,37 @@ class NativeIntrinsicMappingTests(unittest.TestCase):
                     "__mm_ptr_add_scaled_8"
                 ).op,
                 MM_INTR_NONE,
+            )
+
+    def test_ror32_intrinsic_mapping_is_independent(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MINIMACHINE_NATIVE_ROR32_INTRINSIC": "0",
+                "MINIMACHINE_NATIVE_SIMPLE_INTRINSICS": "1",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                NativeVM._native_intrinsic_for_symbol(
+                    "__mm_fast_ror32"
+                ).op,
+                MM_INTR_NONE,
+            )
+
+        with patch.dict(
+            os.environ,
+            {
+                "MINIMACHINE_NATIVE_ROR32_INTRINSIC": "1",
+                "MINIMACHINE_NATIVE_SIMPLE_INTRINSICS": "1",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                NativeVM._native_intrinsic_for_symbol(
+                    "__mm_fast_ror32"
+                ).op,
+                MM_INTR_ROR32,
             )
 
     def test_expect_and_scaled_pointer_map_to_native_descriptors(self):
