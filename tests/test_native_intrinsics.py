@@ -9,6 +9,8 @@ from src.minimachine.native_vm import (
     MM_INTR_NONE,
     MM_INTR_PTR_ADD_SCALED,
     MM_INTR_ROR32,
+    MM_INTR_LOAD_I128,
+    MM_INTR_STORE_I128,
     NativeVM,
 )
 
@@ -71,6 +73,43 @@ class NativeIntrinsicMappingTests(unittest.TestCase):
                     "__mm_fast_ror32"
                 ).op,
                 MM_INTR_ROR32,
+            )
+
+    def test_i128_intrinsic_mapping_is_opt_in(self):
+        with patch.dict(
+            os.environ,
+            {"MINIMACHINE_NATIVE_I128_INTRINSICS": "0"},
+            clear=False,
+        ):
+            self.assertEqual(
+                NativeVM._native_intrinsic_for_symbol(
+                    "__mm_load_i128"
+                ).op,
+                MM_INTR_NONE,
+            )
+            self.assertEqual(
+                NativeVM._native_intrinsic_for_symbol(
+                    "__mm_store_i128"
+                ).op,
+                MM_INTR_NONE,
+            )
+
+        with patch.dict(
+            os.environ,
+            {"MINIMACHINE_NATIVE_I128_INTRINSICS": "1"},
+            clear=False,
+        ):
+            self.assertEqual(
+                NativeVM._native_intrinsic_for_symbol(
+                    "__mm_load_i128"
+                ).op,
+                MM_INTR_LOAD_I128,
+            )
+            self.assertEqual(
+                NativeVM._native_intrinsic_for_symbol(
+                    "__mm_store_i128"
+                ).op,
+                MM_INTR_STORE_I128,
             )
 
     def test_expect_and_scaled_pointer_map_to_native_descriptors(self):
