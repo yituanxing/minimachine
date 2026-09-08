@@ -4780,8 +4780,32 @@ def user_syscall(vm, args: tuple[int, ...]):
             vm.trace_user_read_memcpy_code = p3_entry
             vm.set_watch_codes(read_watch_previous + (p3_entry,))
 
+    direct_fallback_enabled = os.environ.get(
+        "MINIMACHINE_DIRECT_SYSCALL_FALLBACK",
+        "",
+    ).lower() in {"1", "true", "yes", "on"}
+    minimachine_syscall_nrs = {63, 64, 93, 94, 221}
+    skip_minimachine_dispatch = (
+        direct_fallback_enabled
+        and nr not in minimachine_syscall_nrs
+    )
+    if skip_minimachine_dispatch:
+        skipped = int(
+            getattr(vm, "user_syscall_direct_fallback_count", 0)
+        ) + 1
+        vm.user_syscall_direct_fallback_count = skipped
+        if skipped == 1:
+            print(
+                "BOOT_EXEC_USER_SYSCALL_DIRECT_FALLBACK "
+                f"enabled=1 first_nr={nr}",
+                flush=True,
+            )
+
     try:
-        if "minimachine_user_syscall" in vm.program.functions:
+        if (
+            not skip_minimachine_dispatch
+            and "minimachine_user_syscall" in vm.program.functions
+        ):
             call_result = _call_linux_function_preserving_control(
                 vm,
                 "minimachine_user_syscall",
