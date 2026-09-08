@@ -3,9 +3,10 @@ name: MiniMachine BusyBox Real Software Hot
 on:
   workflow_dispatch:
   push:
-    branches: [work/native-p3-vm, research/slim-user-image-cache, research/native-expect-ptr-intrinsics]
+    branches: [work/native-p3-vm, research/native-expect-ptr-intrinsics]
     paths:
       - scripts/run-minimachine-linux.py
+      - native/p3vm.c
       - scripts/build-native-hot-cache.py
       - src/minimachine/native_hot_cache.py
       - src/minimachine/native_vm.py
