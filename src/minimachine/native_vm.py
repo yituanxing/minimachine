@@ -49,6 +49,8 @@ MM_INTR_MUL = 8
 MM_INTR_ICMP = 9
 MM_INTR_ALLOCA = 10
 MM_INTR_FREE = 11
+MM_INTR_EXPECT = 12
+MM_INTR_PTR_ADD_SCALED = 13
 
 MM_IPRED_EQ = 1
 MM_IPRED_NE = 2
@@ -88,6 +90,12 @@ def _native_host_intrinsics_enabled() -> bool:
 def _native_free_intrinsic_enabled() -> bool:
     return os.environ.get(
         "MINIMACHINE_NATIVE_FREE_INTRINSIC", "1"
+    ).lower() not in {"0", "false", "no", "off", ""}
+
+
+def _native_simple_intrinsics_enabled() -> bool:
+    return os.environ.get(
+        "MINIMACHINE_NATIVE_SIMPLE_INTRINSICS", "0"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
@@ -174,6 +182,7 @@ class CHostIntrinsic(ctypes.Structure):
         ("bits", ctypes.c_uint8),
         ("pred", ctypes.c_uint8),
         ("_pad", ctypes.c_uint8),
+        ("imm", ctypes.c_uint32),
     ]
 
 
@@ -693,6 +702,22 @@ class NativeVM(VM):
         ):
             out.op = MM_INTR_FREE
             return out
+
+        if _native_simple_intrinsics_enabled():
+            if re.fullmatch(
+                r"__mm_llvm_expect(?:_with_probability)?_.+",
+                symbol,
+            ):
+                out.op = MM_INTR_EXPECT
+                return out
+
+            match = re.fullmatch(r"__mm_ptr_add_scaled_(\d+)", symbol)
+            if match:
+                scale = int(match.group(1))
+                if 0 <= scale <= 0xFFFFFFFF:
+                    out.op = MM_INTR_PTR_ADD_SCALED
+                    out.imm = scale
+                return out
 
         binary_ops = {
             "and": MM_INTR_AND,
