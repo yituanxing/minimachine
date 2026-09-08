@@ -41,6 +41,7 @@ from src.minimachine.layout import DataLayout
 from src.minimachine.kallsyms import install_p3_kallsyms
 from src.minimachine.linker import LinkerContract
 from src.minimachine.lower_p3 import lower_function
+from src.minimachine.platform.traps import arch_escapes, register_traps, trap_reasons
 from src.minimachine.program_cache import (
     ProgramCache,
     ProgramCacheError,
@@ -66,42 +67,6 @@ from src.minimachine.user_image_cache import (
 )
 from src.minimachine.verify import verify_muir, verify_p3
 from src.minimachine.vm import HOST_CONTROL_TRANSFER, Program, VMError
-
-
-def trap_symbol(reason: str) -> str:
-    tag = re.sub(r"[^A-Za-z0-9_]+", "_", reason).strip("_")
-    return "__mm_trap_" + (tag or "unknown")
-
-
-def arch_escapes(function: muir.Function):
-    return [
-        inst
-        for block in function.blocks
-        for inst in block.instructions
-        if isinstance(inst, muir.ArchEscape)
-    ]
-
-
-def trap_reasons(function: muir.Function):
-    return {
-        inst.reason
-        for block in function.blocks
-        for inst in block.instructions
-        if isinstance(inst, muir.Trap)
-    }
-
-
-def register_traps(program: Program, reasons: set[str]) -> None:
-    def callback(reason: str):
-        def trap(_vm, _args):
-            raise VMError(f"MiniMachine trap reached: {reason}")
-        return trap
-
-    for reason in sorted(reasons):
-        symbol = trap_symbol(reason)
-        if symbol not in program.symbol_addresses:
-            program.register_service(symbol, callback(reason))
-
 
 
 def refresh_host_service_descriptors(vm) -> None:
