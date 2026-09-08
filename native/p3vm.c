@@ -67,6 +67,8 @@
 #define MM_INTR_EXPECT 12
 #define MM_INTR_PTR_ADD_SCALED 13
 #define MM_INTR_ROR32 14
+#define MM_INTR_LOAD_I128 15
+#define MM_INTR_STORE_I128 16
 
 #define MM_IPRED_EQ   1
 #define MM_IPRED_NE   2
@@ -690,6 +692,35 @@ static int execute_host_intrinsic(MMVM *vm,
             (word >> shift) | (word << ((32u - shift) & 31u))
         );
         goto intrinsic_result;
+    }
+
+    if (intr->op == MM_INTR_LOAD_I128) {
+        if (argc != 1 || expected != 1)
+            return 0;
+        uint64_t src = mem_read(vm, arg_base, 64);
+        uint64_t low = mem_read(vm, src, 64);
+        uint64_t high = mem_read(vm, src + 8, 64);
+        if (!alloc_bytes_native(vm, 16, 16, &value))
+            return 0;
+        mem_write(vm, value, 64, low);
+        mem_write(vm, value + 8, 64, high);
+        if (vm->oom)
+            return 0;
+        goto intrinsic_result;
+    }
+
+    if (intr->op == MM_INTR_STORE_I128) {
+        if (argc != 2 || expected != 0)
+            return 0;
+        uint64_t dst = mem_read(vm, arg_base, 64);
+        uint64_t encoded = mem_read(vm, arg_base + 8, 64);
+        uint64_t low = mem_read(vm, encoded, 64);
+        uint64_t high = mem_read(vm, encoded + 8, 64);
+        mem_write(vm, dst, 64, low);
+        mem_write(vm, dst + 8, 64, high);
+        if (vm->oom)
+            return 0;
+        goto intrinsic_return;
     }
 
     unsigned bits = intr->bits;
