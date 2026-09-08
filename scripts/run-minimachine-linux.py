@@ -4353,9 +4353,24 @@ def linux_ecall(vm, args: tuple[int, ...]):
         if image_cache is None:
             image_cache = {}
             vm.user_payload_image_cache = image_cache
+        slim_user_cache = os.environ.get(
+            "MINIMACHINE_USER_IMAGE_CACHE_SLIM",
+            "",
+        ).lower() in {"1", "true", "yes", "on"}
         user_image = image_cache.get(payload_hash)
         if user_image is None:
             disk_cache_path = os.environ.get("MINIMACHINE_USER_IMAGE_CACHE")
+            if slim_user_cache:
+                append_cache_dir = getattr(
+                    vm,
+                    "_append_pack_cache_in_dir",
+                    None,
+                )
+                if not disk_cache_path or append_cache_dir is None:
+                    raise VMError(
+                        "slim userspace image cache requires a disk cache "
+                        "and native append pack cache input"
+                    )
             if disk_cache_path:
                 try:
                     user_image = load_user_image_cache(
@@ -4611,8 +4626,24 @@ def linux_ecall(vm, args: tuple[int, ...]):
                         + ",".join(collisions[:8])
                     )
 
-            for function in functions:
-                verify_p3(function)
+            if slim_user_cache:
+                if any(
+                    block.instructions
+                    for function in functions
+                    for block in function.blocks
+                ):
+                    raise VMError(
+                        "slim userspace image cache unexpectedly contains "
+                        "P3 instruction bodies"
+                    )
+                print(
+                    "BOOT_EXEC_USER_SLIM_CACHE "
+                    f"payload={payload_hash[:16]} functions={len(functions)}",
+                    flush=True,
+                )
+            else:
+                for function in functions:
+                    verify_p3(function)
             for function in functions:
                 vm.program.add_function(function, verify=False)
             trace_user_external_descriptor(vm, "getcwd", "functions-added")
