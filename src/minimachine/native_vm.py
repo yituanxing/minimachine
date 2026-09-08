@@ -102,7 +102,7 @@ def _native_simple_intrinsics_enabled() -> bool:
 
 def _native_ror32_intrinsic_enabled() -> bool:
     return os.environ.get(
-        "MINIMACHINE_NATIVE_ROR32_INTRINSIC", "0"
+        "MINIMACHINE_NATIVE_ROR32_INTRINSIC", "1"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
