@@ -243,7 +243,8 @@ jobs:
           MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
           MINIMACHINE_DISABLE_GC: "1"
         run: |
-          git show HEAD^:scripts/run-minimachine-linux.py > build/run-control.py
+          base="$(git merge-base HEAD origin/work/native-p3-vm)"
+          git show "$base":scripts/run-minimachine-linux.py > build/run-control.py
           set -o pipefail
           set +e
           {
