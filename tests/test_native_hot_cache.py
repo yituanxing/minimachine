@@ -92,13 +92,14 @@ class NativeHotCacheTests(unittest.TestCase):
     def test_round_trip_checks_linked_image(self):
         cache = self.cache()
         with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "native-hot.pkl.gz"
-            save_native_hot_cache(cache, path)
-            restored = load_native_hot_cache(path, image_sha256="abc")
-            self.assertEqual(restored.function_count, 1)
-            self.assertEqual(restored.task_sched_class_offset, 88)
-            with self.assertRaises(NativeHotCacheError):
-                load_native_hot_cache(path, image_sha256="different")
+            for name in ("native-hot.pkl.gz", "native-hot.pkl"):
+                path = Path(td) / name
+                save_native_hot_cache(cache, path)
+                restored = load_native_hot_cache(path, image_sha256="abc")
+                self.assertEqual(restored.function_count, 1)
+                self.assertEqual(restored.task_sched_class_offset, 88)
+                with self.assertRaises(NativeHotCacheError):
+                    load_native_hot_cache(path, image_sha256="different")
 
 
 if __name__ == "__main__":
