@@ -42,7 +42,14 @@ class UserImageCacheTests(unittest.TestCase):
             loaded = load_user_image_cache(
                 path,
                 payload_sha256=digest,
+                require_slim_metadata=True,
             )
+            with self.assertRaises(UserImageCacheError):
+                load_user_image_cache(
+                    path,
+                    payload_sha256=digest,
+                    require_slim_metadata=False,
+                )
             self.assertEqual(loaded.entry, image.entry)
             self.assertEqual(
                 [fn.name for fn in loaded.functions],
@@ -77,7 +84,11 @@ class UserImageCacheTests(unittest.TestCase):
             for name in ("user.pkl", "user.pkl.gz"):
                 path = Path(tmp) / name
                 save_user_image_cache(image, path, payload_sha256=digest)
-                loaded = load_user_image_cache(path, payload_sha256=digest)
+                loaded = load_user_image_cache(
+                    path,
+                    payload_sha256=digest,
+                    require_slim_metadata=False,
+                )
                 self.assertEqual(loaded.entry, image.entry)
                 self.assertEqual(len(loaded.functions), len(image.functions))
                 with self.assertRaises(UserImageCacheError):
