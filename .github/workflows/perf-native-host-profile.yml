@@ -8,6 +8,8 @@ on:
       - native/p3vm.c
       - src/minimachine/native_vm.py
       - src/minimachine/user_bundle.py
+      - src/minimachine/user_image_cache.py
+      - scripts/build-user-image-cache.py
       - scripts/run-minimachine-linux.py
   workflow_dispatch:
 
@@ -83,7 +85,8 @@ jobs:
 
           python3 scripts/build-user-image-cache.py \
             busybox/busybox-multicall.bflt \
-            build/busybox-user-image.pkl
+            build/busybox-user-image.pkl \
+            --slim-output build/busybox-user-image-slim.pkl
 
           mkdir -p build/native-append-pack-cache
           export MINIMACHINE_USER_IMAGE_REFERENCE="$GITHUB_WORKSPACE/busybox/busybox-multicall.bflt"
@@ -112,7 +115,8 @@ jobs:
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
           MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
-          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
+          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image-slim.pkl
+          MINIMACHINE_USER_IMAGE_CACHE_SLIM: "1"
           MINIMACHINE_NATIVE_HOST_PROFILE: "1"
           MINIMACHINE_PROFILE_HOST: "1"
         run: |
@@ -141,6 +145,7 @@ jobs:
               --progress-every 0 \
               < build/commands.txt 2>&1 | tee build/host-profile.log
 
+          grep -F 'BOOT_EXEC_USER_SLIM_CACHE ' build/host-profile.log
           grep -F 'BOOT_EXEC_NATIVE_HOST_PROFILE ' build/host-profile.log
           grep -F 'BOOT_EXEC_NATIVE_HOST_PROFILE_SYMBOL ' build/host-profile.log
           grep -Fx 'MINIMACHINE_REAL_EXTERNAL_END' build/host-profile.log
