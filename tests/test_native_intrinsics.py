@@ -33,6 +33,15 @@ class NativeIntrinsicMappingTests(unittest.TestCase):
                 MM_INTR_NONE,
             )
 
+    def test_ror32_intrinsic_is_enabled_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                NativeVM._native_intrinsic_for_symbol(
+                    "__mm_fast_ror32"
+                ).op,
+                MM_INTR_ROR32,
+            )
+
     def test_ror32_intrinsic_mapping_is_independent(self):
         with patch.dict(
             os.environ,
