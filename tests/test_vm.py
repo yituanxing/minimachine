@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from src.minimachine import muir
 from src.minimachine.abi import expand_function
@@ -13,6 +14,28 @@ def machine(function: muir.Function):
 
 
 class VMTests(unittest.TestCase):
+    def test_add_function_can_skip_duplicate_verification(self):
+        fn = muir.Function(
+            "preverified",
+            [muir.Block("entry", [muir.Ret(muir.Imm(7))])],
+            set(),
+        )
+        p3_fn = machine(fn)
+
+        with patch("src.minimachine.vm.verify_p3") as verify:
+            program = Program()
+            program.add_function(p3_fn, verify=False)
+            verify.assert_not_called()
+        self.assertEqual(
+            program.new_vm().run_function("preverified", ()),
+            (7,),
+        )
+
+        with patch("src.minimachine.vm.verify_p3") as verify:
+            checked = Program()
+            checked.add_function(p3_fn)
+            verify.assert_called_once_with(p3_fn)
+
     def test_arguments_sub_and_branch_execute(self):
         fn = muir.Function(
             "eq64",
