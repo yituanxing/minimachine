@@ -64,6 +64,8 @@
 #define MM_INTR_ICMP  9
 #define MM_INTR_ALLOCA 10
 #define MM_INTR_FREE   11
+#define MM_INTR_EXPECT 12
+#define MM_INTR_PTR_ADD_SCALED 13
 
 #define MM_IPRED_EQ   1
 #define MM_IPRED_NE   2
@@ -135,6 +137,7 @@ typedef struct {
     uint8_t bits;
     uint8_t pred;
     uint8_t _pad;
+    uint32_t imm;
 } MMHostIntrinsic;
 
 typedef struct {
@@ -659,6 +662,22 @@ static int execute_host_intrinsic(MMVM *vm,
         if (!record_freed_ptr(vm, ptr))
             return 0;
         goto intrinsic_return;
+    }
+
+    if (intr->op == MM_INTR_EXPECT) {
+        if ((argc != 2 && argc != 3) || expected != 1)
+            return 0;
+        value = mem_read(vm, arg_base, 64);
+        goto intrinsic_result;
+    }
+
+    if (intr->op == MM_INTR_PTR_ADD_SCALED) {
+        if (argc != 2 || expected != 1)
+            return 0;
+        uint64_t base = mem_read(vm, arg_base, 64);
+        uint64_t index = mem_read(vm, arg_base + 8, 64);
+        value = base + index * (uint64_t)intr->imm;
+        goto intrinsic_result;
     }
 
     unsigned bits = intr->bits;
