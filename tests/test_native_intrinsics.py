@@ -13,7 +13,7 @@ from src.minimachine.native_vm import (
 
 
 class NativeIntrinsicMappingTests(unittest.TestCase):
-    def test_simple_intrinsics_are_opt_in_for_ab(self):
+    def test_simple_intrinsics_can_be_disabled_for_ab(self):
         with patch.dict(
             os.environ,
             {"MINIMACHINE_NATIVE_SIMPLE_INTRINSICS": "0"},
