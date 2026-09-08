@@ -4309,18 +4309,21 @@ def linux_ecall(vm, args: tuple[int, ...]):
             reference_payload = reference_payload[:reference_logical_size]
             guest_hash = hashlib.sha256(payload).hexdigest()
             reference_hash = hashlib.sha256(reference_payload).hexdigest()
-            mismatch = next(
-                (
-                    index
-                    for index, (guest_byte, reference_byte) in enumerate(
-                        zip(payload, reference_payload)
-                    )
-                    if guest_byte != reference_byte
-                ),
-                None,
-            )
-            if mismatch is None and len(payload) != len(reference_payload):
-                mismatch = min(len(payload), len(reference_payload))
+            if payload == reference_payload:
+                mismatch = None
+            else:
+                mismatch = next(
+                    (
+                        index
+                        for index, (guest_byte, reference_byte) in enumerate(
+                            zip(payload, reference_payload)
+                        )
+                        if guest_byte != reference_byte
+                    ),
+                    None,
+                )
+                if mismatch is None:
+                    mismatch = min(len(payload), len(reference_payload))
             if mismatch is None:
                 guest_window = reference_window = "-"
             else:
@@ -4341,7 +4344,11 @@ def linux_ecall(vm, args: tuple[int, ...]):
                     "MiniMachine userspace payload differs from reference image: "
                     f"path={reference_path} offset={mismatch}"
                 )
-        payload_hash = hashlib.sha256(payload).hexdigest()
+        payload_hash = (
+            guest_hash
+            if reference_path
+            else hashlib.sha256(payload).hexdigest()
+        )
         image_cache = getattr(vm, "user_payload_image_cache", None)
         if image_cache is None:
             image_cache = {}
