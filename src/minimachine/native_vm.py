@@ -51,6 +51,7 @@ MM_INTR_ALLOCA = 10
 MM_INTR_FREE = 11
 MM_INTR_EXPECT = 12
 MM_INTR_PTR_ADD_SCALED = 13
+MM_INTR_ROR32 = 14
 
 MM_IPRED_EQ = 1
 MM_IPRED_NE = 2
@@ -96,6 +97,12 @@ def _native_free_intrinsic_enabled() -> bool:
 def _native_simple_intrinsics_enabled() -> bool:
     return os.environ.get(
         "MINIMACHINE_NATIVE_SIMPLE_INTRINSICS", "1"
+    ).lower() not in {"0", "false", "no", "off", ""}
+
+
+def _native_ror32_intrinsic_enabled() -> bool:
+    return os.environ.get(
+        "MINIMACHINE_NATIVE_ROR32_INTRINSIC", "0"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
@@ -701,6 +708,13 @@ class NativeVM(VM):
             and (symbol == "__mm_user_ext_free" or symbol.endswith("_ext_free"))
         ):
             out.op = MM_INTR_FREE
+            return out
+
+        if (
+            _native_ror32_intrinsic_enabled()
+            and symbol == "__mm_fast_ror32"
+        ):
+            out.op = MM_INTR_ROR32
             return out
 
         if _native_simple_intrinsics_enabled():
