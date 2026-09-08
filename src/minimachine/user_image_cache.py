@@ -76,6 +76,7 @@ def save_user_image_cache(
         "version": USER_IMAGE_CACHE_VERSION,
         "schema_sha256": user_image_schema_fingerprint(),
         "payload_sha256": payload_sha256,
+        "slim_metadata": bool(slim_metadata),
         "image": image,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,6 +88,7 @@ def load_user_image_cache(
     path: Path,
     *,
     payload_sha256: str,
+    require_slim_metadata: bool | None = None,
 ) -> UserProgramImage:
     try:
         with _open_cache(path, "rb") as handle:
@@ -110,6 +112,16 @@ def load_user_image_cache(
     if payload.get("payload_sha256") != payload_sha256:
         raise UserImageCacheError(
             "userspace image cache payload fingerprint mismatch"
+        )
+    stored_slim = bool(payload.get("slim_metadata", False))
+    if (
+        require_slim_metadata is not None
+        and stored_slim != bool(require_slim_metadata)
+    ):
+        raise UserImageCacheError(
+            "userspace image cache metadata mode mismatch: "
+            f"stored={int(stored_slim)} "
+            f"required={int(bool(require_slim_metadata))}"
         )
     image = payload.get("image")
     if not isinstance(image, UserProgramImage):
