@@ -515,7 +515,7 @@ jobs:
 
           test -s cold/input-runs.env
           test -s cold/busybox-real-init.cpio
-          test -s cold/busybox-real-kernel-execve.chk.gz
+          test -s cold/busybox-real-i128-kernel-execve.chk.gz
           test -s cold/busybox-real-native-pack.bin
           cat cold/input-runs.env
 
@@ -553,6 +553,8 @@ jobs:
       - name: Continue real BusyBox init and shell
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_NATIVE_ROR32_INTRINSIC: "1"
+          MINIMACHINE_NATIVE_I128_INTRINSICS: "1"
           MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
         run: |
           set -o pipefail
@@ -573,7 +575,7 @@ jobs:
             --initramfs cold/busybox-real-init.cpio \
             --native-vm \
             --native-pack-cache-in cold/busybox-real-native-pack.bin \
-            --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
+            --checkpoint-in cold/busybox-real-i128-kernel-execve.chk.gz \
             --stop-on-panic \
             --max-steps 0 \
             --progress-every 0 \
