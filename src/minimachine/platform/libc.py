@@ -44,6 +44,18 @@ def build_user_libc_callback(
     _snapshot_p3_call_chain,
     _restore_p3_call_chain,
 ):
+    def _user_libc_callback(nested_symbol: str, nested_errno_address: int | None):
+        return build_user_libc_callback(
+            nested_symbol,
+            nested_errno_address,
+            user_syscall=user_syscall,
+            _call_linux_function_preserving_control=_call_linux_function_preserving_control,
+            _call_guest_descriptor_preserving_control=_call_guest_descriptor_preserving_control,
+            _guest_function_name_from_descriptor=_guest_function_name_from_descriptor,
+            _snapshot_p3_call_chain=_snapshot_p3_call_chain,
+            _restore_p3_call_chain=_restore_p3_call_chain,
+        )
+
     original = _user_external_original(symbol)
     external_prefix = _user_external_prefix(symbol) or "__mm_user_ext_"
 
