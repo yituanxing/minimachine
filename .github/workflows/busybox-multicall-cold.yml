@@ -3,9 +3,11 @@ name: MiniMachine BusyBox Multicall Cold
 on:
   workflow_dispatch:
   push:
-    branches: [work/native-p3-vm]
+    branches: [work/native-p3-vm, research/cached-cold-reset]
     paths:
       - src/minimachine/program_cache.py
+      - src/minimachine/native_hot_cache.py
+      - scripts/build-native-hot-cache.py
       - src/minimachine/native_vm.py
       - src/minimachine/runtime.py
       - src/minimachine/vm.py
@@ -208,6 +210,17 @@ jobs:
           cat build/input-runs.env
           ls -lh build/busybox-real-init.cpio busybox/busybox-multicall.bflt
 
+      - name: Build slim Linux native hot metadata
+        env:
+          MINIMACHINE_DISABLE_GC: "1"
+        run: |
+          /usr/bin/time -f 'CACHED_COLD_HOT_META_BUILD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 scripts/build-native-hot-cache.py \
+              linux/llvm/linked.ll \
+              current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+              build/linux-native-hot-cache.pkl.gz
+          test -s build/linux-native-hot-cache.pkl.gz
+
       - name: Cold boot real BusyBox rootfs to first exec
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
@@ -247,6 +260,72 @@ jobs:
           ! grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/busybox-real-cold.log
           ! grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-real-cold.log
 
+      - name: Cached cold boot from reset to first exec
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          set +e
+          /usr/bin/time -f 'CACHED_COLD_RESET_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 900 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --native-hot-cache-in build/linux-native-hot-cache.pkl.gz \
+            --initramfs build/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-in build/busybox-real-native-pack.bin \
+            --native-boot-phases-only \
+            --native-report-every 50000000 \
+            --checkpoint-out build/busybox-real-cached-kernel-execve.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-after-checkpoint \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/busybox-real-cached-cold.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "CACHED_COLD_RESET_STATUS=$status" | tee -a build/busybox-real-cached-cold.log
+
+      - name: Assert cached cold reset equivalence
+        run: |
+          grep -F 'BOOT_EXEC_NATIVE_HOT_CACHE_LOADED ' build/busybox-real-cached-cold.log
+          grep -F 'BOOT_EXEC_NATIVE_PACK_CACHE_LOADED ' build/busybox-real-cached-cold.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/busybox-real-cached-cold.log
+          grep -F 'function=kernel_execve hit=1' build/busybox-real-cached-cold.log
+          test -s build/busybox-real-cached-kernel-execve.chk.gz
+          ! grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/busybox-real-cached-cold.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/busybox-real-cached-cold.log
+          control_steps="$(sed -n 's/.*BOOT_EXEC_CHECKPOINT_SAVED .*steps=\([0-9][0-9]*\).*function=kernel_execve.*/\1/p' build/busybox-real-cold.log | tail -1)"
+          candidate_steps="$(sed -n 's/.*BOOT_EXEC_CHECKPOINT_SAVED .*steps=\([0-9][0-9]*\).*function=kernel_execve.*/\1/p' build/busybox-real-cached-cold.log | tail -1)"
+          test -n "$control_steps"
+          test -n "$candidate_steps"
+          test "$candidate_steps" = "$control_steps"
+          echo "CACHED_COLD_RESET_STEPS control=$control_steps candidate=$candidate_steps"
+
+      - name: Report cached cold reset A/B
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          control = Path("build/busybox-real-cold.log").read_text()
+          candidate = Path("build/busybox-real-cached-cold.log").read_text()
+          cm = re.search(r"BUSYBOX_REAL_COLD_WALL=([0-9.]+)", control)
+          nm = re.search(r"CACHED_COLD_RESET_WALL=([0-9.]+)", candidate)
+          if not cm or not nm:
+              raise SystemExit("missing cached-cold A/B timing")
+          cv = float(cm.group(1))
+          nv = float(nm.group(1))
+          delta = nv - cv
+          pct = delta * 100.0 / cv
+          print(
+              f"CACHED_COLD_RESET_AB control={cv:.3f} candidate={nv:.3f} "
+              f"delta_s={delta:.3f} delta_pct={pct:.2f}"
+          )
+          PY
+
       - name: Summarize real BusyBox cold boot
         if: always()
         run: |
@@ -264,8 +343,11 @@ jobs:
             build/busybox-real-rootfs.log
             build/busybox-real-init.cpio
             build/busybox-real-cold.log
+            build/busybox-real-cached-cold.log
             build/busybox-real-kernel-execve.chk.gz
+            build/busybox-real-cached-kernel-execve.chk.gz
             build/busybox-real-native-pack.bin
+            build/linux-native-hot-cache.pkl.gz
           if-no-files-found: warn
           compression-level: 1
           retention-days: 7
