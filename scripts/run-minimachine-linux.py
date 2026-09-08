@@ -4604,8 +4604,41 @@ def linux_ecall(vm, args: tuple[int, ...]):
                         + ",".join(collisions[:8])
                     )
 
-            for function in functions:
-                verify_p3(function)
+            cache_user_verify = os.environ.get(
+                "MINIMACHINE_CACHE_USER_P3_VERIFY",
+                "",
+            ).lower() in {"1", "true", "yes", "on"}
+            verified_payloads = getattr(
+                vm,
+                "user_verified_p3_payloads",
+                None,
+            )
+            if verified_payloads is None:
+                verified_payloads = set()
+                vm.user_verified_p3_payloads = verified_payloads
+            skip_verify = (
+                cache_user_verify
+                and fast_namespace_rebase
+                and payload_hash in verified_payloads
+            )
+            if skip_verify:
+                print(
+                    "BOOT_EXEC_USER_P3_VERIFY_CACHE "
+                    f"payload={payload_hash[:16]} hit=1 "
+                    f"functions={len(functions)}",
+                    flush=True,
+                )
+            else:
+                for function in functions:
+                    verify_p3(function)
+                if cache_user_verify and fast_namespace_rebase:
+                    verified_payloads.add(payload_hash)
+                    print(
+                        "BOOT_EXEC_USER_P3_VERIFY_CACHE "
+                        f"payload={payload_hash[:16]} hit=0 "
+                        f"functions={len(functions)}",
+                        flush=True,
+                    )
             for function in functions:
                 vm.program.add_function(function)
             trace_user_external_descriptor(vm, "getcwd", "functions-added")
