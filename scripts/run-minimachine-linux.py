@@ -4376,6 +4376,7 @@ def linux_ecall(vm, args: tuple[int, ...]):
                     user_image = load_user_image_cache(
                         Path(disk_cache_path),
                         payload_sha256=payload_hash,
+                        require_slim_metadata=slim_user_cache,
                     )
                 except UserImageCacheError as exc:
                     raise VMError(
