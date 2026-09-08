@@ -210,8 +210,7 @@ jobs:
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
           MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
-          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image-slim.pkl
-          MINIMACHINE_USER_IMAGE_CACHE_SLIM: "1"
+          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
           MINIMACHINE_NATIVE_SIMPLE_INTRINSICS: "0"
           MINIMACHINE_DISABLE_GC: "1"
         run: |
@@ -245,7 +244,9 @@ jobs:
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
           MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
-          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image.pkl
+          MINIMACHINE_USER_IMAGE_CACHE: ${{ github.workspace }}/build/busybox-user-image-slim.pkl
+          MINIMACHINE_USER_IMAGE_CACHE_SLIM: "1"
+          MINIMACHINE_NATIVE_SIMPLE_INTRINSICS: "0"
           MINIMACHINE_DISABLE_GC: "1"
         run: |
           set -o pipefail
