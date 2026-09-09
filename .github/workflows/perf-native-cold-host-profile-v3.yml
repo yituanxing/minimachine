@@ -1,0 +1,86 @@
+name: MiniMachine Native Cold Host Profile V3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [research/native-cold-host-profile-v3]
+    paths:
+      - native/p3vm.c
+      - src/minimachine/native_vm.py
+      - src/minimachine/runtime.py
+      - src/minimachine/vm.py
+      - scripts/run-minimachine-linux.py
+      - .github/workflows/perf-native-cold-host-profile-v3.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared             native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download exact Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33632628029
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33632628029
+          path: linux
+
+      - name: Download proven memory-default cold generation
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34332075334
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-real-cold-34332075334
+          path: cold
+
+      - name: Profile real cached cold boot to kernel_execve
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_NATIVE_HOST_PROFILE: "1"
+          MINIMACHINE_PROFILE_HOST: "1"
+          MINIMACHINE_PROFILE_HOST_TOP: "100"
+          MINIMACHINE_DISABLE_GC: "1"
+          MINIMACHINE_NATIVE_ROR32_INTRINSIC: "1"
+          MINIMACHINE_NATIVE_I128_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_SCALAR_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_I128_VALUE_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_MEMORY_INTRINSICS: "1"
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'COLD_HOST_V3_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M'           timeout --signal=TERM 900           python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll             --linker-contract configs/linux-6.6.143-minimachine-linker.json             --native-hot-cache-in cold/linux-native-hot-cache.pkl.gz             --initramfs cold/busybox-real-init.cpio             --native-vm             --native-pack-cache-in cold/busybox-real-native-pack.bin             --native-boot-phases-only             --checkpoint-out build/profile-kernel-execve.chk.gz             --checkpoint-function kernel_execve             --checkpoint-function-hit 1             --stop-after-checkpoint             --stop-on-panic             --max-steps 0             --progress-every 0             2>&1 | tee build/native-cold-host-profile-v3.log
+
+      - name: Assert exact cold profile
+        run: |
+          grep -F 'BOOT_EXEC_NATIVE_PROFILE ' build/native-cold-host-profile-v3.log
+          grep -F 'BOOT_EXEC_HOST_PROFILE_TOTAL ' build/native-cold-host-profile-v3.log
+          grep -F 'BOOT_EXEC_NATIVE_HOST_PROFILE ' build/native-cold-host-profile-v3.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/native-cold-host-profile-v3.log
+          grep -F 'steps=815095846 function=kernel_execve' build/native-cold-host-profile-v3.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/native-cold-host-profile-v3.log
+
+      - name: Summarize cold profile
+        if: always()
+        run: |
+          grep -E 'BOOT_EXEC_(NATIVE_PROFILE|HOST_PROFILE_TOTAL|HOST_PROFILE rank=|NATIVE_HOST_PROFILE|NATIVE_HOST_PROFILE_SYMBOL|STAGE stage=execute-end|CHECKPOINT_SAVED)|COLD_HOST_V3_WALL'             build/native-cold-host-profile-v3.log | tail -320 || true
+
+      - name: Upload profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-native-cold-host-profile-v3-${{ github.run_id }}
+          path: build/native-cold-host-profile-v3.log
+          if-no-files-found: warn
+          retention-days: 7
