@@ -246,6 +246,15 @@ jobs:
             echo "HOT_CACHE_BYTES=$(stat -c %s build/linux-native-hot-cache.pkl.gz)"
           } | tee build/runtime-image.env
 
+      - name: Upload runtime image manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-native-runtime-manifest-${{ github.run_id }}
+          path: build/runtime-image.env
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
       - name: Upload native runtime image
         uses: actions/upload-artifact@v4
         with:
