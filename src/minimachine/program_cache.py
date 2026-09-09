@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import os
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,8 +75,14 @@ def load_program_cache(
     image_sha256: str,
 ) -> ProgramCache:
     try:
-        with gzip.open(path, "rb") as handle:
-            payload = pickle.load(handle)
+        buffered = os.environ.get(
+            "MINIMACHINE_PROGRAM_CACHE_BUFFERED", "0"
+        ).lower() not in {"0", "false", "no", "off", ""}
+        if buffered:
+            payload = pickle.loads(gzip.decompress(path.read_bytes()))
+        else:
+            with gzip.open(path, "rb") as handle:
+                payload = pickle.load(handle)
     except (OSError, EOFError, pickle.PickleError) as exc:
         raise ProgramCacheError(f"cannot read P3 program cache: {exc}") from exc
 
