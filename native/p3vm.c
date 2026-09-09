@@ -79,6 +79,9 @@
 #define MM_INTR_ICMP_EQ_I128 24
 #define MM_INTR_MEMSET 25
 #define MM_INTR_MEMCPY 26
+#define MM_INTR_LOAD_AGGREGATE 27
+#define MM_INTR_STORE_AGGREGATE 28
+#define MM_INTR_RETURNADDRESS 29
 
 #define MM_IPRED_EQ   1
 #define MM_IPRED_NE   2
@@ -731,6 +734,44 @@ static int execute_host_intrinsic(MMVM *vm,
         if (vm->oom)
             return 0;
         goto intrinsic_return;
+    }
+
+    if (intr->op == MM_INTR_LOAD_AGGREGATE) {
+        if (argc != 2 || expected != 1)
+            return 0;
+        uint64_t source = mem_read(vm, arg_base, 64);
+        uint64_t size = mem_read(vm, arg_base + 8, 64);
+        if (!alloc_bytes_native(vm, size, 8, &value))
+            return 0;
+        if (!mem_copy_bytes(vm, value, source, size, 0))
+            return 0;
+        goto intrinsic_result;
+    }
+
+    if (intr->op == MM_INTR_STORE_AGGREGATE) {
+        if (argc != 3 || expected != 0)
+            return 0;
+        uint64_t destination = mem_read(vm, arg_base, 64);
+        uint64_t blob = mem_read(vm, arg_base + 8, 64);
+        uint64_t size = mem_read(vm, arg_base + 16, 64);
+        if (!mem_copy_bytes(vm, destination, blob, size, 0))
+            return 0;
+        goto intrinsic_return;
+    }
+
+    if (intr->op == MM_INTR_RETURNADDRESS) {
+        if (argc != 1 || expected != 1)
+            return 0;
+        uint64_t depth = mem_read(vm, arg_base, 64);
+        uint64_t frame = mem_read(vm, vm->sp + MM_ABI_CALLER_SP, 64);
+        for (uint64_t i = 0; i < depth; ++i) {
+            uint64_t parent = mem_read(vm, frame + MM_ABI_CALLER_SP, 64);
+            if (parent == 0 || parent == frame)
+                return 0;
+            frame = parent;
+        }
+        value = mem_read(vm, frame + MM_ABI_RET_PC, 64);
+        goto intrinsic_result;
     }
 
     if (intr->op == MM_INTR_MEMSET) {
