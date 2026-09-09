@@ -7,18 +7,30 @@ on:
     paths:
       - native/p3vm.c
       - src/minimachine/native_vm.py
+      - src/minimachine/runtime.py
+      - src/minimachine/vm.py
+      - src/minimachine/program_cache.py
+      - scripts/run-minimachine-linux.py
+      - .github/workflows/busybox-multicall-cold.yml
+      - .github/workflows/busybox-ash-carrier.yml
       - .github/workflows/busybox-ash-carrier-hot.yml
 
 permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: ash-carrier-hot-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ash-hot:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Build native VM
         run: |
@@ -26,61 +38,197 @@ jobs:
           gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
             native/p3vm.c -o build/libminimachine_p3vm.so
 
-      - name: Download exact Linux image
-        uses: actions/download-artifact@v4
-        with:
-          repository: ${{ github.repository }}
-          run-id: 33295701837
-          github-token: ${{ github.token }}
-          name: minimachine-linux-initramfs-33295701837
-          path: console
+      - name: Find generation-matched real BusyBox cold checkpoint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p cold
+          lowering_sha="$(git log -1 --format=%H -- \
+            src/minimachine/program_cache.py \
+            src/minimachine/llvm_text.py \
+            src/minimachine/layout.py \
+            src/minimachine/legalize.py \
+            src/minimachine/abi.py \
+            src/minimachine/lower_p3.py \
+            src/minimachine/muir.py \
+            src/minimachine/p3.py \
+            src/minimachine/verify.py \
+            src/minimachine/image.py)"
+          linux_sha="$(git log -1 --format=%H -- \
+            linux-overlay/arch/minimachine \
+            scripts/build-minimachine-initramfs.py \
+            scripts/check-minimachine-boot.sh \
+            .github/workflows/initramfs-build.yml)"
+          native_pack_sha="$(git log -1 --format=%H -- \
+            src/minimachine/native_vm.py \
+            src/minimachine/runtime.py \
+            src/minimachine/vm.py \
+            scripts/run-minimachine-linux.py)"
+          test -n "$lowering_sha"
+          test -n "$linux_sha"
+          test -n "$native_pack_sha"
 
-      - name: Download proven kernel_execve checkpoint
-        uses: actions/download-artifact@v4
-        with:
-          repository: ${{ github.repository }}
-          run-id: 33296957158
-          github-token: ${{ github.token }}
-          name: minimachine-shell-echo-33296957158
-          path: echo
+          found=""
+          for attempt in $(seq 1 60); do
+            for run_id in $(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow busybox-multicall-cold.yml \
+              --branch work/native-p3-vm \
+              --limit 30 \
+              --json databaseId,status,conclusion \
+              --jq '.[] | select(.status == "completed" and .conclusion == "success") | .databaseId'); do
+              rm -rf candidate-cold
+              if ! gh run download "$run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "minimachine-busybox-real-cold-$run_id" \
+                --dir candidate-cold >/dev/null 2>&1; then
+                continue
+              fi
+              test -s candidate-cold/input-runs.env || continue
+              test -s candidate-cold/busybox-real-init.cpio || continue
+              test -s candidate-cold/busybox-real-kernel-execve.chk.gz || continue
+              test -s candidate-cold/busybox-real-native-pack.bin || continue
+              cold_lowering="$(sed -n 's/^LOWERING_SHA=//p' candidate-cold/input-runs.env)"
+              cold_linux="$(sed -n 's/^LINUX_SHA=//p' candidate-cold/input-runs.env)"
+              cold_native_pack="$(sed -n 's/^NATIVE_PACK_SHA=//p' candidate-cold/input-runs.env)"
+              if [ "$cold_lowering" = "$lowering_sha" ] && \
+                 [ "$cold_linux" = "$linux_sha" ] && \
+                 [ "$cold_native_pack" = "$native_pack_sha" ]; then
+                found="$run_id"
+                rm -rf cold
+                mv candidate-cold cold
+                break
+              fi
+            done
+            if [ -n "$found" ]; then
+              break
+            fi
+            echo "waiting for generation-matched cold checkpoint attempt=$attempt lowering=$lowering_sha linux=$linux_sha native_pack=$native_pack_sha"
+            sleep 10
+          done
+          test -n "$found"
+          echo "ASH_COLD_RUN_ID=$found" | tee build/ash-hot-inputs.env
+          cat cold/input-runs.env | tee -a build/ash-hot-inputs.env
 
-      - name: Download frozen ash carrier
-        uses: actions/download-artifact@v4
-        with:
-          repository: ${{ github.repository }}
-          run-id: 33302954924
-          github-token: ${{ github.token }}
-          name: minimachine-busybox-ash-carrier-33302954924
-          path: ash
+      - name: Download exact Linux and P3 cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -a
+          . build/ash-hot-inputs.env
+          set +a
+          test -n "$P3_REFRESH_RUN_ID"
+          test -n "$LINUX_RUN_ID"
 
-      - name: Hot-run frozen ash carrier
+          gh run download "$P3_REFRESH_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-p3-console-current-$P3_REFRESH_RUN_ID" \
+            --dir current-cache
+
+          gh run download "$LINUX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$LINUX_RUN_ID" \
+            --dir linux
+
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+          test -s linux/llvm/linked.ll
+
+      - name: Find generation-matched ash carrier
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          carrier_sha="$(git log -1 --format=%H -- \
+            src/minimachine/user_image.py \
+            src/minimachine/user_bundle.py \
+            src/minimachine/legalize.py \
+            scripts/build-minimachine-busybox.py \
+            scripts/build-minimachine-initramfs.py \
+            .github/workflows/busybox-ash-carrier.yml)"
+          test -n "$carrier_sha"
+
+          found=""
+          for attempt in $(seq 1 90); do
+            for run_id in $(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow busybox-ash-carrier.yml \
+              --branch work/native-p3-vm \
+              --limit 30 \
+              --json databaseId,status,conclusion \
+              --jq '.[] | select(.status == "completed" and .conclusion == "success") | .databaseId'); do
+              rm -rf candidate-ash
+              if ! gh run download "$run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "minimachine-busybox-ash-carrier-$run_id" \
+                --dir candidate-ash >/dev/null 2>&1; then
+                continue
+              fi
+              test -s candidate-ash/input-run.env || continue
+              test -s candidate-ash/busybox-ash-first.bflt || continue
+              candidate_sha="$(sed -n 's/^CARRIER_SHA=//p' candidate-ash/input-run.env)"
+              if [ "$candidate_sha" = "$carrier_sha" ]; then
+                found="$run_id"
+                rm -rf ash
+                mv candidate-ash ash
+                break
+              fi
+            done
+            if [ -n "$found" ]; then
+              break
+            fi
+            echo "waiting for generation-matched ash carrier attempt=$attempt carrier=$carrier_sha"
+            sleep 10
+          done
+          test -n "$found"
+          echo "ASH_CARRIER_RUN_ID=$found" | tee -a build/ash-hot-inputs.env
+          cat ash/input-run.env | tee -a build/ash-hot-inputs.env
+
+      - name: Hot-run ash carrier
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_DISABLE_GC: "1"
         run: |
           set -o pipefail
           set +e
           printf 'echo BUSYBOX_MINIMACHINE_HELLO\nexit\n' | \
           /usr/bin/time -f 'ASH_CARRIER_HOT_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
-          timeout --signal=TERM 180 \
-          python3 scripts/run-minimachine-linux.py console/llvm/linked.ll \
+          timeout --signal=TERM 300 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
             --linker-contract configs/linux-6.6.143-minimachine-linker.json \
-            --program-cache-in console/llvm/linux-initramfs-p3-cache.pkl.gz \
-            --initramfs echo/mmsh-echo.cpio \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
             --native-vm \
-            --checkpoint-in echo/mmsh-echo-kernel-execve.chk.gz \
+            --native-pack-cache-in cold/busybox-real-native-pack.bin \
+            --checkpoint-in cold/busybox-real-kernel-execve.chk.gz \
             --inject-init ash/busybox-ash-first.bflt \
             --stop-on-panic \
             --max-steps 0 \
-            --progress-every 1000000 \
+            --progress-every 0 \
             2>&1 | tee build/ash-carrier-hot.log
           status=${PIPESTATUS[1]}
           set -e
           echo "ASH_CARRIER_HOT_STATUS=$status" | tee -a build/ash-carrier-hot.log
 
+      - name: Assert real ash path
+        run: |
+          grep -F 'BOOT_EXEC_CHECKPOINT_RESTORED ' build/ash-carrier-hot.log
+          grep -Fx 'BUSYBOX_MINIMACHINE_HELLO' build/ash-carrier-hot.log
+          grep -Fx 'ASH_CARRIER_HOT_STATUS=0' build/ash-carrier-hot.log
+          for pattern in \
+            'program cache lowering fingerprint mismatch' \
+            'checkpoint image fingerprint mismatch' \
+            'BOOT_EXEC_BLOCKED '; do
+            if grep -F "$pattern" build/ash-carrier-hot.log >/dev/null; then
+              echo "unexpected ash hot failure marker: $pattern"
+              grep -F "$pattern" build/ash-carrier-hot.log | tail -1
+              exit 1
+            fi
+          done
+
       - name: Summarize real ash path
         if: always()
         run: |
-          grep -E 'BOOT_EXEC_(PROGRAM_CACHE_LOADED|STAGE|NATIVE_PACK|HOST_BULK_WRITE|ROOTFS_INJECTED|CHECKPOINT_RESTORED|USER_RUNTIME|USER_EXTERNAL_SURFACE|USER_EXTERNAL_DATA|USER_IMAGE_DATA|USER_ARGS|USER_HANDOFF|NATIVE_APPEND_PACK|NATIVE_APPEND|NATIVE_HOST_APPEND|NATIVE_DATA_APPEND|USER_EXTERNAL|USER_SYSCALL|HOST_INPUT|USER_READ_BUFFER|BLOCKED|HALTED)|BOOT_EXEC_INIT_EXEC_PROBE|BUSYBOX_MINIMACHINE_HELLO|ASH_CARRIER_HOT_(WALL|STATUS)|(^| )[/#] ' \
+          cat build/ash-hot-inputs.env || true
+          grep -E 'BOOT_EXEC_(PROGRAM_CACHE_LOADED|STAGE|NATIVE_PACK|CHECKPOINT_RESTORED|USER_RUNTIME|USER_EXTERNAL_SURFACE|USER_EXTERNAL_DATA|USER_IMAGE_DATA|USER_ARGS|USER_HANDOFF|NATIVE_APPEND_PACK|NATIVE_APPEND|NATIVE_HOST_APPEND|NATIVE_DATA_APPEND|USER_EXTERNAL|USER_SYSCALL|HOST_INPUT|USER_READ_BUFFER|BLOCKED|HALTED)|BOOT_EXEC_INIT_EXEC_PROBE|BUSYBOX_MINIMACHINE_HELLO|ASH_CARRIER_HOT_(WALL|STATUS)|(^| )[/#] ' \
             build/ash-carrier-hot.log | tail -360 || true
 
       - name: Upload hot trace
@@ -88,6 +236,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: minimachine-ash-carrier-hot-${{ github.run_id }}
-          path: build/ash-carrier-hot.log
-          if-no-files-found: error
+          path: |
+            build/ash-hot-inputs.env
+            build/ash-carrier-hot.log
+          if-no-files-found: warn
           retention-days: 14
