@@ -54,6 +54,12 @@ MM_INTR_PTR_ADD_SCALED = 13
 MM_INTR_ROR32 = 14
 MM_INTR_LOAD_I128 = 15
 MM_INTR_STORE_I128 = 16
+MM_INTR_IS_CONSTANT = 17
+MM_INTR_PREFETCH = 18
+MM_INTR_UDIV = 19
+MM_INTR_SDIV = 20
+MM_INTR_UREM = 21
+MM_INTR_SREM = 22
 
 MM_IPRED_EQ = 1
 MM_IPRED_NE = 2
@@ -99,6 +105,12 @@ def _native_free_intrinsic_enabled() -> bool:
 def _native_simple_intrinsics_enabled() -> bool:
     return os.environ.get(
         "MINIMACHINE_NATIVE_SIMPLE_INTRINSICS", "1"
+    ).lower() not in {"0", "false", "no", "off", ""}
+
+
+def _native_scalar_intrinsics_enabled() -> bool:
+    return os.environ.get(
+        "MINIMACHINE_NATIVE_SCALAR_INTRINSICS", "0"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
@@ -747,6 +759,31 @@ class NativeVM(VM):
                 if 0 <= scale <= 0xFFFFFFFF:
                     out.op = MM_INTR_PTR_ADD_SCALED
                     out.imm = scale
+                return out
+
+        if _native_scalar_intrinsics_enabled():
+            if re.fullmatch(r"__mm_llvm_is_constant_.+", symbol):
+                out.op = MM_INTR_IS_CONSTANT
+                return out
+
+            if symbol.startswith("__mm_llvm_prefetch_"):
+                out.op = MM_INTR_PREFETCH
+                return out
+
+            scalar_binary_ops = {
+                "udiv": MM_INTR_UDIV,
+                "sdiv": MM_INTR_SDIV,
+                "urem": MM_INTR_UREM,
+                "srem": MM_INTR_SREM,
+            }
+            match = re.fullmatch(
+                r"__mm_(udiv|sdiv|urem|srem)_(32|64)",
+                symbol,
+            )
+            if match:
+                op_name, bits_text = match.groups()
+                out.op = scalar_binary_ops[op_name]
+                out.bits = int(bits_text)
                 return out
 
         binary_ops = {
