@@ -75,7 +75,7 @@ jobs:
               --branch work/native-p3-vm \
               --limit 30 \
               --json databaseId,status,conclusion \
-              --jq '.[] | select(.status == "completed" and .conclusion == "success") | .databaseId'); do
+              --jq '.[].databaseId'); do
               rm -rf candidate-manifest
               if ! gh run download "$run_id" \
                 --repo "$GITHUB_REPOSITORY" \
