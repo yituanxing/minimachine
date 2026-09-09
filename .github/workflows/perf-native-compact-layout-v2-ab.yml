@@ -8,7 +8,7 @@ on:
       - native/p3vm.c
       - src/minimachine/native_vm.py
       - tests/test_native_compact_layout.py
-      - .github/workflows/perf-native-compact-layout-ab.yml
+      - .github/workflows/perf-native-compact-layout-v2-ab.yml
 
 permissions:
   contents: read
@@ -213,73 +213,7 @@ jobs:
           grep -Fx 'COMPACT_REAL_EXTERNAL_BEGIN' build/candidate-real.log
           grep -Fx 'COMPACT_REAL_EXTERNAL_END' build/candidate-real.log
           ! grep -F 'BOOT_EXEC_BLOCKED ' build/candidate-real.log
-          grep -E '^COMPACT_REAL_STATUS=(0|124)        run: |
-          python3 - <<'PY'
-          import re
-          from pathlib import Path
-
-          cp = Path("control/build/control-pack.log").read_text()
-          np = Path("candidate/build/candidate-pack.log").read_text()
-          cc = Path("control/build/control-cold.log").read_text()
-          nc = Path("candidate/build/candidate-cold.log").read_text()
-
-          def one(pattern, text, label, cast=float):
-              m = re.search(pattern, text)
-              if not m:
-                  raise SystemExit(f"missing {label}")
-              return cast(m.group(1))
-
-          cb = one(r"COMPACT_PACK_BYTES variant=control bytes=([0-9]+)", cp, "control bytes", int)
-          nb = one(r"COMPACT_PACK_BYTES variant=candidate bytes=([0-9]+)", np, "candidate bytes", int)
-          cpw = one(r"COMPACT_PACK_WALL variant=control wall=([0-9.]+)", cp, "control pack wall")
-          npw = one(r"COMPACT_PACK_WALL variant=candidate wall=([0-9.]+)", np, "candidate pack wall")
-          cw = one(r"COMPACT_COLD_WALL variant=control wall=([0-9.]+)", cc, "control cold")
-          nw = one(r"COMPACT_COLD_WALL variant=candidate wall=([0-9.]+)", nc, "candidate cold")
-          ce = one(r"BOOT_EXEC_STAGE stage=execute-end execute_s=([0-9.]+)", cc, "control execute")
-          ne = one(r"BOOT_EXEC_STAGE stage=execute-end execute_s=([0-9.]+)", nc, "candidate execute")
-          ci = one(r"BOOT_EXEC_STAGE stage=native-vm-init seconds=([0-9.]+)", cc, "control init")
-          ni = one(r"BOOT_EXEC_STAGE stage=native-vm-init seconds=([0-9.]+)", nc, "candidate init")
-          cs = re.findall(r"BOOT_EXEC_CHECKPOINT_SAVED .*steps=([0-9]+).*function=kernel_execve", cc)[-1]
-          ns = re.findall(r"BOOT_EXEC_CHECKPOINT_SAVED .*steps=([0-9]+).*function=kernel_execve", nc)[-1]
-          if cs != ns:
-              raise SystemExit(f"step mismatch control={cs} candidate={ns}")
-
-          print(
-              f"COMPACT_SIZE_AB control={cb} candidate={nb} "
-              f"delta_bytes={nb-cb} delta_pct={(nb-cb)*100.0/cb:.2f}"
-          )
-          print(
-              f"COMPACT_PACK_AB control={cpw:.3f} candidate={npw:.3f} "
-              f"delta_s={npw-cpw:.3f} delta_pct={(npw-cpw)*100.0/cpw:.2f}"
-          )
-          print(
-              f"COMPACT_COLD_AB control={cw:.3f} candidate={nw:.3f} "
-              f"delta_s={nw-cw:.3f} delta_pct={(nw-cw)*100.0/cw:.2f} steps={cs}"
-          )
-          print(
-              f"COMPACT_INIT_AB control={ci:.3f} candidate={ni:.3f} "
-              f"delta_s={ni-ci:.3f} delta_pct={(ni-ci)*100.0/ci:.2f}"
-          )
-          print(
-              f"COMPACT_EXEC_AB control={ce:.3f} candidate={ne:.3f} "
-              f"delta_s={ne-ce:.3f} delta_pct={(ne-ce)*100.0/ce:.2f}"
-          )
-          PY
-
-      - name: Upload compact A/B logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: minimachine-compact-layout-ab-${{ github.run_id }}
-          path: |
-            control/build/control-pack.log
-            candidate/build/candidate-pack.log
-            control/build/control-cold.log
-            candidate/build/candidate-cold.log
-            candidate/build/candidate-real.log
-          if-no-files-found: warn
-          retention-days: 7
- build/candidate-real.log
+          grep -E '^COMPACT_REAL_STATUS=(0|124)$' build/candidate-real.log
 
       - name: Report compact layout A/B
         run: |
@@ -345,5 +279,6 @@ jobs:
             candidate/build/candidate-pack.log
             control/build/control-cold.log
             candidate/build/candidate-cold.log
+            candidate/build/candidate-real.log
           if-no-files-found: warn
           retention-days: 7
