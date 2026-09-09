@@ -3468,6 +3468,29 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_execvp
 
+    if original == "access":
+        def user_access(vm, args):
+            if len(args) != 2:
+                raise VMError("access expects path,mode")
+            path_ptr, mode = map(int, args)
+            raw = user_syscall(
+                vm,
+                (
+                    48,  # faccessat
+                    (-100) & ((1 << 64) - 1),  # AT_FDCWD
+                    path_ptr,
+                    mode,
+                    0,
+                    0,
+                    0,
+                ),
+            )
+            if raw is HOST_CONTROL_TRANSFER:
+                return HOST_CONTROL_TRANSFER
+            return libc_linux_result(vm, raw)
+
+        return user_access
+
     if original == "wait":
         waitpid_callback = _user_libc_callback(
             external_prefix + "waitpid",
@@ -4778,6 +4801,7 @@ def user_syscall(vm, args: tuple[int, ...]):
         17: ("__se_sys_getcwd", 2),
         25: ("__se_sys_fcntl", 3),
         29: ("__se_sys_ioctl", 3),
+        48: ("__se_sys_faccessat", 3),
         49: ("__se_sys_chdir", 1),
         56: ("__se_sys_openat", 4),
         57: ("__se_sys_close", 1),
