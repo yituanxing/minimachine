@@ -60,6 +60,8 @@ MM_INTR_UDIV = 19
 MM_INTR_SDIV = 20
 MM_INTR_UREM = 21
 MM_INTR_SREM = 22
+MM_INTR_WIDE_CONST_I128 = 23
+MM_INTR_ICMP_EQ_I128 = 24
 
 MM_IPRED_EQ = 1
 MM_IPRED_NE = 2
@@ -105,6 +107,12 @@ def _native_free_intrinsic_enabled() -> bool:
 def _native_simple_intrinsics_enabled() -> bool:
     return os.environ.get(
         "MINIMACHINE_NATIVE_SIMPLE_INTRINSICS", "1"
+    ).lower() not in {"0", "false", "no", "off", ""}
+
+
+def _native_i128_value_intrinsics_enabled() -> bool:
+    return os.environ.get(
+        "MINIMACHINE_NATIVE_I128_VALUE_INTRINSICS", "0"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
@@ -759,6 +767,14 @@ class NativeVM(VM):
                 if 0 <= scale <= 0xFFFFFFFF:
                     out.op = MM_INTR_PTR_ADD_SCALED
                     out.imm = scale
+                return out
+
+        if _native_i128_value_intrinsics_enabled():
+            if symbol == "__mm_wide_const_128":
+                out.op = MM_INTR_WIDE_CONST_I128
+                return out
+            if symbol == "__mm_icmp_eq_128":
+                out.op = MM_INTR_ICMP_EQ_I128
                 return out
 
         if _native_scalar_intrinsics_enabled():
