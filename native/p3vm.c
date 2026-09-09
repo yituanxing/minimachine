@@ -79,6 +79,7 @@
 #define MM_INTR_ICMP_EQ_I128 24
 #define MM_INTR_MEMSET 25
 #define MM_INTR_MEMCPY 26
+#define MM_INTR_SELECT 27
 
 #define MM_IPRED_EQ   1
 #define MM_IPRED_NE   2
@@ -731,6 +732,16 @@ static int execute_host_intrinsic(MMVM *vm,
         if (vm->oom)
             return 0;
         goto intrinsic_return;
+    }
+
+    if (intr->op == MM_INTR_SELECT) {
+        if (argc != 3 || expected != 1)
+            return 0;
+        uint64_t cond = mem_read(vm, arg_base, 64);
+        uint64_t on_true = mem_read(vm, arg_base + 8, 64);
+        uint64_t on_false = mem_read(vm, arg_base + 16, 64);
+        value = (cond & 1) ? on_true : on_false;
+        goto intrinsic_result;
     }
 
     if (intr->op == MM_INTR_MEMSET) {
