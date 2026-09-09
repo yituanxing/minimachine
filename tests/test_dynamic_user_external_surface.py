@@ -775,6 +775,61 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(seen["args"], (14, 0xD340, 0, 0))
         self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
 
+    def test_sigtimedwait_uses_linux_rt_sigtimedwait(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+        seen = {}
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            seen["args"] = args
+            return 12
+
+        runner.user_syscall = fake_user_syscall
+        callback = runner._user_libc_callback(
+            "__mm_user_ext_sigtimedwait", None
+        )
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        set_ptr = 0xD080
+        info_ptr = 0xD100
+        timeout_ptr = 0xD180
+        self.assertEqual(
+            callback(vm, (set_ptr, info_ptr, timeout_ptr)),
+            12,
+        )
+        self.assertEqual(
+            seen["args"],
+            (137, set_ptr, info_ptr, timeout_ptr, 8, 0, 0),
+        )
+
+    def test_rt_sigtimedwait_fallback_preserves_linux_task_state(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+        vm.program.functions["__se_sys_rt_sigtimedwait"] = object()
+        seen = {}
+
+        def fake_call(vm_arg, name, args, **kwargs):
+            self.assertIs(vm_arg, vm)
+            seen["name"] = name
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+            return (11,)
+
+        runner._call_linux_function_preserving_control = fake_call
+        result = runner.user_syscall(
+            vm,
+            (137, 0xD080, 0xD100, 0xD180, 8, 0, 0),
+        )
+        self.assertEqual(result, 11)
+        self.assertEqual(seen["name"], "__se_sys_rt_sigtimedwait")
+        self.assertEqual(
+            seen["args"],
+            (0xD080, 0xD100, 0xD180, 8),
+        )
+        self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
+
     def test_stateless_utmp_surface(self):
         runner = load_runner()
         vm = Program().new_vm()
