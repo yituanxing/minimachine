@@ -775,6 +775,30 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(seen["args"], (14, 0xD340, 0, 0))
         self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
 
+    def test_stateless_utmp_surface(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+
+        setent = runner._user_libc_callback("__mm_user_ext_setutxent", None)
+        getid = runner._user_libc_callback("__mm_user_ext_getutxid", None)
+        putline = runner._user_libc_callback("__mm_user_ext_pututxline", None)
+        endent = runner._user_libc_callback("__mm_user_ext_endutxent", None)
+        updwtmp = runner._user_libc_callback("__mm_user_ext_updwtmpx", None)
+
+        self.assertIsNotNone(setent)
+        self.assertIsNotNone(getid)
+        self.assertIsNotNone(putline)
+        self.assertIsNotNone(endent)
+        self.assertIsNotNone(updwtmp)
+        assert setent and getid and putline and endent and updwtmp
+
+        record = 0xD180
+        self.assertIsNone(setent(vm, ()))
+        self.assertEqual(getid(vm, (record,)), 0)
+        self.assertEqual(putline(vm, (record,)), record)
+        self.assertIsNone(updwtmp(vm, (0xD100, record)))
+        self.assertIsNone(endent(vm, ()))
+
     def test_access_uses_faccessat_at_fdcwd(self):
         runner = load_runner()
         vm = Program().new_vm()
