@@ -1,0 +1,265 @@
+name: MiniMachine BusyBox Native Runtime Image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - src/minimachine/program_cache.py
+      - src/minimachine/native_hot_cache.py
+      - scripts/build-native-hot-cache.py
+      - src/minimachine/native_vm.py
+      - src/minimachine/runtime.py
+      - src/minimachine/vm.py
+      - scripts/run-minimachine-linux.py
+      - src/minimachine/llvm_text.py
+      - src/minimachine/layout.py
+      - src/minimachine/legalize.py
+      - src/minimachine/abi.py
+      - src/minimachine/lower_p3.py
+      - src/minimachine/muir.py
+      - src/minimachine/p3.py
+      - src/minimachine/verify.py
+      - src/minimachine/image.py
+      - scripts/build-minimachine-busybox-rootfs.py
+      - .github/workflows/initramfs-build.yml
+      - .github/workflows/refresh-console-p3-cache.yml
+      - .github/workflows/busybox-multicall-bundle.yml
+      - .github/workflows/busybox-native-runtime-image.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: busybox-native-runtime-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate cache and native contracts
+        run: |
+          python3 -m unittest tests.test_program_cache
+          python3 -m unittest tests.test_native_intrinsics
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download generation-matched Linux P3 cache and image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          lowering_sha="$(git log -1 --format=%H -- \
+            src/minimachine/program_cache.py \
+            src/minimachine/llvm_text.py \
+            src/minimachine/layout.py \
+            src/minimachine/legalize.py \
+            src/minimachine/abi.py \
+            src/minimachine/lower_p3.py \
+            src/minimachine/muir.py \
+            src/minimachine/p3.py \
+            src/minimachine/verify.py \
+            src/minimachine/image.py)"
+          linux_sha="$(git log -1 --format=%H -- \
+            linux-overlay/arch/minimachine \
+            scripts/build-minimachine-initramfs.py \
+            scripts/check-minimachine-boot.sh \
+            .github/workflows/initramfs-build.yml)"
+          native_pack_sha="$(git log -1 --format=%H -- \
+            src/minimachine/native_vm.py \
+            src/minimachine/runtime.py \
+            src/minimachine/vm.py \
+            scripts/run-minimachine-linux.py)"
+          test -n "$lowering_sha"
+          test -n "$linux_sha"
+          test -n "$native_pack_sha"
+
+          refresh_id=""
+          for attempt in $(seq 1 60); do
+            for candidate_id in $(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow refresh-console-p3-cache.yml \
+              --branch work/native-p3-vm \
+              --status success \
+              --limit 30 \
+              --json databaseId \
+              --jq '.[].databaseId'); do
+              rm -rf candidate-cache
+              if ! gh run download "$candidate_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "minimachine-linux-p3-console-current-$candidate_id" \
+                --dir candidate-cache >/dev/null 2>&1; then
+                continue
+              fi
+              test -s candidate-cache/input-run.env || continue
+              candidate_lowering="$(sed -n 's/^LOWERING_SHA=//p' candidate-cache/input-run.env)"
+              candidate_linux="$(sed -n 's/^LINUX_SHA=//p' candidate-cache/input-run.env)"
+              if [ "$candidate_lowering" = "$lowering_sha" ] && \
+                 [ "$candidate_linux" = "$linux_sha" ]; then
+                refresh_id="$candidate_id"
+                rm -rf current-cache
+                mv candidate-cache current-cache
+                break
+              fi
+            done
+            if [ -n "$refresh_id" ]; then
+              break
+            fi
+            echo "waiting for generation-matched P3 cache attempt=$attempt lowering=$lowering_sha linux=$linux_sha"
+            sleep 10
+          done
+          test -n "$refresh_id"
+
+          . current-cache/input-run.env
+          test "$LOWERING_SHA" = "$lowering_sha"
+          test "$LINUX_SHA" = "$linux_sha"
+          test -n "$LINUX_RUN_ID"
+
+          printf 'LOWERING_SHA=%s\nLINUX_SHA=%s\nNATIVE_PACK_SHA=%s\nP3_REFRESH_RUN_ID=%s\nLINUX_RUN_ID=%s\n' \
+            "$lowering_sha" "$linux_sha" "$native_pack_sha" "$refresh_id" "$LINUX_RUN_ID" \
+            | tee build/input-runs.env
+
+          gh run download "$LINUX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$LINUX_RUN_ID" \
+            --dir linux
+
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+          test -s linux/llvm/linked.ll
+
+      - name: Download generation-matched BusyBox multicall image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          busybox_sha="$(git log -1 --format=%H -- \
+            src/minimachine/legalize.py \
+            tests/test_legalizer.py \
+            src/minimachine/user_image.py \
+            src/minimachine/user_bundle.py \
+            scripts/build-minimachine-busybox.py \
+            .github/workflows/busybox-multicall-bundle.yml)"
+          test -n "$busybox_sha"
+
+          run_id=""
+          for attempt in $(seq 1 60); do
+            run_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow busybox-multicall-bundle.yml \
+              --branch work/native-p3-vm \
+              --limit 50 \
+              --json databaseId,headSha,status,conclusion \
+              --jq ".[] | select(.headSha == \"$busybox_sha\" and .status == \"completed\" and .conclusion == \"success\") | .databaseId" \
+              | head -1)"
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            echo "waiting for generation-matched BusyBox bundle attempt=$attempt sha=$busybox_sha"
+            sleep 10
+          done
+          test -n "$run_id"
+          {
+            echo "BUSYBOX_SHA=$busybox_sha"
+            echo "BUSYBOX_RUN_ID=$run_id"
+          } | tee -a build/input-runs.env
+
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-multicall-$run_id" \
+            --dir busybox
+          test -s busybox/busybox-multicall.bflt
+
+      - name: Build real BusyBox rootfs
+        run: |
+          cat > build/rcS <<'SH'
+          #!/bin/sh
+          PATH=/bin
+          export PATH
+          echo MINIMACHINE_REAL_BUSYBOX_RCS
+          exec /bin/sh
+          SH
+          chmod +x build/rcS
+          python3 scripts/build-minimachine-busybox-rootfs.py \
+            build/busybox-real-init.cpio \
+            --busybox-image busybox/busybox-multicall.bflt \
+            --busybox-init \
+            --rc-script-file build/rcS \
+            2>&1 | tee build/busybox-real-rootfs.log
+          grep -F 'mode=busybox-init' build/busybox-real-rootfs.log
+          test -s build/busybox-real-init.cpio
+
+      - name: Build slim native hot metadata
+        env:
+          MINIMACHINE_DISABLE_GC: "1"
+          MINIMACHINE_PROGRAM_CACHE_BUFFERED: "1"
+        run: |
+          /usr/bin/time -f 'RUNTIME_IMAGE_HOT_META_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          python3 scripts/build-native-hot-cache.py \
+            linux/llvm/linked.ll \
+            current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            build/linux-native-hot-cache.pkl.gz \
+            2>&1 | tee build/native-hot-cache.log
+          test -s build/linux-native-hot-cache.pkl.gz
+
+      - name: Prebuild native packed program
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_PROGRAM_CACHE_BUFFERED: "1"
+          MINIMACHINE_PROGRAM_CACHE_FREEZE_GC: "1"
+        run: |
+          set -o pipefail
+          set +e
+          /usr/bin/time -f 'RUNTIME_IMAGE_PACK_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 600 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs build/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-out build/busybox-real-native-pack.bin \
+            --stop-on-panic \
+            --max-steps 1 \
+            --progress-every 0 \
+            2>&1 | tee build/native-pack-prebuild.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "RUNTIME_IMAGE_PACK_STATUS=$status" | tee -a build/native-pack-prebuild.log
+          grep -F 'BOOT_EXEC_PROGRAM_CACHE_GC mode=freeze enabled_after=1 ' build/native-pack-prebuild.log
+          grep -F 'BOOT_EXEC_NATIVE_PACK_CACHE_SAVED ' build/native-pack-prebuild.log
+          test -s build/busybox-real-native-pack.bin
+
+      - name: Write runtime image manifest
+        run: |
+          {
+            cat build/input-runs.env
+            echo "ROOTFS_SHA256=$(sha256sum build/busybox-real-init.cpio | awk '{print $1}')"
+            echo "NATIVE_PACK_BYTES=$(stat -c %s build/busybox-real-native-pack.bin)"
+            echo "HOT_CACHE_BYTES=$(stat -c %s build/linux-native-hot-cache.pkl.gz)"
+          } | tee build/runtime-image.env
+
+      - name: Upload native runtime image
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-native-runtime-${{ github.run_id }}
+          path: |
+            build/runtime-image.env
+            build/input-runs.env
+            build/rcS
+            build/busybox-real-rootfs.log
+            build/busybox-real-init.cpio
+            build/native-hot-cache.log
+            build/linux-native-hot-cache.pkl.gz
+            build/native-pack-prebuild.log
+            build/busybox-real-native-pack.bin
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 14
