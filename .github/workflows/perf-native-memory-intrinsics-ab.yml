@@ -1,0 +1,212 @@
+name: MiniMachine Native Memory Intrinsics AB
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [research/native-memory-intrinsics]
+    paths:
+      - native/p3vm.c
+      - src/minimachine/native_vm.py
+      - tests/test_native_intrinsics.py
+      - tests/test_native_memory_intrinsics.py
+      - .github/workflows/perf-native-memory-intrinsics-ab.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate memory mappings
+        run: python3 -m unittest tests.test_native_intrinsics
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Execute memory edge cases
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: python3 -m unittest tests.test_native_memory_intrinsics -v
+
+      - name: Download current P3 cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34326126118
+          github-token: ${{ github.token }}
+          name: minimachine-linux-p3-console-current-34326126118
+          path: current-cache
+
+      - name: Download exact Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33632628029
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33632628029
+          path: linux
+
+      - name: Download proven real BusyBox rootfs
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34326200292
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-real-cold-34326200292
+          path: cold
+
+      - name: Build slim native hot metadata
+        env:
+          MINIMACHINE_DISABLE_GC: "1"
+          MINIMACHINE_PROGRAM_CACHE_BUFFERED: "1"
+        run: |
+          python3 scripts/build-native-hot-cache.py \
+            linux/llvm/linked.ll \
+            current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            build/linux-native-hot-cache.pkl.gz
+          test -s build/linux-native-hot-cache.pkl.gz
+          test -s cold/busybox-real-init.cpio
+
+      - name: Prewarm matching native pack
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_DISABLE_GC: "1"
+          MINIMACHINE_NATIVE_ROR32_INTRINSIC: "1"
+          MINIMACHINE_NATIVE_I128_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_SCALAR_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_I128_VALUE_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_MEMORY_INTRINSICS: "0"
+        run: |
+          set -o pipefail
+          set +e
+          timeout --signal=TERM 600 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-out build/memory-native-pack.bin \
+            --stop-on-panic \
+            --max-steps 1 \
+            --progress-every 0 \
+            2>&1 | tee build/prewarm.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "MEMORY_INTR_PREWARM_STATUS=$status"
+          grep -F 'BOOT_EXEC_NATIVE_PACK_CACHE_SAVED ' build/prewarm.log
+          test -s build/memory-native-pack.bin
+
+      - name: Memory control from reset
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_DISABLE_GC: "1"
+          MINIMACHINE_NATIVE_ROR32_INTRINSIC: "1"
+          MINIMACHINE_NATIVE_I128_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_SCALAR_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_I128_VALUE_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_MEMORY_INTRINSICS: "0"
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'MEMORY_INTR_WALL variant=control wall=%e user=%U sys=%S rss_kb=%M' \
+          timeout --signal=TERM 900 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --native-hot-cache-in build/linux-native-hot-cache.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-in build/memory-native-pack.bin \
+            --native-boot-phases-only \
+            --checkpoint-out build/control.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-after-checkpoint \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/control.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/control.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/control.log
+
+      - name: Memory candidate from reset
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_DISABLE_GC: "1"
+          MINIMACHINE_NATIVE_ROR32_INTRINSIC: "1"
+          MINIMACHINE_NATIVE_I128_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_SCALAR_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_I128_VALUE_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_MEMORY_INTRINSICS: "1"
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'MEMORY_INTR_WALL variant=candidate wall=%e user=%U sys=%S rss_kb=%M' \
+          timeout --signal=TERM 900 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --native-hot-cache-in build/linux-native-hot-cache.pkl.gz \
+            --initramfs cold/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-in build/memory-native-pack.bin \
+            --native-boot-phases-only \
+            --checkpoint-out build/candidate.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-after-checkpoint \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/candidate.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/candidate.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/candidate.log
+
+      - name: Report memory A/B
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          control = Path("build/control.log").read_text()
+          candidate = Path("build/candidate.log").read_text()
+
+          def one(pattern, text, label):
+              m = re.search(pattern, text)
+              if not m:
+                  raise SystemExit(f"missing {label}")
+              return float(m.group(1))
+
+          cw = one(r"MEMORY_INTR_WALL variant=control wall=([0-9.]+)", control, "control wall")
+          nw = one(r"MEMORY_INTR_WALL variant=candidate wall=([0-9.]+)", candidate, "candidate wall")
+          ce = one(r"BOOT_EXEC_STAGE stage=execute-end execute_s=([0-9.]+)", control, "control execute")
+          ne = one(r"BOOT_EXEC_STAGE stage=execute-end execute_s=([0-9.]+)", candidate, "candidate execute")
+          cs = re.findall(r"BOOT_EXEC_CHECKPOINT_SAVED .*steps=([0-9]+).*function=kernel_execve", control)[-1]
+          ns = re.findall(r"BOOT_EXEC_CHECKPOINT_SAVED .*steps=([0-9]+).*function=kernel_execve", candidate)[-1]
+          if cs != ns:
+              raise SystemExit(f"step mismatch control={cs} candidate={ns}")
+          print(
+              f"MEMORY_INTR_AB control={cw:.3f} candidate={nw:.3f} "
+              f"delta_s={nw-cw:.3f} delta_pct={(nw-cw)*100.0/cw:.2f} steps={cs}"
+          )
+          print(
+              f"MEMORY_INTR_EXEC_AB control={ce:.3f} candidate={ne:.3f} "
+              f"delta_s={ne-ce:.3f} delta_pct={(ne-ce)*100.0/ce:.2f}"
+          )
+          PY
+
+      - name: Upload memory A/B
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-memory-intrinsics-ab-${{ github.run_id }}
+          path: |
+            build/prewarm.log
+            build/control.log
+            build/candidate.log
+          if-no-files-found: warn
+          retention-days: 7
