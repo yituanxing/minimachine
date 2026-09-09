@@ -775,6 +775,30 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(seen["args"], (14, 0xD340, 0, 0))
         self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
 
+    def test_wait_uses_waitpid_for_any_child(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+        status_ptr = 0xD300
+        seen = {}
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            seen["args"] = args
+            vm.memory.write(status_ptr, 32, 0x1700)
+            return 23
+
+        runner.user_syscall = fake_user_syscall
+        callback = runner._user_libc_callback("__mm_user_ext_wait", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        self.assertEqual(callback(vm, (status_ptr,)), 23)
+        self.assertEqual(
+            seen["args"],
+            (260, (1 << 64) - 1, status_ptr, 0, 0, 0, 0),
+        )
+        self.assertEqual(vm.memory.read(status_ptr, 32), 0x1700)
+
     def test_waitpid_uses_linux_wait4_and_guest_status(self):
         runner = load_runner()
         vm = Program().new_vm()
