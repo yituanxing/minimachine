@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import gzip
 import hashlib
 import os
@@ -74,17 +75,36 @@ def load_program_cache(
     *,
     image_sha256: str,
 ) -> ProgramCache:
+    buffered = os.environ.get(
+        "MINIMACHINE_PROGRAM_CACHE_BUFFERED", "0"
+    ).lower() not in {"0", "false", "no", "off", ""}
+    freeze_gc = os.environ.get(
+        "MINIMACHINE_PROGRAM_CACHE_FREEZE_GC", "0"
+    ).lower() not in {"0", "false", "no", "off", ""}
+    gc_was_enabled = gc.isenabled()
+    if freeze_gc and gc_was_enabled:
+        gc.disable()
     try:
-        buffered = os.environ.get(
-            "MINIMACHINE_PROGRAM_CACHE_BUFFERED", "0"
-        ).lower() not in {"0", "false", "no", "off", ""}
         if buffered:
             payload = pickle.loads(gzip.decompress(path.read_bytes()))
         else:
             with gzip.open(path, "rb") as handle:
                 payload = pickle.load(handle)
     except (OSError, EOFError, pickle.PickleError) as exc:
+        if freeze_gc and gc_was_enabled:
+            gc.enable()
         raise ProgramCacheError(f"cannot read P3 program cache: {exc}") from exc
+
+    if freeze_gc:
+        gc.freeze()
+        if gc_was_enabled:
+            gc.enable()
+        print(
+            "BOOT_EXEC_PROGRAM_CACHE_GC "
+            f"mode=freeze enabled_after={int(gc.isenabled())} "
+            f"frozen={gc.get_freeze_count()}",
+            flush=True,
+        )
 
     if payload.get("version") != PROGRAM_CACHE_VERSION:
         raise ProgramCacheError(
