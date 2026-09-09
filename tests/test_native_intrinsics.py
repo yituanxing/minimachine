@@ -21,6 +21,9 @@ from src.minimachine.native_vm import (
     MM_INTR_ICMP_EQ_I128,
     MM_INTR_MEMSET,
     MM_INTR_MEMCPY,
+    MM_INTR_FAST_MEMCPY,
+    MM_INTR_FAST_MEMSET,
+    MM_INTR_FAST_STRLEN,
     NativeVM,
 )
 
@@ -136,6 +139,30 @@ class NativeIntrinsicMappingTests(unittest.TestCase):
                 ).op,
                 MM_INTR_STORE_I128,
             )
+
+    def test_fast_memory_intrinsics_are_enabled_by_default_and_can_be_disabled(self):
+        symbols = {
+            "__mm_fast_memcpy": MM_INTR_FAST_MEMCPY,
+            "__mm_fast_memset": MM_INTR_FAST_MEMSET,
+            "__mm_fast_strlen": MM_INTR_FAST_STRLEN,
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            for symbol, expected in symbols.items():
+                self.assertEqual(
+                    NativeVM._native_intrinsic_for_symbol(symbol).op,
+                    expected,
+                )
+
+        with patch.dict(
+            os.environ,
+            {"MINIMACHINE_NATIVE_FAST_MEMORY_INTRINSICS": "0"},
+            clear=False,
+        ):
+            for symbol in symbols:
+                self.assertEqual(
+                    NativeVM._native_intrinsic_for_symbol(symbol).op,
+                    MM_INTR_NONE,
+                )
 
     def test_memory_intrinsics_are_enabled_by_default_and_can_be_disabled(self):
         symbols = {
