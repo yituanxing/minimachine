@@ -102,11 +102,20 @@ jobs:
           done
           test -n "$found"
 
-          rm -rf cold
-          gh run download "$found" \
-            --repo "$GITHUB_REPOSITORY" \
-            --name "minimachine-busybox-real-cold-$found" \
-            --dir cold
+          bundle_ready=""
+          for attempt in $(seq 1 60); do
+            rm -rf cold
+            if gh run download "$found" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "minimachine-busybox-real-cold-$found" \
+              --dir cold >/dev/null 2>&1; then
+              bundle_ready=1
+              break
+            fi
+            echo "waiting for cold bundle run=$found attempt=$attempt"
+            sleep 10
+          done
+          test -n "$bundle_ready"
 
           test -s cold/input-runs.env
           test -s cold/busybox-real-init.cpio
