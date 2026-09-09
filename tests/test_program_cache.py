@@ -1,5 +1,7 @@
+import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from src.minimachine import muir
@@ -77,6 +79,38 @@ class ProgramCacheTests(unittest.TestCase):
         install_runtime(restored.program, restored.surface)
         self.assertIn("__mm_llvm_va_end", restored.program.host_services)
         self.assertIn("__mm_sys_fence", restored.program.host_services)
+
+    def test_buffered_freeze_load_reenables_gc(self):
+        cache = self.cache()
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "program-cache.pkl.gz"
+            save_program_cache(cache, path)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "MINIMACHINE_PROGRAM_CACHE_BUFFERED": "1",
+                    "MINIMACHINE_PROGRAM_CACHE_FREEZE_GC": "1",
+                },
+                clear=False,
+            ), mock.patch(
+                "src.minimachine.program_cache.gc.isenabled",
+                side_effect=[True, True],
+            ), mock.patch(
+                "src.minimachine.program_cache.gc.disable"
+            ) as disable, mock.patch(
+                "src.minimachine.program_cache.gc.freeze"
+            ) as freeze, mock.patch(
+                "src.minimachine.program_cache.gc.enable"
+            ) as enable, mock.patch(
+                "src.minimachine.program_cache.gc.get_freeze_count",
+                return_value=123,
+            ):
+                restored = load_program_cache(path, image_sha256="abc")
+
+        self.assertEqual(restored.function_count, 1)
+        disable.assert_called_once_with()
+        freeze.assert_called_once_with()
+        enable.assert_called_once_with()
 
     def test_runtime_callbacks_do_not_invalidate_lowering_cache(self):
         self.assertNotIn("runtime.py", _LOWERING_FINGERPRINT_FILES)
