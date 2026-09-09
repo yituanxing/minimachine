@@ -21,6 +21,7 @@ from src.minimachine.native_vm import (
     MM_INTR_ICMP_EQ_I128,
     MM_INTR_MEMSET,
     MM_INTR_MEMCPY,
+    MM_INTR_SELECT,
     NativeVM,
 )
 
@@ -135,6 +136,31 @@ class NativeIntrinsicMappingTests(unittest.TestCase):
                     "__mm_store_i128"
                 ).op,
                 MM_INTR_STORE_I128,
+            )
+
+    def test_select_intrinsic_is_opt_in(self):
+        with patch.dict(
+            os.environ,
+            {"MINIMACHINE_NATIVE_SELECT_INTRINSIC": "0"},
+            clear=False,
+        ):
+            self.assertEqual(
+                NativeVM._native_intrinsic_for_symbol(
+                    "__mm_select_i32"
+                ).op,
+                MM_INTR_NONE,
+            )
+
+        with patch.dict(
+            os.environ,
+            {"MINIMACHINE_NATIVE_SELECT_INTRINSIC": "1"},
+            clear=False,
+        ):
+            self.assertEqual(
+                NativeVM._native_intrinsic_for_symbol(
+                    "__mm_select_i32"
+                ).op,
+                MM_INTR_SELECT,
             )
 
     def test_memory_intrinsics_are_enabled_by_default_and_can_be_disabled(self):
