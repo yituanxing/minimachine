@@ -229,6 +229,7 @@ jobs:
       - name: Cold boot real BusyBox rootfs to first exec
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_NATIVE_I128_INTRINSICS: "1"
         run: |
           set -o pipefail
           set +e
