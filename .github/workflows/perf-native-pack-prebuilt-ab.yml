@@ -1,0 +1,165 @@
+name: MiniMachine Prebuilt Native Pack AB
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [research/native-pack-prebuilt-ab]
+    paths:
+      - .github/workflows/perf-native-pack-prebuilt-ab.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download fixed current P3 cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34036739708
+          github-token: ${{ github.token }}
+          name: minimachine-linux-p3-console-current-34036739708
+          path: current-cache
+
+      - name: Download exact Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33632628029
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33632628029
+          path: linux
+
+      - name: Download proven prebuilt native pack
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34318208120
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-real-cold-34318208120
+          path: proven
+
+      - name: Validate exact inputs
+        run: |
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+          test -s linux/llvm/linked.ll
+          test -s proven/busybox-real-init.cpio
+          test -s proven/busybox-real-native-pack.bin
+          stat -c 'PREBUILT_NATIVE_PACK_BYTES=%s' proven/busybox-real-native-pack.bin
+          cat proven/input-runs.env || true
+
+      - name: Runtime-pack control
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_DISABLE_GC: "1"
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'PACK_AB_WALL variant=control wall=%e user=%U sys=%S rss_kb=%M' \
+          timeout --signal=TERM 600 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs proven/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-out build/control-native-pack.bin \
+            --native-boot-phases-only \
+            --checkpoint-out build/control.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-after-checkpoint \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/control.log
+          grep -F 'BOOT_EXEC_NATIVE_PACK ' build/control.log
+          grep -F 'BOOT_EXEC_NATIVE_PACK_CACHE_SAVED ' build/control.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/control.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/control.log
+          rm -f build/control-native-pack.bin
+
+      - name: Prebuilt-pack candidate
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_DISABLE_GC: "1"
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'PACK_AB_WALL variant=prebuilt wall=%e user=%U sys=%S rss_kb=%M' \
+          timeout --signal=TERM 600 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs proven/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-in proven/busybox-real-native-pack.bin \
+            --native-boot-phases-only \
+            --checkpoint-out build/prebuilt.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-after-checkpoint \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/prebuilt.log
+          grep -F 'BOOT_EXEC_NATIVE_PACK_CACHE_LOADED ' build/prebuilt.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/prebuilt.log
+          ! grep -F 'BOOT_EXEC_NATIVE_PACK seconds=' build/prebuilt.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/prebuilt.log
+
+      - name: Report pack A/B
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          control = Path("build/control.log").read_text()
+          prebuilt = Path("build/prebuilt.log").read_text()
+
+          def one(pattern, text, label):
+              m = re.search(pattern, text)
+              if not m:
+                  raise SystemExit(f"missing {label}")
+              return float(m.group(1))
+
+          cw = one(r"PACK_AB_WALL variant=control wall=([0-9.]+)", control, "control wall")
+          pw = one(r"PACK_AB_WALL variant=prebuilt wall=([0-9.]+)", prebuilt, "prebuilt wall")
+          ci = one(r"BOOT_EXEC_STAGE stage=native-vm-init seconds=([0-9.]+)", control, "control init")
+          pi = one(r"BOOT_EXEC_STAGE stage=native-vm-init seconds=([0-9.]+)", prebuilt, "prebuilt init")
+          ce = one(r"BOOT_EXEC_STAGE stage=execute-end execute_s=([0-9.]+)", control, "control execute")
+          pe = one(r"BOOT_EXEC_STAGE stage=execute-end execute_s=([0-9.]+)", prebuilt, "prebuilt execute")
+          cs = re.findall(r"BOOT_EXEC_CHECKPOINT_SAVED .*steps=([0-9]+).*function=kernel_execve", control)[-1]
+          ps = re.findall(r"BOOT_EXEC_CHECKPOINT_SAVED .*steps=([0-9]+).*function=kernel_execve", prebuilt)[-1]
+          if cs != ps:
+              raise SystemExit(f"step mismatch control={cs} prebuilt={ps}")
+
+          print(
+              f"PREBUILT_PACK_AB control={cw:.3f} candidate={pw:.3f} "
+              f"delta_s={pw-cw:.3f} delta_pct={(pw-cw)*100.0/cw:.2f} steps={cs}"
+          )
+          print(
+              f"PREBUILT_PACK_INIT_AB control={ci:.3f} candidate={pi:.3f} "
+              f"delta_s={pi-ci:.3f} execute_control={ce:.3f} execute_candidate={pe:.3f}"
+          )
+          PY
+
+      - name: Upload A/B logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-prebuilt-native-pack-ab-${{ github.run_id }}
+          path: |
+            build/control.log
+            build/prebuilt.log
+          if-no-files-found: warn
+          retention-days: 7
