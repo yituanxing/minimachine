@@ -124,12 +124,10 @@ typedef struct {
     uint8_t extend;
     uint8_t src_bits;
     uint8_t _pad[3];
-    MMOperand dst;
-    MMOperand src;
-    MMOperand a;
-    MMOperand b;
-    MMOperand t;
-    MMOperand f;
+    MMOperand op0;
+    MMOperand op1;
+    MMOperand op2;
+    MMOperand op3;
 } MMInst;
 
 typedef struct {
@@ -1278,7 +1276,7 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
 
         if (in->opcode == MM_OP_MOV) {
             uint64_t raw;
-            if (!read_value(vm, &in->src, &raw)) {
+            if (!read_value(vm, &in->op1, &raw)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = MM_ERR_BAD_VALUE;
                 break;
@@ -1286,14 +1284,14 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
             unsigned dst_bits = in->width;
             uint64_t value = raw & mask_bits(dst_bits);
             if (in->extend != MM_EXT_NONE) {
-                unsigned src_bits = in->src_bits ? in->src_bits : in->src.width;
+                unsigned src_bits = in->src_bits ? in->src_bits : in->op1.width;
                 raw &= mask_bits(src_bits);
                 if (in->extend == MM_EXT_SEXT)
                     value = (uint64_t)sext64(raw, src_bits) & mask_bits(dst_bits);
                 else
                     value = raw & mask_bits(dst_bits);
             }
-            if (!write_operand(vm, &in->dst, value, dst_bits)) {
+            if (!write_operand(vm, &in->op0, value, dst_bits)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = vm->oom ? MM_ERR_OOM : MM_ERR_BAD_VALUE;
                 break;
@@ -1304,14 +1302,14 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
 
         if (in->opcode == MM_OP_SUB) {
             uint64_t a, b;
-            if (!read_value(vm, &in->a, &a) ||
-                !read_value(vm, &in->b, &b)) {
+            if (!read_value(vm, &in->op1, &a) ||
+                !read_value(vm, &in->op2, &b)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = MM_ERR_BAD_VALUE;
                 break;
             }
             uint64_t value = (a - b) & mask_bits(in->width);
-            if (!write_operand(vm, &in->dst, value, in->width)) {
+            if (!write_operand(vm, &in->op0, value, in->width)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = vm->oom ? MM_ERR_OOM : MM_ERR_BAD_VALUE;
                 break;
@@ -1323,8 +1321,8 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
         if (in->opcode == MM_OP_BR) {
             uint64_t a, b, target;
             size_t host_index, target_segment, target_index;
-            if (!read_value(vm, &in->a, &a) ||
-                !read_value(vm, &in->b, &b)) {
+            if (!read_value(vm, &in->op0, &a) ||
+                !read_value(vm, &in->op1, &b)) {
                 r.status = MM_STATUS_ERROR;
                 r.error = MM_ERR_BAD_VALUE;
                 break;
@@ -1346,7 +1344,7 @@ MMRunResult mm_vm_run(MMVM *vm, uint64_t max_steps) {
                 break;
             }
 
-            const MMOperand *chosen = take ? &in->t : &in->f;
+            const MMOperand *chosen = take ? &in->op2 : &in->op3;
             if (chosen->kind == MM_T_LOCAL_BLOCK) {
                 size_t local_index = (size_t)chosen->value;
                 if (local_index >= segment->block_count) {
