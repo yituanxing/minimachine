@@ -25,6 +25,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Record carrier generation
+        run: |
+          mkdir -p build
+          carrier_sha="$(git log -1 --format=%H --             src/minimachine/user_image.py             src/minimachine/user_bundle.py             src/minimachine/legalize.py             scripts/build-minimachine-busybox.py             scripts/build-minimachine-initramfs.py             .github/workflows/busybox-ash-carrier.yml)"
+          test -n "$carrier_sha"
+          echo "CARRIER_SHA=$carrier_sha" | tee build/input-run.env
 
       - name: Install toolchains
         run: |
@@ -168,6 +177,7 @@ jobs:
         with:
           name: minimachine-busybox-ash-carrier-${{ github.run_id }}
           path: |
+            build/input-run.env
             build/busybox-ash-first.config
             build/ash-qemu.log
             build/busybox-ash-first.bc
@@ -177,4 +187,4 @@ jobs:
             build/busybox-ash-first.json
             build/busybox-ash-first-bundle.log
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
