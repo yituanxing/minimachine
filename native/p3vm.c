@@ -77,6 +77,8 @@
 #define MM_INTR_SREM 22
 #define MM_INTR_WIDE_CONST_I128 23
 #define MM_INTR_ICMP_EQ_I128 24
+#define MM_INTR_MEMSET 25
+#define MM_INTR_MEMCPY 26
 
 #define MM_IPRED_EQ   1
 #define MM_IPRED_NE   2
@@ -727,6 +729,28 @@ static int execute_host_intrinsic(MMVM *vm,
         mem_write(vm, dst, 64, low);
         mem_write(vm, dst + 8, 64, high);
         if (vm->oom)
+            return 0;
+        goto intrinsic_return;
+    }
+
+    if (intr->op == MM_INTR_MEMSET) {
+        if ((argc != 3 && argc != 4) || expected != 0)
+            return 0;
+        uint64_t dst = mem_read(vm, arg_base, 64);
+        uint8_t byte = (uint8_t)mem_read(vm, arg_base + 8, 64);
+        uint64_t length = mem_read(vm, arg_base + 16, 64);
+        if (!mem_fill_bytes(vm, dst, byte, length))
+            return 0;
+        goto intrinsic_return;
+    }
+
+    if (intr->op == MM_INTR_MEMCPY) {
+        if ((argc != 3 && argc != 4) || expected != 0)
+            return 0;
+        uint64_t dst = mem_read(vm, arg_base, 64);
+        uint64_t src = mem_read(vm, arg_base + 8, 64);
+        uint64_t length = mem_read(vm, arg_base + 16, 64);
+        if (!mem_copy_bytes(vm, dst, src, length, 0))
             return 0;
         goto intrinsic_return;
     }
