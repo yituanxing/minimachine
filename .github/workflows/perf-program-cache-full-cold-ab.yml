@@ -130,6 +130,35 @@ jobs:
           ! grep -F 'BOOT_EXEC_BLOCKED ' build/candidate.log
           rm -f build/candidate-native-pack.bin
 
+      - name: Full cold buffered-cache no-GC candidate
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_PROGRAM_CACHE_BUFFERED: "1"
+          MINIMACHINE_DISABLE_GC: "1"
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'PCACHE_AB_WALL variant=buffered-nogc wall=%e user=%U sys=%S rss_kb=%M' \
+          timeout --signal=TERM 600 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in current-cache/linux-initramfs-p3-cache-full-current.pkl.gz \
+            --initramfs build/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-out build/buffered-nogc-native-pack.bin \
+            --native-boot-phases-only \
+            --checkpoint-out build/buffered-nogc-kernel-execve.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-after-checkpoint \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/buffered-nogc.log
+          grep -F 'BOOT_EXEC_GC mode=disabled ' build/buffered-nogc.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/buffered-nogc.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/buffered-nogc.log
+          rm -f build/buffered-nogc-native-pack.bin
+
       - name: Report full cold A/B
         run: |
           python3 - <<'PY'
@@ -166,6 +195,24 @@ jobs:
               f"PCACHE_STAGE_AB control={cp:.3f} candidate={np:.3f} "
               f"delta_s={np-cp:.3f} execute_control={ce:.3f} execute_candidate={ne:.3f}"
           )
+
+          nogc = Path("build/buffered-nogc.log").read_text()
+          gw = get(r"PCACHE_AB_WALL variant=buffered-nogc wall=([0-9.]+)", nogc, "nogc wall")
+          gp = get(r"BOOT_EXEC_STAGE stage=program-cache elapsed_s=([0-9.]+)", nogc, "nogc program cache")
+          ge = get(r"BOOT_EXEC_STAGE stage=execute-end execute_s=([0-9.]+)", nogc, "nogc execute")
+          gsteps = re.findall(r"BOOT_EXEC_CHECKPOINT_SAVED .*steps=([0-9]+).*function=kernel_execve", nogc)[-1]
+          if gsteps != csteps:
+              raise SystemExit(f"step mismatch control={csteps} buffered-nogc={gsteps}")
+          gdelta = gw - cw
+          gpct = gdelta * 100.0 / cw
+          print(
+              f"PCACHE_NOGC_FULL_COLD_AB control={cw:.3f} candidate={gw:.3f} "
+              f"delta_s={gdelta:.3f} delta_pct={gpct:.2f} steps={gsteps}"
+          )
+          print(
+              f"PCACHE_NOGC_STAGE_AB control={cp:.3f} candidate={gp:.3f} "
+              f"delta_s={gp-cp:.3f} execute_control={ce:.3f} execute_candidate={ge:.3f}"
+          )
           PY
 
       - name: Upload A/B logs
@@ -176,5 +223,6 @@ jobs:
           path: |
             build/control.log
             build/candidate.log
+            build/buffered-nogc.log
           if-no-files-found: warn
           retention-days: 7
