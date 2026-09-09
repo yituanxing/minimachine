@@ -76,37 +76,43 @@ jobs:
               --limit 30 \
               --json databaseId,status,conclusion \
               --jq '.[] | select(.status == "completed" and .conclusion == "success") | .databaseId'); do
-              rm -rf candidate-cold
+              rm -rf candidate-manifest
               if ! gh run download "$run_id" \
                 --repo "$GITHUB_REPOSITORY" \
-                --name "minimachine-busybox-real-cold-$run_id" \
-                --dir candidate-cold >/dev/null 2>&1; then
+                --name "minimachine-busybox-real-cold-manifest-$run_id" \
+                --dir candidate-manifest >/dev/null 2>&1; then
                 continue
               fi
-              test -s candidate-cold/input-runs.env || continue
-              test -s candidate-cold/busybox-real-init.cpio || continue
-              test -s candidate-cold/busybox-real-kernel-execve.chk.gz || continue
-              test -s candidate-cold/busybox-real-native-pack.bin || continue
-              test -s candidate-cold/linux-native-hot-cache.pkl.gz || continue
-              cold_lowering="$(sed -n 's/^LOWERING_SHA=//p' candidate-cold/input-runs.env)"
-              cold_linux="$(sed -n 's/^LINUX_SHA=//p' candidate-cold/input-runs.env)"
-              cold_native_pack="$(sed -n 's/^NATIVE_PACK_SHA=//p' candidate-cold/input-runs.env)"
+              test -s candidate-manifest/input-runs.env || continue
+              cold_lowering="$(sed -n 's/^LOWERING_SHA=//p' candidate-manifest/input-runs.env)"
+              cold_linux="$(sed -n 's/^LINUX_SHA=//p' candidate-manifest/input-runs.env)"
+              cold_native_pack="$(sed -n 's/^NATIVE_PACK_SHA=//p' candidate-manifest/input-runs.env)"
               if [ "$cold_lowering" = "$lowering_sha" ] && \
                  [ "$cold_linux" = "$linux_sha" ] && \
                  [ "$cold_native_pack" = "$native_pack_sha" ]; then
                 found="$run_id"
-                rm -rf cold
-                mv candidate-cold cold
                 break
               fi
             done
             if [ -n "$found" ]; then
               break
             fi
-            echo "waiting for generation-matched cold checkpoint attempt=$attempt lowering=$lowering_sha linux=$linux_sha native_pack=$native_pack_sha"
+            echo "waiting for generation-matched cold manifest attempt=$attempt lowering=$lowering_sha linux=$linux_sha native_pack=$native_pack_sha"
             sleep 10
           done
           test -n "$found"
+
+          rm -rf cold
+          gh run download "$found" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-real-cold-$found" \
+            --dir cold
+
+          test -s cold/input-runs.env
+          test -s cold/busybox-real-init.cpio
+          test -s cold/busybox-real-kernel-execve.chk.gz
+          test -s cold/busybox-real-native-pack.bin
+          test -s cold/linux-native-hot-cache.pkl.gz
           echo "ASH_COLD_RUN_ID=$found" | tee build/ash-hot-inputs.env
           cat cold/input-runs.env | tee -a build/ash-hot-inputs.env
 
