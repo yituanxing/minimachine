@@ -549,6 +549,16 @@ jobs:
           grep -E 'BOOT_EXEC_(STAGE|MILESTONE|INITRAMFS|CHECKPOINT_SAVED|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_EXIT|HALTED|BLOCKED)|BUSYBOX_REAL_' \
             build/busybox-real-cold.log | tail -520 || true
 
+      - name: Upload cold generation manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-busybox-real-cold-manifest-${{ github.run_id }}
+          path: build/input-runs.env
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 7
+
       - name: Upload real BusyBox cold evidence
         if: always()
         uses: actions/upload-artifact@v4
