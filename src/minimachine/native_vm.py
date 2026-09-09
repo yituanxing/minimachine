@@ -64,6 +64,9 @@ MM_INTR_WIDE_CONST_I128 = 23
 MM_INTR_ICMP_EQ_I128 = 24
 MM_INTR_MEMSET = 25
 MM_INTR_MEMCPY = 26
+MM_INTR_LOAD_AGGREGATE = 27
+MM_INTR_STORE_AGGREGATE = 28
+MM_INTR_RETURNADDRESS = 29
 
 MM_IPRED_EQ = 1
 MM_IPRED_NE = 2
@@ -109,6 +112,12 @@ def _native_free_intrinsic_enabled() -> bool:
 def _native_simple_intrinsics_enabled() -> bool:
     return os.environ.get(
         "MINIMACHINE_NATIVE_SIMPLE_INTRINSICS", "1"
+    ).lower() not in {"0", "false", "no", "off", ""}
+
+
+def _native_aggregate_intrinsics_enabled() -> bool:
+    return os.environ.get(
+        "MINIMACHINE_NATIVE_AGGREGATE_INTRINSICS", "0"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
@@ -775,6 +784,17 @@ class NativeVM(VM):
                 if 0 <= scale <= 0xFFFFFFFF:
                     out.op = MM_INTR_PTR_ADD_SCALED
                     out.imm = scale
+                return out
+
+        if _native_aggregate_intrinsics_enabled():
+            if symbol == "__mm_load_aggregate":
+                out.op = MM_INTR_LOAD_AGGREGATE
+                return out
+            if symbol == "__mm_store_aggregate":
+                out.op = MM_INTR_STORE_AGGREGATE
+                return out
+            if symbol == "__mm_llvm_returnaddress":
+                out.op = MM_INTR_RETURNADDRESS
                 return out
 
         if _native_memory_intrinsics_enabled():
