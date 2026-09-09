@@ -1,0 +1,94 @@
+name: MiniMachine Program Cache Load Profile
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [research/program-cache-load-profile]
+    paths:
+      - src/minimachine/program_cache.py
+      - .github/workflows/perf-program-cache-load-profile.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download fixed current P3 cache
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34036739708
+          github-token: ${{ github.token }}
+          name: minimachine-linux-p3-console-current-34036739708
+          path: current-cache
+
+      - name: Inspect compressed cache
+        run: |
+          test -s current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+          stat -c 'PROGRAM_CACHE_COMPRESSED_BYTES=%s' \
+            current-cache/linux-initramfs-p3-cache-full-current.pkl.gz
+
+      - name: Measure gzip stream cost
+        run: |
+          /usr/bin/time -f 'PROGRAM_CACHE_GZIP_STREAM_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            sh -c 'gzip -dc current-cache/linux-initramfs-p3-cache-full-current.pkl.gz > /dev/null'
+
+      - name: Measure current gzip plus pickle load
+        run: |
+          /usr/bin/time -f 'PROGRAM_CACHE_GZIP_PICKLE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 - <<'PY'
+          import gzip
+          import pickle
+          import time
+          import src.minimachine.program_cache  # noqa: F401
+
+          path = "current-cache/linux-initramfs-p3-cache-full-current.pkl.gz"
+          started = time.perf_counter()
+          with gzip.open(path, "rb") as handle:
+              payload = pickle.load(handle)
+          elapsed = time.perf_counter() - started
+          cache = payload["cache"]
+          print(
+              f"PROGRAM_CACHE_GZIP_PICKLE_PYTHON={elapsed:.6f} "
+              f"functions={len(cache.program.functions)} "
+              f"blocks={len(cache.program.block_code)}"
+          )
+          PY
+
+      - name: Materialize plain pickle
+        run: |
+          mkdir -p build
+          /usr/bin/time -f 'PROGRAM_CACHE_DECOMPRESS_FILE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            sh -c 'gzip -dc current-cache/linux-initramfs-p3-cache-full-current.pkl.gz > build/program-cache.pkl'
+          stat -c 'PROGRAM_CACHE_PLAIN_BYTES=%s' build/program-cache.pkl
+
+      - name: Measure plain pickle load
+        run: |
+          /usr/bin/time -f 'PROGRAM_CACHE_PLAIN_PICKLE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 - <<'PY'
+          import pickle
+          import time
+          import src.minimachine.program_cache  # noqa: F401
+
+          path = "build/program-cache.pkl"
+          started = time.perf_counter()
+          with open(path, "rb") as handle:
+              payload = pickle.load(handle)
+          elapsed = time.perf_counter() - started
+          cache = payload["cache"]
+          print(
+              f"PROGRAM_CACHE_PLAIN_PICKLE_PYTHON={elapsed:.6f} "
+              f"functions={len(cache.program.functions)} "
+              f"blocks={len(cache.program.block_code)}"
+          )
+          PY
+
+      - name: Summarize cache load split
+        run: |
+          echo 'PROGRAM_CACHE_PROFILE_DONE=1'
