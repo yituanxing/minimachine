@@ -69,32 +69,37 @@ jobs:
               --limit 20 \
               --json databaseId \
               --jq '.[].databaseId'); do
-              rm -rf candidate-runtime
+              rm -rf candidate-manifest
               if ! gh run download "$run_id" \
                 --repo "$GITHUB_REPOSITORY" \
-                --name "minimachine-busybox-native-runtime-$run_id" \
-                --dir candidate-runtime >/dev/null 2>&1; then
+                --name "minimachine-busybox-native-runtime-manifest-$run_id" \
+                --dir candidate-manifest >/dev/null 2>&1; then
                 continue
               fi
-              test -s candidate-runtime/runtime-image.env || continue
-              . candidate-runtime/runtime-image.env
+              test -s candidate-manifest/runtime-image.env || continue
+              . candidate-manifest/runtime-image.env
               if [ "$LOWERING_SHA" = "$lowering_sha" ] && \
                  [ "$LINUX_SHA" = "$linux_sha" ] && \
                  [ "$NATIVE_PACK_SHA" = "$native_pack_sha" ] && \
                  [ "$BUSYBOX_SHA" = "$busybox_sha" ]; then
                 found="$run_id"
-                rm -rf runtime
-                mv candidate-runtime runtime
                 break
               fi
             done
             if [ -n "$found" ]; then
               break
             fi
-            echo "waiting for generation-matched native runtime image attempt=$attempt native_pack=$native_pack_sha"
+            echo "waiting for generation-matched native runtime manifest attempt=$attempt native_pack=$native_pack_sha"
             sleep 10
           done
           test -n "$found"
+
+          rm -rf runtime
+          gh run download "$found" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-busybox-native-runtime-$found" \
+            --dir runtime
+
           echo "RUNTIME_IMAGE_RUN_ID=$found" | tee build/runtime-cold.env
           cat runtime/runtime-image.env | tee -a build/runtime-cold.env
 
