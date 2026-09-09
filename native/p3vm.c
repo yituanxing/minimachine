@@ -69,6 +69,12 @@
 #define MM_INTR_ROR32 14
 #define MM_INTR_LOAD_I128 15
 #define MM_INTR_STORE_I128 16
+#define MM_INTR_IS_CONSTANT 17
+#define MM_INTR_PREFETCH 18
+#define MM_INTR_UDIV 19
+#define MM_INTR_SDIV 20
+#define MM_INTR_UREM 21
+#define MM_INTR_SREM 22
 
 #define MM_IPRED_EQ   1
 #define MM_IPRED_NE   2
@@ -723,6 +729,19 @@ static int execute_host_intrinsic(MMVM *vm,
         goto intrinsic_return;
     }
 
+    if (intr->op == MM_INTR_IS_CONSTANT) {
+        if (argc != 1 || expected != 1)
+            return 0;
+        value = 0;
+        goto intrinsic_result;
+    }
+
+    if (intr->op == MM_INTR_PREFETCH) {
+        if (expected != 0)
+            return 0;
+        goto intrinsic_return;
+    }
+
     unsigned bits = intr->bits;
     if (bits < 1 || bits > 64 || argc != 2 || expected != 1)
         return 0;
@@ -757,6 +776,29 @@ static int execute_host_intrinsic(MMVM *vm,
                 ? 0
                 : ((uint64_t)(sext64(a, bits) >> b) & mask_bits(bits));
             break;
+        case MM_INTR_UDIV:
+            value = b == 0 ? 0 : ((a / b) & mask_bits(bits));
+            break;
+        case MM_INTR_UREM:
+            value = b == 0 ? 0 : ((a % b) & mask_bits(bits));
+            break;
+        case MM_INTR_SDIV:
+        case MM_INTR_SREM: {
+            int64_t sa = sext64(a, bits);
+            int64_t sb = sext64(b, bits);
+            int64_t min_value = bits == 64
+                ? INT64_MIN
+                : -((int64_t)1 << (bits - 1));
+            if (sb == 0 || (sa == min_value && sb == -1)) {
+                value = 0;
+                break;
+            }
+            if (intr->op == MM_INTR_SDIV)
+                value = ((uint64_t)(sa / sb)) & mask_bits(bits);
+            else
+                value = ((uint64_t)(sa % sb)) & mask_bits(bits);
+            break;
+        }
         case MM_INTR_ICMP: {
             int truth;
             int64_t sa = sext64(a, bits);
