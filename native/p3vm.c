@@ -75,6 +75,8 @@
 #define MM_INTR_SDIV 20
 #define MM_INTR_UREM 21
 #define MM_INTR_SREM 22
+#define MM_INTR_WIDE_CONST_I128 23
+#define MM_INTR_ICMP_EQ_I128 24
 
 #define MM_IPRED_EQ   1
 #define MM_IPRED_NE   2
@@ -727,6 +729,35 @@ static int execute_host_intrinsic(MMVM *vm,
         if (vm->oom)
             return 0;
         goto intrinsic_return;
+    }
+
+    if (intr->op == MM_INTR_WIDE_CONST_I128) {
+        if (argc != 2 || expected != 1)
+            return 0;
+        uint64_t low = mem_read(vm, arg_base, 64);
+        uint64_t high = mem_read(vm, arg_base + 8, 64);
+        if (!alloc_bytes_native(vm, 16, 16, &value))
+            return 0;
+        mem_write(vm, value, 64, low);
+        mem_write(vm, value + 8, 64, high);
+        if (vm->oom)
+            return 0;
+        goto intrinsic_result;
+    }
+
+    if (intr->op == MM_INTR_ICMP_EQ_I128) {
+        if (argc != 2 || expected != 1)
+            return 0;
+        uint64_t lhs = mem_read(vm, arg_base, 64);
+        uint64_t rhs = mem_read(vm, arg_base + 8, 64);
+        uint64_t lhs_low = mem_read(vm, lhs, 64);
+        uint64_t lhs_high = mem_read(vm, lhs + 8, 64);
+        uint64_t rhs_low = mem_read(vm, rhs, 64);
+        uint64_t rhs_high = mem_read(vm, rhs + 8, 64);
+        value = (uint64_t)(
+            lhs_low == rhs_low && lhs_high == rhs_high
+        );
+        goto intrinsic_result;
     }
 
     if (intr->op == MM_INTR_IS_CONSTANT) {
