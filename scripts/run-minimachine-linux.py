@@ -2130,6 +2130,33 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
             vm.memory.write(old_ptr + 144, 64, 0)
         return result
 
+    if original == "sigtimedwait":
+        def user_sigtimedwait(vm, args):
+            if len(args) != 3:
+                raise VMError("sigtimedwait expects set,info,timeout")
+            set_ptr, info_ptr, timeout_ptr = map(int, args)
+            raw = user_syscall(
+                vm,
+                (
+                    137,  # rt_sigtimedwait
+                    set_ptr,
+                    info_ptr,
+                    timeout_ptr,
+                    8,    # kernel_sigset_t size on MiniMachine/RISC-V64
+                    0,
+                    0,
+                ),
+            )
+            if raw is HOST_CONTROL_TRANSFER:
+                return HOST_CONTROL_TRANSFER
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if signed < 0:
+                set_errno(vm, -signed)
+                return (1 << 64) - 1
+            return raw
+
+        return user_sigtimedwait
+
     if original == "sigaction":
         def user_sigaction(vm, args):
             if len(args) != 3:
@@ -4862,6 +4889,7 @@ def user_syscall(vm, args: tuple[int, ...]):
         64: ("__se_sys_write", 3),
         93: ("__se_sys_exit", 1),
         94: ("__se_sys_exit_group", 1),
+        137: ("__se_sys_rt_sigtimedwait", 4),
         142: ("__se_sys_reboot", 4),
         153: ("__se_sys_times", 1),
         157: ("sys_setsid", 0),
@@ -4955,7 +4983,7 @@ def user_syscall(vm, args: tuple[int, ...]):
                     # wait4 may block and schedule another Linux task. Its
                     # task/current/context mutations are the syscall's real
                     # semantics and must survive the semantic-call wrapper.
-                    preserve_linux_task_state=(nr == 260),
+                    preserve_linux_task_state=(nr in {137, 260}),
                 )
                 if call_result is HOST_CONTROL_TRANSFER:
                     print(
