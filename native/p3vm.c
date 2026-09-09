@@ -79,6 +79,9 @@
 #define MM_INTR_ICMP_EQ_I128 24
 #define MM_INTR_MEMSET 25
 #define MM_INTR_MEMCPY 26
+#define MM_INTR_FAST_MEMCPY 27
+#define MM_INTR_FAST_MEMSET 28
+#define MM_INTR_FAST_STRLEN 29
 
 #define MM_IPRED_EQ   1
 #define MM_IPRED_NE   2
@@ -731,6 +734,40 @@ static int execute_host_intrinsic(MMVM *vm,
         if (vm->oom)
             return 0;
         goto intrinsic_return;
+    }
+
+    if (intr->op == MM_INTR_FAST_MEMCPY) {
+        if (argc != 3 || expected != 1)
+            return 0;
+        uint64_t dst = mem_read(vm, arg_base, 64);
+        uint64_t src = mem_read(vm, arg_base + 8, 64);
+        uint64_t size = mem_read(vm, arg_base + 16, 64);
+        if (!mem_copy_bytes(vm, dst, src, size, 0))
+            return 0;
+        value = dst;
+        goto intrinsic_result;
+    }
+
+    if (intr->op == MM_INTR_FAST_MEMSET) {
+        if (argc != 3 || expected != 1)
+            return 0;
+        uint64_t dst = mem_read(vm, arg_base, 64);
+        uint8_t byte = (uint8_t)mem_read(vm, arg_base + 8, 64);
+        uint64_t size = mem_read(vm, arg_base + 16, 64);
+        if (!mem_fill_bytes(vm, dst, byte, size))
+            return 0;
+        value = dst;
+        goto intrinsic_result;
+    }
+
+    if (intr->op == MM_INTR_FAST_STRLEN) {
+        if (argc != 1 || expected != 1)
+            return 0;
+        uint64_t ptr = mem_read(vm, arg_base, 64);
+        value = mem_strlen_bytes(vm, ptr);
+        if (vm->oom)
+            return 0;
+        goto intrinsic_result;
     }
 
     if (intr->op == MM_INTR_MEMSET) {
