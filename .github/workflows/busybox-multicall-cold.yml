@@ -52,7 +52,6 @@ jobs:
       - name: Validate native intrinsic mappings
         run: |
           python3 -m unittest tests.test_native_intrinsics
-          python3 -m unittest tests.test_native_scalar_intrinsics
           python3 -m unittest tests.test_program_cache
 
       - name: Build native VM
@@ -60,6 +59,11 @@ jobs:
           mkdir -p build
           gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
             native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Execute scalar intrinsic edge cases
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: python3 -m unittest tests.test_native_scalar_intrinsics -v
 
       - name: Download generation-matched Linux cache and exact image
         env:
