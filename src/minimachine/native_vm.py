@@ -64,6 +64,7 @@ MM_INTR_WIDE_CONST_I128 = 23
 MM_INTR_ICMP_EQ_I128 = 24
 MM_INTR_MEMSET = 25
 MM_INTR_MEMCPY = 26
+MM_INTR_SELECT = 27
 
 MM_IPRED_EQ = 1
 MM_IPRED_NE = 2
@@ -109,6 +110,12 @@ def _native_free_intrinsic_enabled() -> bool:
 def _native_simple_intrinsics_enabled() -> bool:
     return os.environ.get(
         "MINIMACHINE_NATIVE_SIMPLE_INTRINSICS", "1"
+    ).lower() not in {"0", "false", "no", "off", ""}
+
+
+def _native_select_intrinsic_enabled() -> bool:
+    return os.environ.get(
+        "MINIMACHINE_NATIVE_SELECT_INTRINSIC", "0"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
@@ -775,6 +782,11 @@ class NativeVM(VM):
                 if 0 <= scale <= 0xFFFFFFFF:
                     out.op = MM_INTR_PTR_ADD_SCALED
                     out.imm = scale
+                return out
+
+        if _native_select_intrinsic_enabled():
+            if re.fullmatch(r"__mm_select_.+", symbol):
+                out.op = MM_INTR_SELECT
                 return out
 
         if _native_memory_intrinsics_enabled():
