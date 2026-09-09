@@ -1,0 +1,160 @@
+name: MiniMachine Prebuilt Native Runtime Cold
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - .github/workflows/busybox-native-runtime-cold.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  cold:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Find generation-matched native runtime image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          lowering_sha="$(git log -1 --format=%H -- \
+            src/minimachine/program_cache.py \
+            src/minimachine/llvm_text.py \
+            src/minimachine/layout.py \
+            src/minimachine/legalize.py \
+            src/minimachine/abi.py \
+            src/minimachine/lower_p3.py \
+            src/minimachine/muir.py \
+            src/minimachine/p3.py \
+            src/minimachine/verify.py \
+            src/minimachine/image.py)"
+          linux_sha="$(git log -1 --format=%H -- \
+            linux-overlay/arch/minimachine \
+            scripts/build-minimachine-initramfs.py \
+            scripts/check-minimachine-boot.sh \
+            .github/workflows/initramfs-build.yml)"
+          native_pack_sha="$(git log -1 --format=%H -- \
+            src/minimachine/native_vm.py \
+            src/minimachine/runtime.py \
+            src/minimachine/vm.py \
+            scripts/run-minimachine-linux.py)"
+          busybox_sha="$(git log -1 --format=%H -- \
+            src/minimachine/legalize.py \
+            tests/test_legalizer.py \
+            src/minimachine/user_image.py \
+            src/minimachine/user_bundle.py \
+            scripts/build-minimachine-busybox.py \
+            .github/workflows/busybox-multicall-bundle.yml)"
+
+          found=""
+          for attempt in $(seq 1 60); do
+            for run_id in $(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow busybox-native-runtime-image.yml \
+              --branch work/native-p3-vm \
+              --status success \
+              --limit 20 \
+              --json databaseId \
+              --jq '.[].databaseId'); do
+              rm -rf candidate-runtime
+              if ! gh run download "$run_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "minimachine-busybox-native-runtime-$run_id" \
+                --dir candidate-runtime >/dev/null 2>&1; then
+                continue
+              fi
+              test -s candidate-runtime/runtime-image.env || continue
+              . candidate-runtime/runtime-image.env
+              if [ "$LOWERING_SHA" = "$lowering_sha" ] && \
+                 [ "$LINUX_SHA" = "$linux_sha" ] && \
+                 [ "$NATIVE_PACK_SHA" = "$native_pack_sha" ] && \
+                 [ "$BUSYBOX_SHA" = "$busybox_sha" ]; then
+                found="$run_id"
+                rm -rf runtime
+                mv candidate-runtime runtime
+                break
+              fi
+            done
+            if [ -n "$found" ]; then
+              break
+            fi
+            echo "waiting for generation-matched native runtime image attempt=$attempt native_pack=$native_pack_sha"
+            sleep 10
+          done
+          test -n "$found"
+          echo "RUNTIME_IMAGE_RUN_ID=$found" | tee build/runtime-cold.env
+          cat runtime/runtime-image.env | tee -a build/runtime-cold.env
+
+          . runtime/runtime-image.env
+          gh run download "$LINUX_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$LINUX_RUN_ID" \
+            --dir linux
+
+          test -s linux/llvm/linked.ll
+          test -s runtime/busybox-real-init.cpio
+          test -s runtime/linux-native-hot-cache.pkl.gz
+          test -s runtime/busybox-real-native-pack.bin
+          stat -c 'RUNTIME_COLD_PACK_BYTES=%s' runtime/busybox-real-native-pack.bin
+
+      - name: Boot prebuilt native runtime from reset
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_NATIVE_ROR32_INTRINSIC: "1"
+          MINIMACHINE_NATIVE_I128_INTRINSICS: "1"
+          MINIMACHINE_NATIVE_SCALAR_INTRINSICS: "1"
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'PREBUILT_RUNTIME_COLD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 900 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --native-hot-cache-in runtime/linux-native-hot-cache.pkl.gz \
+            --initramfs runtime/busybox-real-init.cpio \
+            --native-vm \
+            --native-pack-cache-in runtime/busybox-real-native-pack.bin \
+            --native-boot-phases-only \
+            --checkpoint-out build/prebuilt-runtime-kernel-execve.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-after-checkpoint \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/prebuilt-runtime-cold.log
+
+      - name: Assert prebuilt runtime cold
+        run: |
+          grep -F 'BOOT_EXEC_NATIVE_HOT_CACHE_LOADED ' build/prebuilt-runtime-cold.log
+          grep -F 'BOOT_EXEC_NATIVE_PACK_CACHE_LOADED ' build/prebuilt-runtime-cold.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/prebuilt-runtime-cold.log
+          grep -F 'steps=815095846 function=kernel_execve' build/prebuilt-runtime-cold.log
+          ! grep -F 'BOOT_EXEC_NATIVE_PACK seconds=' build/prebuilt-runtime-cold.log
+          ! grep -F 'BOOT_EXEC_BLOCKED ' build/prebuilt-runtime-cold.log
+          grep -E 'BOOT_EXEC_STAGE stage=(native-vm-init|execute-end)|PREBUILT_RUNTIME_COLD_WALL' \
+            build/prebuilt-runtime-cold.log
+
+      - name: Upload prebuilt cold evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-prebuilt-native-runtime-cold-${{ github.run_id }}
+          path: |
+            build/runtime-cold.env
+            build/prebuilt-runtime-cold.log
+            build/prebuilt-runtime-kernel-execve.chk.gz
+          if-no-files-found: warn
+          retention-days: 7
