@@ -229,7 +229,6 @@ jobs:
       - name: Cold boot real BusyBox rootfs to first exec
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
-          MINIMACHINE_NATIVE_I128_INTRINSICS: "1"
         run: |
           set -o pipefail
           set +e
@@ -270,6 +269,7 @@ jobs:
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
           MINIMACHINE_NATIVE_ROR32_INTRINSIC: "0"
+          MINIMACHINE_NATIVE_I128_INTRINSICS: "0"
         run: |
           set -o pipefail
           set +e
@@ -315,6 +315,7 @@ jobs:
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
           MINIMACHINE_NATIVE_ROR32_INTRINSIC: "1"
+          MINIMACHINE_NATIVE_I128_INTRINSICS: "0"
         run: |
           set -o pipefail
           set +e
@@ -554,8 +555,6 @@ jobs:
       - name: Continue real BusyBox init and shell
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
-          MINIMACHINE_NATIVE_ROR32_INTRINSIC: "1"
-          MINIMACHINE_NATIVE_I128_INTRINSICS: "1"
           MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
         run: |
           set -o pipefail
