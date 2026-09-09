@@ -49,7 +49,9 @@ jobs:
           fetch-depth: 0
 
       - name: Validate native intrinsic mappings
-        run: python3 -m unittest tests.test_native_intrinsics
+        run: |
+          python3 -m unittest tests.test_native_intrinsics
+          python3 -m unittest tests.test_program_cache
 
       - name: Build native VM
         run: |
@@ -218,6 +220,7 @@ jobs:
       - name: Build slim Linux native hot metadata
         env:
           MINIMACHINE_DISABLE_GC: "1"
+          MINIMACHINE_PROGRAM_CACHE_BUFFERED: "1"
         run: |
           /usr/bin/time -f 'CACHED_COLD_HOT_META_BUILD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
             python3 scripts/build-native-hot-cache.py \
@@ -229,6 +232,8 @@ jobs:
       - name: Cold boot real BusyBox rootfs to first exec
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+          MINIMACHINE_PROGRAM_CACHE_BUFFERED: "1"
+          MINIMACHINE_PROGRAM_CACHE_FREEZE_GC: "1"
         run: |
           set -o pipefail
           set +e
@@ -556,6 +561,8 @@ jobs:
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
           MINIMACHINE_USER_IMAGE_REFERENCE: ${{ github.workspace }}/busybox/busybox-multicall.bflt
+          MINIMACHINE_PROGRAM_CACHE_BUFFERED: "1"
+          MINIMACHINE_PROGRAM_CACHE_FREEZE_GC: "1"
         run: |
           set -o pipefail
           set +e
