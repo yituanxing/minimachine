@@ -112,7 +112,7 @@ def _native_simple_intrinsics_enabled() -> bool:
 
 def _native_i128_value_intrinsics_enabled() -> bool:
     return os.environ.get(
-        "MINIMACHINE_NATIVE_I128_VALUE_INTRINSICS", "0"
+        "MINIMACHINE_NATIVE_I128_VALUE_INTRINSICS", "1"
     ).lower() not in {"0", "false", "no", "off", ""}
 
 
