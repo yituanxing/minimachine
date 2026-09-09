@@ -775,6 +775,36 @@ class DynamicUserExternalSurfaceTests(unittest.TestCase):
         self.assertEqual(seen["args"], (14, 0xD340, 0, 0))
         self.assertTrue(seen["kwargs"]["preserve_linux_task_state"])
 
+    def test_access_uses_faccessat_at_fdcwd(self):
+        runner = load_runner()
+        vm = Program().new_vm()
+        seen = {}
+
+        def fake_user_syscall(vm_arg, args):
+            self.assertIs(vm_arg, vm)
+            seen["args"] = args
+            return 0
+
+        runner.user_syscall = fake_user_syscall
+        callback = runner._user_libc_callback("__mm_user_ext_access", None)
+        self.assertIsNotNone(callback)
+        assert callback is not None
+
+        path_ptr = 0xD2C0
+        self.assertEqual(callback(vm, (path_ptr, 1)), 0)
+        self.assertEqual(
+            seen["args"],
+            (
+                48,
+                (-100) & ((1 << 64) - 1),
+                path_ptr,
+                1,
+                0,
+                0,
+                0,
+            ),
+        )
+
     def test_wait_uses_waitpid_for_any_child(self):
         runner = load_runner()
         vm = Program().new_vm()
