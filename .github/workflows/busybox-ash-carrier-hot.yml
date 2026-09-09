@@ -73,6 +73,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --workflow busybox-multicall-cold.yml \
               --branch work/native-p3-vm \
+              --status success \
               --limit 30 \
               --json databaseId,status,conclusion \
               --jq '.[].databaseId'); do
@@ -109,10 +110,16 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --name "minimachine-busybox-real-cold-$found" \
               --dir cold >/dev/null 2>&1; then
-              bundle_ready=1
-              break
+              if [ -s cold/input-runs.env ] && \
+                 [ -s cold/busybox-real-init.cpio ] && \
+                 [ -s cold/busybox-real-kernel-execve.chk.gz ] && \
+                 [ -s cold/busybox-real-native-pack.bin ] && \
+                 [ -s cold/linux-native-hot-cache.pkl.gz ]; then
+                bundle_ready=1
+                break
+              fi
             fi
-            echo "waiting for cold bundle run=$found attempt=$attempt"
+            echo "waiting for complete cold bundle run=$found attempt=$attempt"
             sleep 10
           done
           test -n "$bundle_ready"
