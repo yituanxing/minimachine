@@ -11,6 +11,12 @@ from src.minimachine.native_vm import (
     MM_INTR_ROR32,
     MM_INTR_LOAD_I128,
     MM_INTR_STORE_I128,
+    MM_INTR_IS_CONSTANT,
+    MM_INTR_PREFETCH,
+    MM_INTR_UDIV,
+    MM_INTR_SDIV,
+    MM_INTR_UREM,
+    MM_INTR_SREM,
     NativeVM,
 )
 
@@ -126,6 +132,33 @@ class NativeIntrinsicMappingTests(unittest.TestCase):
                 ).op,
                 MM_INTR_STORE_I128,
             )
+
+    def test_scalar_intrinsics_are_enabled_by_default_and_can_be_disabled(self):
+        symbols = {
+            "__mm_llvm_is_constant_i32": MM_INTR_IS_CONSTANT,
+            "__mm_llvm_prefetch_p0": MM_INTR_PREFETCH,
+            "__mm_udiv_64": MM_INTR_UDIV,
+            "__mm_sdiv_64": MM_INTR_SDIV,
+            "__mm_urem_32": MM_INTR_UREM,
+            "__mm_srem_32": MM_INTR_SREM,
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            for symbol, expected in symbols.items():
+                self.assertEqual(
+                    NativeVM._native_intrinsic_for_symbol(symbol).op,
+                    expected,
+                )
+
+        with patch.dict(
+            os.environ,
+            {"MINIMACHINE_NATIVE_SCALAR_INTRINSICS": "0"},
+            clear=False,
+        ):
+            for symbol in symbols:
+                self.assertEqual(
+                    NativeVM._native_intrinsic_for_symbol(symbol).op,
+                    MM_INTR_NONE,
+                )
 
     def test_expect_and_scaled_pointer_map_to_native_descriptors(self):
         with patch.dict(
