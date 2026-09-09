@@ -19,6 +19,8 @@ from src.minimachine.native_vm import (
     MM_INTR_SREM,
     MM_INTR_WIDE_CONST_I128,
     MM_INTR_ICMP_EQ_I128,
+    MM_INTR_MEMSET,
+    MM_INTR_MEMCPY,
     NativeVM,
 )
 
@@ -134,6 +136,29 @@ class NativeIntrinsicMappingTests(unittest.TestCase):
                 ).op,
                 MM_INTR_STORE_I128,
             )
+
+    def test_memory_intrinsics_are_enabled_by_default_and_can_be_disabled(self):
+        symbols = {
+            "__mm_llvm_memset_p0_i64": MM_INTR_MEMSET,
+            "__mm_llvm_memcpy_p0_p0_i64": MM_INTR_MEMCPY,
+        }
+        with patch.dict(os.environ, {}, clear=True):
+            for symbol, expected in symbols.items():
+                self.assertEqual(
+                    NativeVM._native_intrinsic_for_symbol(symbol).op,
+                    expected,
+                )
+
+        with patch.dict(
+            os.environ,
+            {"MINIMACHINE_NATIVE_MEMORY_INTRINSICS": "0"},
+            clear=False,
+        ):
+            for symbol in symbols:
+                self.assertEqual(
+                    NativeVM._native_intrinsic_for_symbol(symbol).op,
+                    MM_INTR_NONE,
+                )
 
     def test_i128_value_intrinsics_are_enabled_by_default_and_can_be_disabled(self):
         symbols = {
