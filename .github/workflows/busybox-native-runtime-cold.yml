@@ -5,6 +5,16 @@ on:
   push:
     branches: [work/native-p3-vm]
     paths:
+      - native/p3vm.c
+      - src/minimachine/native_vm.py
+      - src/minimachine/runtime.py
+      - src/minimachine/vm.py
+      - src/minimachine/program_cache.py
+      - src/minimachine/native_hot_cache.py
+      - scripts/run-minimachine-linux.py
+      - scripts/build-native-hot-cache.py
+      - scripts/build-minimachine-busybox-rootfs.py
+      - .github/workflows/busybox-native-runtime-image.yml
       - .github/workflows/busybox-native-runtime-cold.yml
 
 permissions:
