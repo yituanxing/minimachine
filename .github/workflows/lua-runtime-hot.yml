@@ -64,31 +64,38 @@ jobs:
           test -n "$linux_sha"
 
           refresh_id=""
-          for candidate_id in $(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow refresh-console-p3-cache.yml \
-            --branch work/native-p3-vm \
-            --status success \
-            --limit 30 \
-            --json databaseId \
-            --jq '.[].databaseId'); do
-            rm -rf candidate-cache
-            if ! gh run download "$candidate_id" \
+          for attempt in $(seq 1 60); do
+            for candidate_id in $(gh run list \
               --repo "$GITHUB_REPOSITORY" \
-              --name "minimachine-linux-p3-console-current-$candidate_id" \
-              --dir candidate-cache >/dev/null 2>&1; then
-              continue
-            fi
-            test -s candidate-cache/input-run.env || continue
-            candidate_lowering="$(sed -n 's/^LOWERING_SHA=//p' candidate-cache/input-run.env)"
-            candidate_linux="$(sed -n 's/^LINUX_SHA=//p' candidate-cache/input-run.env)"
-            if [ "$candidate_lowering" = "$lowering_sha" ] && \
-               [ "$candidate_linux" = "$linux_sha" ]; then
-              refresh_id="$candidate_id"
-              rm -rf current-cache
-              mv candidate-cache current-cache
+              --workflow refresh-console-p3-cache.yml \
+              --branch work/native-p3-vm \
+              --status success \
+              --limit 30 \
+              --json databaseId \
+              --jq '.[].databaseId'); do
+              rm -rf candidate-cache
+              if ! gh run download "$candidate_id" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "minimachine-linux-p3-console-current-$candidate_id" \
+                --dir candidate-cache >/dev/null 2>&1; then
+                continue
+              fi
+              test -s candidate-cache/input-run.env || continue
+              candidate_lowering="$(sed -n 's/^LOWERING_SHA=//p' candidate-cache/input-run.env)"
+              candidate_linux="$(sed -n 's/^LINUX_SHA=//p' candidate-cache/input-run.env)"
+              if [ "$candidate_lowering" = "$lowering_sha" ] && \
+                 [ "$candidate_linux" = "$linux_sha" ]; then
+                refresh_id="$candidate_id"
+                rm -rf current-cache
+                mv candidate-cache current-cache
+                break
+              fi
+            done
+            if [ -n "$refresh_id" ]; then
               break
             fi
+            echo "waiting for generation-matched P3 cache attempt=$attempt lowering=$lowering_sha linux=$linux_sha"
+            sleep 10
           done
           test -n "$refresh_id"
 
