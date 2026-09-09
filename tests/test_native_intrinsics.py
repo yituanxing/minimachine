@@ -17,6 +17,8 @@ from src.minimachine.native_vm import (
     MM_INTR_SDIV,
     MM_INTR_UREM,
     MM_INTR_SREM,
+    MM_INTR_WIDE_CONST_I128,
+    MM_INTR_ICMP_EQ_I128,
     NativeVM,
 )
 
@@ -132,6 +134,33 @@ class NativeIntrinsicMappingTests(unittest.TestCase):
                 ).op,
                 MM_INTR_STORE_I128,
             )
+
+    def test_i128_value_intrinsics_are_opt_in(self):
+        symbols = {
+            "__mm_wide_const_128": MM_INTR_WIDE_CONST_I128,
+            "__mm_icmp_eq_128": MM_INTR_ICMP_EQ_I128,
+        }
+        with patch.dict(
+            os.environ,
+            {"MINIMACHINE_NATIVE_I128_VALUE_INTRINSICS": "0"},
+            clear=False,
+        ):
+            for symbol in symbols:
+                self.assertEqual(
+                    NativeVM._native_intrinsic_for_symbol(symbol).op,
+                    MM_INTR_NONE,
+                )
+
+        with patch.dict(
+            os.environ,
+            {"MINIMACHINE_NATIVE_I128_VALUE_INTRINSICS": "1"},
+            clear=False,
+        ):
+            for symbol, expected in symbols.items():
+                self.assertEqual(
+                    NativeVM._native_intrinsic_for_symbol(symbol).op,
+                    expected,
+                )
 
     def test_scalar_intrinsics_are_enabled_by_default_and_can_be_disabled(self):
         symbols = {
