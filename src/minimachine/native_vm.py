@@ -86,7 +86,7 @@ MM_STATUS_WATCH = 3
 MM_STATUS_ERROR = 4
 _NATIVE_PAGE_SIZE = 65536
 _NATIVE_PACK_MAGIC = b"MMP3NP1\0"
-_NATIVE_PACK_VERSION = 1
+_NATIVE_PACK_VERSION = 2
 _NATIVE_PACK_HEADER = struct.Struct("<8sIIIIQQQQ32s40x")
 _NATIVE_PACK_HEADER_SIZE = _NATIVE_PACK_HEADER.size
 
@@ -211,12 +211,10 @@ class CInst(ctypes.Structure):
         ("extend", ctypes.c_uint8),
         ("src_bits", ctypes.c_uint8),
         ("_pad", ctypes.c_uint8 * 3),
-        ("dst", COperand),
-        ("src", COperand),
-        ("a", COperand),
-        ("b", COperand),
-        ("t", COperand),
-        ("f", COperand),
+        ("op0", COperand),
+        ("op1", COperand),
+        ("op2", COperand),
+        ("op3", COperand),
     ]
 
 
@@ -1413,14 +1411,14 @@ class NativeVM(VM):
                         "trunc": MM_EXT_TRUNC,
                     }[inst.extend]
                     out.src_bits = inst.src_bits or 0
-                    out.dst = self._operand(inst.dst, linked, program)
-                    out.src = self._operand(inst.src, linked, program)
+                    out.op0 = self._operand(inst.dst, linked, program)
+                    out.op1 = self._operand(inst.src, linked, program)
                 elif isinstance(inst, p3.Sub):
                     out.opcode = MM_OP_SUB
                     out.width = inst.width.value
-                    out.dst = self._operand(inst.dst, linked, program)
-                    out.a = self._operand(inst.a, linked, program)
-                    out.b = self._operand(inst.b, linked, program)
+                    out.op0 = self._operand(inst.dst, linked, program)
+                    out.op1 = self._operand(inst.a, linked, program)
+                    out.op2 = self._operand(inst.b, linked, program)
                 elif isinstance(inst, p3.Br):
                     out.opcode = MM_OP_BR
                     out.width = inst.width.value
@@ -1429,9 +1427,9 @@ class NativeVM(VM):
                         muir.Cond.ULT: MM_COND_ULT,
                         muir.Cond.SLT: MM_COND_SLT,
                     }[inst.cond]
-                    out.a = self._operand(inst.a, linked, program)
-                    out.b = self._operand(inst.b, linked, program)
-                    out.t = self._target(
+                    out.op0 = self._operand(inst.a, linked, program)
+                    out.op1 = self._operand(inst.b, linked, program)
+                    out.op2 = self._target(
                         inst.true_target,
                         function_name,
                         linked,
@@ -1439,7 +1437,7 @@ class NativeVM(VM):
                         host_by_symbol,
                         local_block_index,
                     )
-                    out.f = self._target(
+                    out.op3 = self._target(
                         inst.false_target,
                         function_name,
                         linked,
