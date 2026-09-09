@@ -3468,6 +3468,25 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_execvp
 
+    if original == "wait":
+        waitpid_callback = _user_libc_callback(
+            external_prefix + "waitpid",
+            errno_address,
+        )
+        if waitpid_callback is None:
+            return None
+
+        def user_wait(vm, args):
+            if len(args) != 1:
+                raise VMError("wait expects status")
+            status_ptr = int(args[0])
+            return waitpid_callback(
+                vm,
+                ((1 << 64) - 1, status_ptr, 0),
+            )
+
+        return user_wait
+
     if original == "waitpid":
         def user_waitpid(vm, args):
             if len(args) != 3:
