@@ -21,6 +21,9 @@ from src.minimachine.native_vm import (
     MM_INTR_ICMP_EQ_I128,
     MM_INTR_MEMSET,
     MM_INTR_MEMCPY,
+    MM_INTR_LOAD_AGGREGATE,
+    MM_INTR_STORE_AGGREGATE,
+    MM_INTR_RETURNADDRESS,
     NativeVM,
 )
 
@@ -136,6 +139,34 @@ class NativeIntrinsicMappingTests(unittest.TestCase):
                 ).op,
                 MM_INTR_STORE_I128,
             )
+
+    def test_aggregate_intrinsics_are_opt_in(self):
+        symbols = {
+            "__mm_load_aggregate": MM_INTR_LOAD_AGGREGATE,
+            "__mm_store_aggregate": MM_INTR_STORE_AGGREGATE,
+            "__mm_llvm_returnaddress": MM_INTR_RETURNADDRESS,
+        }
+        with patch.dict(
+            os.environ,
+            {"MINIMACHINE_NATIVE_AGGREGATE_INTRINSICS": "0"},
+            clear=False,
+        ):
+            for symbol in symbols:
+                self.assertEqual(
+                    NativeVM._native_intrinsic_for_symbol(symbol).op,
+                    MM_INTR_NONE,
+                )
+
+        with patch.dict(
+            os.environ,
+            {"MINIMACHINE_NATIVE_AGGREGATE_INTRINSICS": "1"},
+            clear=False,
+        ):
+            for symbol, expected in symbols.items():
+                self.assertEqual(
+                    NativeVM._native_intrinsic_for_symbol(symbol).op,
+                    expected,
+                )
 
     def test_memory_intrinsics_are_enabled_by_default_and_can_be_disabled(self):
         symbols = {
