@@ -91,6 +91,38 @@ jobs:
           )
           PY
 
+      - name: Measure buffered load with cyclic GC disabled
+        run: |
+          /usr/bin/time -f 'PROGRAM_CACHE_BUFFERED_NOGC_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 - <<'PY'
+          import gc
+          import gzip
+          import pickle
+          import time
+          from pathlib import Path
+          import src.minimachine.program_cache  # noqa: F401
+
+          gc.disable()
+          path = Path("current-cache/linux-initramfs-p3-cache-full-current.pkl.gz")
+          total_started = time.perf_counter()
+          compressed = path.read_bytes()
+          decompress_started = time.perf_counter()
+          raw = gzip.decompress(compressed)
+          decompress_elapsed = time.perf_counter() - decompress_started
+          pickle_started = time.perf_counter()
+          payload = pickle.loads(raw)
+          pickle_elapsed = time.perf_counter() - pickle_started
+          total_elapsed = time.perf_counter() - total_started
+          cache = payload["cache"]
+          print(
+              f"PROGRAM_CACHE_BUFFERED_NOGC_PYTHON total={total_elapsed:.6f} "
+              f"decompress={decompress_elapsed:.6f} "
+              f"pickle={pickle_elapsed:.6f} "
+              f"gc_enabled={int(gc.isenabled())} "
+              f"functions={len(cache.program.functions)}"
+          )
+          PY
+
       - name: Materialize plain pickle
         run: |
           mkdir -p build
