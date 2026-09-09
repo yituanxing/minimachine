@@ -3468,6 +3468,58 @@ def _user_libc_callback(symbol: str, errno_address: int | None):
 
         return user_execvp
 
+    if original in {"setutxent", "endutxent", "setutent", "endutent"}:
+        def user_utmp_cursor(vm, args):
+            if args:
+                raise VMError(f"{original} expects no arguments")
+            return None
+
+        return user_utmp_cursor
+
+    if original in {
+        "getutxent", "getutxid", "getutxline",
+        "getutent", "getutid", "getutline",
+    }:
+        expected_args = 0 if original in {"getutxent", "getutent"} else 1
+
+        def user_utmp_lookup(vm, args):
+            if len(args) != expected_args:
+                raise VMError(
+                    f"{original} expects {expected_args} arguments"
+                )
+            # MiniMachine has no persistent utmp database yet. An empty
+            # database is a valid environment for BusyBox init/getty; callers
+            # construct a fresh record and feed it to pututxline/pututline.
+            return 0
+
+        return user_utmp_lookup
+
+    if original in {"pututxline", "pututline"}:
+        def user_utmp_put(vm, args):
+            if len(args) != 1:
+                raise VMError(f"{original} expects one record")
+            # Accept the record without persisting host-side login accounting.
+            # Returning the input pointer matches a successful libc update.
+            return int(args[0])
+
+        return user_utmp_put
+
+    if original in {"utmpxname", "utmpname"}:
+        def user_utmp_name(vm, args):
+            if len(args) != 1:
+                raise VMError(f"{original} expects one path")
+            return 0
+
+        return user_utmp_name
+
+    if original in {"updwtmpx", "updwtmp"}:
+        def user_wtmp_update(vm, args):
+            if len(args) != 2:
+                raise VMError(f"{original} expects path,record")
+            return None
+
+        return user_wtmp_update
+
     if original == "access":
         def user_access(vm, args):
             if len(args) != 2:
