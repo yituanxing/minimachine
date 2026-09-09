@@ -10,6 +10,7 @@ on:
       - src/minimachine/native_hot_cache.py
       - src/minimachine/checkpoint.py
       - tests/test_native_hot_cache.py
+      - tests/test_native_compact_layout.py
       - .github/workflows/native-checkpoint-roundtrip.yml
 
 jobs:
@@ -35,13 +36,14 @@ jobs:
               f"inst_bytes={ctypes.sizeof(CInst)}"
           )
           assert ctypes.sizeof(COperand) == 32
-          assert ctypes.sizeof(CInst) == 200
+          assert ctypes.sizeof(CInst) == 136
           PY
 
       - name: Checkpoint unit contracts
         run: |
           python3 -m unittest tests.test_checkpoint -v
           python3 -m unittest tests.test_native_hot_cache -v
+          python3 -m unittest tests.test_native_compact_layout -v
 
       - name: Native packed-cache round trip
         env:
