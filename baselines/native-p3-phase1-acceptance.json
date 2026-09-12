@@ -47,6 +47,22 @@
       "status": 0
     }
   },
+  "closure_validation": {
+    "abi_contract_commit": "1fdee4e0a2574e43da4fae83cea3b5ad41d8c830",
+    "workflow_run_id": 34685872480,
+    "main_job_id": 103532648962,
+    "verified_steps": {
+      "python_c_struct_layout_contract": "pass",
+      "python_c_numeric_constant_contract": "pass",
+      "native_intrinsic_mappings": "pass",
+      "native_vm_build": "pass",
+      "scalar_intrinsic_edges": "pass",
+      "generation_matched_linux": "pass",
+      "generation_matched_busybox": "pass",
+      "real_busybox_rootfs": "pass"
+    },
+    "status_note": "The formal run was still executing later cold-boot stages when this baseline metadata was updated; only completed steps are recorded here."
+  },
   "performance": {
     "latest_formal_per_stage_wall_seconds": null,
     "latest_formal_per_stage_wall_note": "Run 34682892461 passed all formal gates, but its small generation manifest does not persist the per-stage *_WALL values. Do not substitute GitHub Actions step duration. Add a compact performance-summary artifact and freeze exact values from a generation-matched rerun.",
@@ -63,6 +79,7 @@
     "step_equivalence_required": true,
     "generation_match_required": true,
     "real_software_required": true,
+    "python_c_abi_contract_required": true,
     "do_not_accept_ci_step_duration_as_benchmark": true
   }
 }
