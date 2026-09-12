@@ -24,19 +24,8 @@ def _newc_entry(
 ) -> None:
     encoded = name.encode("utf-8") + b"\0"
     fields = (
-        ino,
-        mode,
-        0,
-        0,
-        nlink,
-        0,
-        len(data),
-        0,
-        0,
-        rdevmajor,
-        rdevminor,
-        len(encoded),
-        0,
+        ino, mode, 0, 0, nlink, 0, len(data),
+        0, 0, rdevmajor, rdevminor, len(encoded), 0,
     )
     out.extend(b"070701")
     out.extend("".join(f"{value:08x}" for value in fields).encode("ascii"))
@@ -53,6 +42,7 @@ def build_rootfs(
     init_script: bytes | None,
     busybox_init: bool = False,
     rc_script: bytes | None = None,
+    extra_programs: tuple[tuple[str, bytes], ...] = (),
 ) -> tuple[bytes, int]:
     out = bytearray()
     ino = 1
@@ -64,10 +54,16 @@ def build_rootfs(
         ino += 1
         entries += 1
 
-    directories = [".", "bin", "dev", "proc", "sys", "etc", "tmp", "root"]
+    directories = {".", "bin", "dev", "proc", "sys", "etc", "tmp", "root"}
     if busybox_init:
-        directories.append("etc/init.d")
-    for name in directories:
+        directories.add("etc/init.d")
+    for guest_path, _data in extra_programs:
+        components = [part for part in guest_path.strip("/").split("/") if part]
+        prefix = ""
+        for part in components[:-1]:
+            prefix = f"{prefix}/{part}" if prefix else part
+            directories.add(prefix)
+    for name in sorted(directories, key=lambda x: (x.count("/"), x)):
         add(name, mode=stat.S_IFDIR | (0o1777 if name == "tmp" else 0o755), nlink=2)
 
     add(
@@ -90,6 +86,16 @@ def build_rootfs(
             mode=stat.S_IFLNK | 0o777,
             data=b"busybox",
         )
+
+    occupied = {"bin/busybox", *(f"bin/{name}" for name in installed)}
+    for guest_path, data in extra_programs:
+        name = guest_path.lstrip("/")
+        if not name or name in occupied or name == "init":
+            raise ValueError(f"extra program path collides with rootfs entry: {guest_path}")
+        if not data:
+            raise ValueError(f"extra program is empty: {guest_path}")
+        occupied.add(name)
+        add(name, mode=stat.S_IFREG | 0o755, data=data)
 
     if busybox_init:
         if init_script is not None:
@@ -142,6 +148,17 @@ def main() -> int:
         default="ls,cat,echo,uname,pwd,mkdir,rm,rmdir,touch,head,tail,wc,true,false",
         help="comma-separated /bin applet symlinks",
     )
+    p.add_argument(
+        "--extra-program",
+        action="append",
+        nargs=2,
+        metavar=("HOST", "GUEST"),
+        default=[],
+        help=(
+            "install an additional executable image at an absolute guest path; "
+            "may be repeated"
+        ),
+    )
     init_group = p.add_mutually_exclusive_group()
     init_group.add_argument(
         "--init-script-file",
@@ -180,12 +197,25 @@ def main() -> int:
         if args.rc_script_file is not None
         else None
     )
+    extra_programs: list[tuple[str, bytes]] = []
+    for host_text, guest_path in args.extra_program:
+        host = Path(host_text)
+        if not guest_path.startswith("/"):
+            p.error(f"--extra-program guest path must be absolute: {guest_path}")
+        if guest_path in {"/init", "/bin/busybox"}:
+            p.error(f"--extra-program path is reserved: {guest_path}")
+        data = host.read_bytes()
+        if not data:
+            raise SystemExit(f"empty --extra-program image: {host}")
+        extra_programs.append((guest_path, data))
+
     archive, entries = build_rootfs(
         busybox,
         applets=applets,
         init_script=init_script,
         busybox_init=args.busybox_init,
         rc_script=rc_script,
+        extra_programs=tuple(extra_programs),
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -195,9 +225,16 @@ def main() -> int:
         f"path={args.output} bytes={len(archive)} "
         f"busybox_bytes={len(busybox)} entries={entries} "
         f"mode={'busybox-init' if args.busybox_init else 'script'} "
-        f"applets={','.join(('sh', *applets))}",
+        f"applets={','.join(('sh', *applets))} "
+        f"extra_programs={len(extra_programs)}",
         flush=True,
     )
+    for guest_path, data in extra_programs:
+        print(
+            "BUSYBOX_ROOTFS_EXTRA_PROGRAM "
+            f"guest={guest_path} bytes={len(data)}",
+            flush=True,
+        )
     return 0
 
 
