@@ -7,6 +7,7 @@ from src.minimachine.user_bundle import (
     rebase_user_program_namespace,
 )
 from src.minimachine.user_image import UserProgramImage
+# Keep LLVM fence/atomic text regressions in the SQLite gate's watched test set.
 from tests.test_llvm_fence import LLVMFenceTests
 
 
