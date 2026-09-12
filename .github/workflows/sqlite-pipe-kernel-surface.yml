@@ -33,11 +33,11 @@ jobs:
             linux/llvm/linked.ll | tee pipe-symbols.txt || true
           grep -nE '@(__se_sys_pipe2|__do_sys_pipe2|ksys_pipe|do_pipe2|__se_sys_pipe)\b' \
             linux/llvm/linked.ll | head -80 | tee -a pipe-symbols.txt || true
-          if grep -Eq '^define .*@__se_sys_pipe2\(' pipe-symbols.txt; then
+          if grep -Eq '^define .*@__se_sys_pipe2\(' linux/llvm/linked.ll; then
             echo PIPE_KERNEL_SURFACE=se-sys-pipe2
-          elif grep -Eq '^define .*@ksys_pipe\(' pipe-symbols.txt; then
+          elif grep -Eq '^define .*@ksys_pipe\(' linux/llvm/linked.ll; then
             echo PIPE_KERNEL_SURFACE=ksys-pipe
-          elif grep -Eq '^define .*@do_pipe2\(' pipe-symbols.txt; then
+          elif grep -Eq '^define .*@do_pipe2\(' linux/llvm/linked.ll; then
             echo PIPE_KERNEL_SURFACE=do-pipe2
           else
             echo PIPE_KERNEL_SURFACE=missing
