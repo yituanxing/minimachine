@@ -14,6 +14,8 @@ _SIGCHLD = 17
 _SIGSET_BYTES = 8
 _EXECVE_NR = 221
 _EXECVE_PRESERVED_STEPS = 64_000_000
+_WAIT_SCHEDULE_BASE_STEPS = 12_000_000
+_WAIT_SCHEDULE_PRESERVED_STEPS = 180_000_000
 
 
 def load_posix_bridge():
@@ -109,6 +111,15 @@ def install_fork_stack_bridge(runner) -> None:
                 print(
                     "BOOT_EXEC_USER_EXECVE_BUDGET "
                     f"old={old_budget} new={_EXECVE_PRESERVED_STEPS}",
+                    flush=True,
+                )
+        elif name == "schedule":
+            old_budget = int(kwargs.get("max_extra_steps", 0) or 0)
+            if old_budget == _WAIT_SCHEDULE_BASE_STEPS:
+                kwargs["max_extra_steps"] = _WAIT_SCHEDULE_PRESERVED_STEPS
+                print(
+                    "BOOT_EXEC_USER_WAIT_SCHEDULE_BUDGET "
+                    f"old={old_budget} new={_WAIT_SCHEDULE_PRESERVED_STEPS}",
                     flush=True,
                 )
         return base_preserved_call(vm, name, args, **kwargs)
