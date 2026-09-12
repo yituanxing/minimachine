@@ -1,0 +1,42 @@
+name: SQLite External Surface Scan
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/sqlite-real-software]
+    paths:
+      - .github/workflows/sqlite-external-surface.yml
+      - scripts/scan-sqlite-external-surface.py
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download proven SQLite bundle report
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34689448761
+          github-token: ${{ github.token }}
+          name: minimachine-sqlite3534-34689448761
+          path: sqlite
+
+      - name: Scan callback registry
+        run: |
+          python3 scripts/scan-sqlite-external-surface.py \
+            sqlite/sqlite3534-bundle.json | tee sqlite-external-surface.txt
+          grep -F 'SQLITE_EXTERNAL_SURFACE ' sqlite-external-surface.txt
+
+      - name: Upload scan
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-external-surface-${{ github.run_id }}
+          path: sqlite-external-surface.txt
+          retention-days: 7
