@@ -1,0 +1,206 @@
+name: MiniMachine SQLite Runtime Frontier
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/sqlite-real-software]
+    paths:
+      - .github/workflows/sqlite-runtime-frontier.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: sqlite-runtime-frontier-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runtime-frontier:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download proven SQLite bundle
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34689448761
+          github-token: ${{ github.token }}
+          name: minimachine-sqlite3534-34689448761
+          path: sqlite
+
+      - name: Download frozen BusyBox multicall image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33396890631
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-multicall-33396890631
+          path: busybox
+
+      - name: Download latest qualified Linux image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow initramfs-build.yml \
+            --branch work/native-p3-vm \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')"
+          test -n "$run_id"
+          echo "SQLITE_FRONTIER_LINUX_RUN=$run_id" | tee build/frontier-inputs.txt
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "minimachine-linux-initramfs-$run_id" \
+            --dir linux
+          test -s linux/llvm/linked.ll
+          test -s linux/out/minimachine-initramfs.cpio
+
+      - name: Build current-lowering Linux P3 cache
+        run: |
+          set -o pipefail
+          set +e
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --initramfs linux/out/minimachine-initramfs.cpio \
+            --program-cache-out build/linux-current-p3-cache.pkl.gz \
+            --probe-kallsyms start_kernel \
+            --max-steps 1 \
+            2>&1 | tee build/linux-current-cache.log
+          status=${PIPESTATUS[0]}
+          set -e
+          grep -F 'BOOT_EXEC_PROGRAM_CACHE_SAVED path=build/linux-current-p3-cache.pkl.gz' \
+            build/linux-current-cache.log
+          test -s build/linux-current-p3-cache.pkl.gz
+          if [ "$status" -ne 0 ]; then
+            grep -F 'step limit exceeded: 1' build/linux-current-cache.log
+          fi
+
+      - name: Build persistence rootfs
+        run: |
+          test -s sqlite/sqlite3534.bflt
+          test -s busybox/busybox-multicall.bflt
+          sha256sum sqlite/sqlite3534.bflt busybox/busybox-multicall.bflt \
+            >> build/frontier-inputs.txt
+          cat > build/sqlite-rcS.sh <<'SH'
+          #!/bin/sh
+          PATH=/bin
+          export PATH
+          rm -f /tmp/mm.db
+          echo SQLITE_MINIMACHINE_BEGIN
+          /bin/sqlite3 -batch -noheader /tmp/mm.db <<'SQL'
+          CREATE TABLE mm(id INTEGER PRIMARY KEY, n INTEGER NOT NULL, s TEXT NOT NULL);
+          INSERT INTO mm(n,s) VALUES(7,'alpha'),(11,'beta'),(13,'gamma');
+          SELECT 'SQLITE_MINIMACHINE_CREATE', sqlite_version(), count(*), sum(n) FROM mm;
+          SQL
+          echo SQLITE_MINIMACHINE_FIRST_EXIT_$?
+          /bin/sqlite3 -batch -noheader /tmp/mm.db <<'SQL'
+          SELECT 'SQLITE_MINIMACHINE_REOPEN', count(*), sum(n), group_concat(s, ',') FROM mm;
+          SQL
+          echo SQLITE_MINIMACHINE_SECOND_EXIT_$?
+          test -s /tmp/mm.db
+          echo SQLITE_MINIMACHINE_DONE
+          exit 0
+          SH
+          chmod +x build/sqlite-rcS.sh
+          python3 scripts/build-minimachine-busybox-rootfs.py \
+            build/sqlite-rootfs.cpio \
+            --busybox-image busybox/busybox-multicall.bflt \
+            --busybox-init \
+            --rc-script-file build/sqlite-rcS.sh \
+            --extra-program sqlite/sqlite3534.bflt /bin/sqlite3 \
+            2>&1 | tee build/sqlite-rootfs.log
+          test -s build/sqlite-rootfs.cpio
+
+      - name: Cold boot to first exec checkpoint
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          set +e
+          /usr/bin/time -f 'SQLITE_FRONTIER_COLD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 1500 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in build/linux-current-p3-cache.pkl.gz \
+            --initramfs build/sqlite-rootfs.cpio \
+            --native-vm \
+            --native-boot-phases-only \
+            --checkpoint-out build/sqlite-kernel-execve.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-after-checkpoint \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/sqlite-cold.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "SQLITE_FRONTIER_COLD_STATUS=$status" | tee -a build/sqlite-cold.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/sqlite-cold.log
+          test -s build/sqlite-kernel-execve.chk.gz
+
+      - name: Run persistence workload from exec checkpoint
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          set +e
+          /usr/bin/time -f 'SQLITE_FRONTIER_RUNTIME_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 900 \
+          python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in build/linux-current-p3-cache.pkl.gz \
+            --initramfs build/sqlite-rootfs.cpio \
+            --native-vm \
+            --checkpoint-in build/sqlite-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/sqlite-runtime.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "SQLITE_FRONTIER_RUNTIME_STATUS=$status" | tee -a build/sqlite-runtime.log
+
+      - name: Classify runtime frontier
+        if: always()
+        run: |
+          grep -E \
+            'BOOT_EXEC_(CHECKPOINT_RESTORED|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_EXIT|BLOCKED|HALTED)|SQLITE_' \
+            build/sqlite-runtime.log | tail -600 || true
+          if grep -F 'SQLITE_MINIMACHINE_DONE' build/sqlite-runtime.log >/dev/null; then
+            echo SQLITE_RUNTIME_FRONTIER=persistence-complete
+          elif grep -F 'BOOT_EXEC_BLOCKED ' build/sqlite-runtime.log >/dev/null; then
+            echo SQLITE_RUNTIME_FRONTIER=blocked
+            grep -F 'BOOT_EXEC_BLOCKED ' build/sqlite-runtime.log | tail -1
+          elif grep -F 'SQLITE_MINIMACHINE_BEGIN' build/sqlite-runtime.log >/dev/null; then
+            echo SQLITE_RUNTIME_FRONTIER=sqlite-workload-started
+          else
+            echo SQLITE_RUNTIME_FRONTIER=before-sqlite-workload
+          fi
+
+      - name: Upload frontier evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-sqlite-runtime-frontier-${{ github.run_id }}
+          path: |
+            build/frontier-inputs.txt
+            build/linux-current-cache.log
+            build/sqlite-rcS.sh
+            build/sqlite-rootfs.log
+            build/sqlite-cold.log
+            build/sqlite-runtime.log
+          if-no-files-found: warn
+          retention-days: 7
