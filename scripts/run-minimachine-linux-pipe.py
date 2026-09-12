@@ -20,7 +20,62 @@ def load_runner():
     return module
 
 
+def install_pipe_syscall_fallback(runner) -> None:
+    """Extend the generic userspace syscall fallback with asm-generic pipe2."""
+    if getattr(runner, "_minimachine_pipe2_fallback_installed", False):
+        return
+
+    base_user_syscall = runner.user_syscall
+
+    def user_syscall(vm, args: tuple[int, ...]):
+        if len(args) != 7 or int(args[0]) != 59:
+            return base_user_syscall(vm, args)
+
+        target = "__se_sys_pipe2"
+        if target not in vm.program.functions:
+            return base_user_syscall(vm, args)
+
+        _, pipefd, flags, *_ = map(int, args)
+        call_result = runner._call_linux_function_preserving_control(
+            vm,
+            target,
+            (pipefd, flags),
+            result_count=1,
+            max_extra_steps=8_000_000,
+        )
+        if call_result is runner.HOST_CONTROL_TRANSFER:
+            print(
+                "BOOT_EXEC_USER_SYSCALL_FALLBACK_TRANSFER "
+                f"nr=59 target={target}",
+                flush=True,
+            )
+            return call_result
+
+        result, = call_result
+        print(
+            "BOOT_EXEC_USER_SYSCALL_FALLBACK "
+            f"nr=59 target={target}",
+            flush=True,
+        )
+        count = int(getattr(vm, "user_syscall_count", 0)) + 1
+        vm.user_syscall_count = count
+        if count <= 64:
+            signed = result - (1 << 64) if result & (1 << 63) else result
+            print(
+                "BOOT_EXEC_USER_SYSCALL "
+                f"seq={count} nr=59 "
+                f"args={','.join(f'0x{int(x):x}' for x in args[1:])} "
+                f"result={signed}",
+                flush=True,
+            )
+        return result
+
+    runner.user_syscall = user_syscall
+    runner._minimachine_pipe2_fallback_installed = True
+
+
 def install_pipe_callbacks(runner) -> None:
+    install_pipe_syscall_fallback(runner)
     base_callback = runner._user_libc_callback
 
     def callback_for(symbol: str, errno_address: int | None):
