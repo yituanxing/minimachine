@@ -87,13 +87,13 @@ jobs:
             grep -F 'step limit exceeded: 1' build/linux-current-cache.log
           fi
 
-      - name: Build persistence rootfs
+      - name: Build self-terminating persistence rootfs
         run: |
           test -s sqlite/sqlite3534.bflt
           test -s busybox/busybox-multicall.bflt
           sha256sum sqlite/sqlite3534.bflt busybox/busybox-multicall.bflt \
             >> build/frontier-inputs.txt
-          cat > build/sqlite-rcS.sh <<'SH'
+          cat > build/sqlite-init.sh <<'SH'
           #!/bin/sh
           PATH=/bin
           export PATH
@@ -113,14 +113,15 @@ jobs:
           echo SQLITE_MINIMACHINE_DONE
           exit 0
           SH
-          chmod +x build/sqlite-rcS.sh
+          chmod +x build/sqlite-init.sh
           python3 scripts/build-minimachine-busybox-rootfs.py \
             build/sqlite-rootfs.cpio \
             --busybox-image busybox/busybox-multicall.bflt \
-            --busybox-init \
-            --rc-script-file build/sqlite-rcS.sh \
+            --init-script-file build/sqlite-init.sh \
             --extra-program sqlite/sqlite3534.bflt /bin/sqlite3 \
             2>&1 | tee build/sqlite-rootfs.log
+          grep -F 'mode=script ' build/sqlite-rootfs.log
+          grep -F 'extra_programs=1' build/sqlite-rootfs.log
           test -s build/sqlite-rootfs.cpio
 
       - name: Cold boot to first exec checkpoint
@@ -158,7 +159,7 @@ jobs:
           set -o pipefail
           set +e
           /usr/bin/time -f 'SQLITE_FRONTIER_RUNTIME_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
-          timeout --signal=TERM 900 \
+          timeout --signal=TERM 300 \
           python3 scripts/run-minimachine-linux.py linux/llvm/linked.ll \
             --linker-contract configs/linux-6.6.143-minimachine-linker.json \
             --program-cache-in build/linux-current-p3-cache.pkl.gz \
@@ -198,7 +199,7 @@ jobs:
           path: |
             build/frontier-inputs.txt
             build/linux-current-cache.log
-            build/sqlite-rcS.sh
+            build/sqlite-init.sh
             build/sqlite-rootfs.log
             build/sqlite-cold.log
             build/sqlite-runtime.log
