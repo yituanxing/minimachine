@@ -1,0 +1,116 @@
+name: SQLite Runtime Fork Stack
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/sqlite-real-software]
+    paths:
+      - .github/workflows/sqlite-runtime-forkstack.yml
+      - scripts/run-minimachine-linux-forkstack.py
+      - tests/test_user_fork_stack_bridge.py
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  forkstack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate fork stack bridge
+        run: |
+          python3 tests/test_user_pipe_bridge.py
+          python3 tests/test_user_posix_bridge.py
+          python3 tests/test_user_fork_stack_bridge.py
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download exact Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33632628029
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33632628029
+          path: linux
+
+      - name: Download reusable runtime base
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34690929288
+          github-token: ${{ github.token }}
+          name: sqlite-runtime-base-34690929288
+          path: base
+
+      - name: Resume SQLite workload with fork stack preservation
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          set +e
+          /usr/bin/time -f 'SQLITE_FORKSTACK_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 240 \
+          python3 scripts/run-minimachine-linux-forkstack.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in base/linux-current-p3-cache.pkl.gz \
+            --initramfs base/sqlite-rootfs.cpio \
+            --native-vm \
+            --native-pack-cache-out build/sqlite-native-pack.bin \
+            --native-append-pack-cache-out-dir build/sqlite-append-pack \
+            --checkpoint-in base/sqlite-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/sqlite-forkstack.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "SQLITE_FORKSTACK_STATUS=$status" | tee -a build/sqlite-forkstack.log
+
+      - name: Classify child exec frontier
+        if: always()
+        run: |
+          log=build/sqlite-forkstack.log
+          grep -E 'BOOT_EXEC_USER_(FORK_STACK|FORK_CHILD_RETURN|SYSCALL.*nr=221|IMAGE_CACHE|HANDOFF|EXTERNAL|EXIT)|SQLITE_' "$log" | tail -400 || true
+          if grep -Fx 'SQLITE_MINIMACHINE_CREATE|3.53.4|3|31' "$log" >/dev/null \
+             && grep -Fx 'SQLITE_MINIMACHINE_FIRST_EXIT_0' "$log" >/dev/null \
+             && grep -Fx 'SQLITE_MINIMACHINE_REOPEN|3|31|alpha,beta,gamma' "$log" >/dev/null \
+             && grep -Fx 'SQLITE_MINIMACHINE_SECOND_EXIT_0' "$log" >/dev/null; then
+            echo SQLITE_FORKSTACK_FRONTIER=persistence-complete
+          elif grep -E 'nr=221|payload_bytes=11669952|functions=1944' "$log" >/dev/null; then
+            echo SQLITE_FORKSTACK_FRONTIER=sqlite-exec-reached
+          elif grep -F 'BOOT_EXEC_USER_FORK_STACK_RESTORED' "$log" >/dev/null; then
+            echo SQLITE_FORKSTACK_FRONTIER=child-stack-restored
+          else
+            echo SQLITE_FORKSTACK_FRONTIER=before-child-stack-restore
+          fi
+
+      - name: Assert real persistence
+        run: |
+          log=build/sqlite-forkstack.log
+          grep -Fx 'SQLITE_MINIMACHINE_CREATE|3.53.4|3|31' "$log"
+          grep -Fx 'SQLITE_MINIMACHINE_FIRST_EXIT_0' "$log"
+          grep -Fx 'SQLITE_MINIMACHINE_REOPEN|3|31|alpha,beta,gamma' "$log"
+          grep -Fx 'SQLITE_MINIMACHINE_SECOND_EXIT_0' "$log"
+          ! grep -F 'BOOT_EXEC_BLOCKED ' "$log"
+          ! grep -F 'Function not implemented' "$log"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-runtime-forkstack-${{ github.run_id }}
+          path: |
+            build/sqlite-forkstack.log
+            build/sqlite-native-pack.bin
+            build/sqlite-append-pack
+          if-no-files-found: warn
+          compression-level: 1
+          retention-days: 7
