@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "name": "native-p3-phase1-acceptance",
+  "purpose": "Freeze the generation identity and acceptance gates for the completed Native P3 Phase 1 implementation without conflating hot/checkpoint and cold timings.",
+  "branch": "work/native-p3-vm",
+  "effective_runtime_source": {
+    "compact_abi_test_commit": "6fd1b28908fc2a2dbe48f4ae4c18f23babdc35be",
+    "native_pack_sync_commit": "501d4440d42881fb48c65dcb9c34f2938bf04a59",
+    "compact_c_layout_commit": "bd01d0604b8b25315b223771daca2c979016848f"
+  },
+  "formal_acceptance": {
+    "workflow": ".github/workflows/busybox-multicall-cold.yml",
+    "run_id": 34682892461,
+    "main_job_id": 103524675264,
+    "real_software_job_id": 103525743106,
+    "main_job_conclusion": "success",
+    "real_software_job_conclusion": "success",
+    "generation": {
+      "lowering_fingerprint": "4fb5699f",
+      "linux_fingerprint": "7ca7a476",
+      "native_pack_fingerprint": "501d4440"
+    },
+    "gates": {
+      "native_intrinsic_mappings": "pass",
+      "native_vm_build": "pass",
+      "scalar_intrinsic_edges": "pass",
+      "generation_matched_linux": "pass",
+      "generation_matched_busybox": "pass",
+      "real_busybox_rootfs": "pass",
+      "native_hot_metadata": "pass",
+      "real_cold_to_first_exec": "pass",
+      "real_rootfs_kernel_execve_checkpoint": "pass",
+      "cached_reset_equivalence": "pass",
+      "cached_ror32_equivalence": "pass",
+      "cached_i128_equivalence": "pass",
+      "cached_scalar_equivalence": "pass",
+      "cached_i128_value_equivalence": "pass",
+      "cached_memory_equivalence": "pass",
+      "cached_fast_memory_equivalence": "pass",
+      "real_software": "pass"
+    },
+    "real_software_evidence": {
+      "busybox_rcs_begin": true,
+      "busybox_rcs_end": true,
+      "external_begin": true,
+      "external_end": true,
+      "status": 0
+    }
+  },
+  "performance": {
+    "latest_formal_per_stage_wall_seconds": null,
+    "latest_formal_per_stage_wall_note": "Run 34682892461 passed all formal gates, but its small generation manifest does not persist the per-stage *_WALL values. Do not substitute GitHub Actions step duration. Add a compact performance-summary artifact and freeze exact values from a generation-matched rerun.",
+    "historical_trusted": {
+      "formal_cold_seconds": 49.07,
+      "hot_checkpoint_control_seconds": 8.73,
+      "hot_checkpoint_candidate_seconds": 7.52,
+      "hot_checkpoint_improvement_percent": 13.86
+    },
+    "comparability_note": "The hot/checkpoint timings are not cold boot timings and must not be compared directly with formal cold. The stale 52.65 s ash-workflow result is excluded because its lowering fingerprint did not match the generated cache."
+  },
+  "closure_policy": {
+    "correctness_required": true,
+    "step_equivalence_required": true,
+    "generation_match_required": true,
+    "real_software_required": true,
+    "do_not_accept_ci_step_duration_as_benchmark": true
+  }
+}
