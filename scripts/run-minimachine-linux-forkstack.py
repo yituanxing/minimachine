@@ -232,6 +232,42 @@ def install_fork_stack_bridge(runner) -> None:
                     flush=True,
                 )
 
+            result = base_linux_ecall(vm, args)
+
+            # register_service/register_system mutate Program.initial_memory.
+            # On a live checkpoint-restored VM those immutable descriptors are
+            # not automatically copied into the concrete guest/native memory.
+            # Refresh after each real userspace handoff so dynamically added
+            # runtime helpers and pre-existing system services retain valid
+            # descriptor entries before userspace executes them.
+            fence_descriptor = vm.program.symbol_addresses.get("__mm_sys_fence")
+            fence_initial = (
+                vm.program.initial_memory.read(fence_descriptor, 64)
+                if fence_descriptor is not None
+                else 0
+            )
+            fence_before = (
+                vm.memory.read(fence_descriptor, 64)
+                if fence_descriptor is not None
+                else 0
+            )
+            fence_registered = int("__mm_sys_fence" in vm.program.host_services)
+            runner.refresh_host_service_descriptors(vm)
+            fence_after = (
+                vm.memory.read(fence_descriptor, 64)
+                if fence_descriptor is not None
+                else 0
+            )
+            print(
+                "BOOT_EXEC_USER_HOST_DESCRIPTOR_REFRESH "
+                f"fence_descriptor={f'0x{fence_descriptor:x}' if fence_descriptor is not None else 'missing'} "
+                f"fence_registered={fence_registered} "
+                f"initial=0x{fence_initial:x} before=0x{fence_before:x} "
+                f"after=0x{fence_after:x}",
+                flush=True,
+            )
+            return result
+
         return base_linux_ecall(vm, args)
 
     if base_preserved_call is not None:
