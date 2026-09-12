@@ -36,10 +36,29 @@ _OPCODE_RE = re.compile(
     r"alloca|load|store|getelementptr|trunc|zext|sext|ptrtoint|inttoptr|"
     r"bitcast|addrspacecast|icmp|phi|select|freeze|extractvalue|insertvalue)\b"
 )
+_FENCE_RE = re.compile(
+    r'^fence(?:\s+syncscope\("[^"]+"\))?\s+'
+    r'(acquire|release|acq_rel|seq_cst)'
+    r'(?:\s*,\s*!.*)?$'
+)
 
 
 class LLVMTextError(ValueError):
     pass
+
+
+def _normalize_standard_fence(body: str) -> str:
+    """Map LLVM's generic fence instruction onto MiniMachine's fence SYS path.
+
+    MiniMachine already models ordering through the same full read/write fence
+    used by RISC-V inline asm.  LLVM's ordering strength is meaningful to the
+    optimizer, but after lowering this single-thread VM only needs to preserve
+    an explicit ordering point.  Keep optional syncscope accepted while using
+    one architecture-neutral rw/rw contract below the text parser.
+    """
+    if _FENCE_RE.fullmatch(body.strip()) is None:
+        return body
+    return 'call void asm sideeffect "fence rw,rw", "~{memory}"()'
 
 
 def _opcode(body: str) -> str:
@@ -206,6 +225,7 @@ def parse_module(text: str) -> list[TextFunction]:
             result = rm.group(1)
             body = rm.group(2)
 
+        body = _normalize_standard_fence(body)
         try:
             op = _opcode(body)
         except LLVMTextError:
