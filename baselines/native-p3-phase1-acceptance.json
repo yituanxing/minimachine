@@ -1,26 +1,33 @@
 {
   "schema_version": 1,
   "name": "native-p3-phase1-acceptance",
-  "purpose": "Freeze the generation identity and acceptance gates for the completed Native P3 Phase 1 implementation without conflating hot/checkpoint and cold timings.",
+  "purpose": "Freeze the generation identity, correctness gates, step equivalence, real-software evidence, and measured wall times for the completed Native P3 Phase 1 implementation without conflating full cold, cached cold, and hot/checkpoint timings.",
   "branch": "work/native-p3-vm",
   "effective_runtime_source": {
     "compact_abi_test_commit": "6fd1b28908fc2a2dbe48f4ae4c18f23babdc35be",
     "native_pack_sync_commit": "501d4440d42881fb48c65dcb9c34f2938bf04a59",
-    "compact_c_layout_commit": "bd01d0604b8b25315b223771daca2c979016848f"
+    "compact_c_layout_commit": "bd01d0604b8b25315b223771daca2c979016848f",
+    "python_c_abi_contract_commit": "1fdee4e0a2574e43da4fae83cea3b5ad41d8c830"
   },
   "formal_acceptance": {
     "workflow": ".github/workflows/busybox-multicall-cold.yml",
-    "run_id": 34682892461,
-    "main_job_id": 103524675264,
-    "real_software_job_id": 103525743106,
+    "run_id": 34685872480,
+    "main_job_id": 103532648962,
+    "real_software_job_id": 103533662099,
     "main_job_conclusion": "success",
     "real_software_job_conclusion": "success",
     "generation": {
-      "lowering_fingerprint": "4fb5699f",
-      "linux_fingerprint": "7ca7a476",
-      "native_pack_fingerprint": "501d4440"
+      "lowering_sha": "4fb5699f49137cacfb8b094ef2e3959b9fc78408",
+      "linux_sha": "7ca7a4763f66f0c8d154e7d712be022b33b676d0",
+      "native_pack_sha": "501d4440d42881fb48c65dcb9c34f2938bf04a59",
+      "p3_refresh_run_id": 34326126118,
+      "linux_run_id": 33632628029,
+      "busybox_sha": "e8da11daf94f91a51984c6aa0c83df6a500fbb08",
+      "busybox_run_id": 34144063868
     },
     "gates": {
+      "python_c_struct_layout_contract": "pass",
+      "python_c_numeric_constant_contract": "pass",
       "native_intrinsic_mappings": "pass",
       "native_vm_build": "pass",
       "scalar_intrinsic_edges": "pass",
@@ -39,40 +46,150 @@
       "cached_fast_memory_equivalence": "pass",
       "real_software": "pass"
     },
+    "linux_target_gate": {
+      "run_id": 34685872461,
+      "job_id": 103532680784,
+      "conclusion": "success"
+    },
     "real_software_evidence": {
+      "frontier": "external-software-passed",
+      "status": 0,
+      "wall_seconds": 71.68,
+      "user_seconds": 67.17,
+      "sys_seconds": 4.47,
+      "maxrss_kb": 10613560,
       "busybox_rcs_begin": true,
       "busybox_rcs_end": true,
       "external_begin": true,
-      "external_end": true,
-      "status": 0
+      "external_end": true
     }
   },
-  "closure_validation": {
-    "abi_contract_commit": "1fdee4e0a2574e43da4fae83cea3b5ad41d8c830",
-    "workflow_run_id": 34685872480,
-    "main_job_id": 103532648962,
-    "verified_steps": {
-      "python_c_struct_layout_contract": "pass",
-      "python_c_numeric_constant_contract": "pass",
-      "native_intrinsic_mappings": "pass",
-      "native_vm_build": "pass",
-      "scalar_intrinsic_edges": "pass",
-      "generation_matched_linux": "pass",
-      "generation_matched_busybox": "pass",
-      "real_busybox_rootfs": "pass"
-    },
-    "status_note": "The formal run was still executing later cold-boot stages when this baseline metadata was updated; only completed steps are recorded here."
-  },
   "performance": {
-    "latest_formal_per_stage_wall_seconds": null,
-    "latest_formal_per_stage_wall_note": "Run 34682892461 passed all formal gates, but its small generation manifest does not persist the per-stage *_WALL values. Do not substitute GitHub Actions step duration. Add a compact performance-summary artifact and freeze exact values from a generation-matched rerun.",
+    "measurement_source": {
+      "formal_run_id": 34685872480,
+      "summary_workflow_run_id": 34687195071,
+      "summary_artifact_id": 10295254700,
+      "summary_artifact_name": "native-p3-cold-summary-34685872480",
+      "timing_source": "/usr/bin/time markers from the formal job log",
+      "kernel_execve_steps": 815095846
+    },
+    "stages": {
+      "real_cold": {
+        "wall_seconds": 86.89,
+        "user_seconds": 81.62,
+        "sys_seconds": 4.8,
+        "maxrss_kb": 12022660,
+        "status": 0,
+        "kernel_execve_steps": 815095846
+      },
+      "cached_reset": {
+        "wall_seconds": 73.57,
+        "user_seconds": 72.81,
+        "sys_seconds": 0.71,
+        "maxrss_kb": 2855904,
+        "status": 0,
+        "kernel_execve_steps": 815095846
+      },
+      "ror32": {
+        "wall_seconds": 59.63,
+        "user_seconds": 58.95,
+        "sys_seconds": 0.66,
+        "maxrss_kb": 2856012,
+        "status": 0,
+        "kernel_execve_steps": 815095846
+      },
+      "i128": {
+        "wall_seconds": 50.06,
+        "user_seconds": 49.37,
+        "sys_seconds": 0.67,
+        "maxrss_kb": 2855804,
+        "status": 0,
+        "kernel_execve_steps": 815095846
+      },
+      "scalar": {
+        "wall_seconds": 42.14,
+        "user_seconds": 41.43,
+        "sys_seconds": 0.7,
+        "maxrss_kb": 2855712,
+        "status": 0,
+        "kernel_execve_steps": 815095846
+      },
+      "i128_value": {
+        "wall_seconds": 39.71,
+        "user_seconds": 39.0,
+        "sys_seconds": 0.7,
+        "maxrss_kb": 2856068,
+        "status": 0,
+        "kernel_execve_steps": 815095846
+      },
+      "memory": {
+        "wall_seconds": 36.64,
+        "user_seconds": 35.92,
+        "sys_seconds": 0.7,
+        "maxrss_kb": 2855820,
+        "status": 0,
+        "kernel_execve_steps": 815095846
+      },
+      "fast_memory": {
+        "wall_seconds": 35.59,
+        "user_seconds": 34.89,
+        "sys_seconds": 0.69,
+        "maxrss_kb": 2855612,
+        "status": 0,
+        "kernel_execve_steps": 815095846
+      }
+    },
+    "comparisons": {
+      "real_cold_to_cached_reset": {
+        "delta_seconds": -13.32,
+        "delta_percent": -15.329727,
+        "steps_equal": true
+      },
+      "cached_reset_to_ror32": {
+        "delta_seconds": -13.94,
+        "delta_percent": -18.947941,
+        "steps_equal": true
+      },
+      "ror32_to_i128": {
+        "delta_seconds": -9.57,
+        "delta_percent": -16.048969,
+        "steps_equal": true
+      },
+      "i128_to_scalar": {
+        "delta_seconds": -7.92,
+        "delta_percent": -15.821015,
+        "steps_equal": true
+      },
+      "scalar_to_i128_value": {
+        "delta_seconds": -2.43,
+        "delta_percent": -5.766493,
+        "steps_equal": true
+      },
+      "i128_value_to_memory": {
+        "delta_seconds": -3.07,
+        "delta_percent": -7.73105,
+        "steps_equal": true
+      },
+      "memory_to_fast_memory": {
+        "delta_seconds": -1.05,
+        "delta_percent": -2.865721,
+        "steps_equal": true
+      },
+      "cached_reset_to_fast_memory": {
+        "control_seconds": 73.57,
+        "candidate_seconds": 35.59,
+        "delta_seconds": -37.98,
+        "delta_percent": -51.624303,
+        "steps_equal": true
+      }
+    },
     "historical_trusted": {
-      "formal_cold_seconds": 49.07,
+      "previous_formal_cold_seconds": 49.07,
       "hot_checkpoint_control_seconds": 8.73,
       "hot_checkpoint_candidate_seconds": 7.52,
       "hot_checkpoint_improvement_percent": 13.86
     },
-    "comparability_note": "The hot/checkpoint timings are not cold boot timings and must not be compared directly with formal cold. The stale 52.65 s ash-workflow result is excluded because its lowering fingerprint did not match the generated cache."
+    "comparability_note": "The 8.73/7.52 s hot/checkpoint timings are not cold boot timings. The previous 49.07 s formal-cold observation is retained as historical evidence but should not be compared as a same-runner A/B against this run. The stale 52.65 s ash-workflow result remains excluded because its lowering fingerprint did not match the generated cache."
   },
   "closure_policy": {
     "correctness_required": true,
@@ -80,6 +197,7 @@
     "generation_match_required": true,
     "real_software_required": true,
     "python_c_abi_contract_required": true,
+    "compact_layout_required": true,
     "do_not_accept_ci_step_duration_as_benchmark": true
   }
 }
