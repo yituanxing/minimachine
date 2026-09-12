@@ -1,0 +1,22 @@
+name: SQLite POSIX Bridge
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/sqlite-real-software]
+    paths:
+      - .github/workflows/sqlite-posix-bridge.yml
+      - scripts/run-minimachine-linux-posix.py
+      - tests/test_user_posix_bridge.py
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate POSIX VFS mappings
+        run: python3 tests/test_user_posix_bridge.py
