@@ -1,0 +1,227 @@
+name: SQLite Runtime 128M Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/sqlite-real-software]
+    paths:
+      - .github/workflows/sqlite-runtime-128m-probe.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sqlite-128m:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CACHE_ROOT: ${{ github.workspace }}/.cache/minimachine
+      BUILD_ROOT: ${{ github.workspace }}/build/linux-6.6.143-minimachine-initramfs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch probe RAM to 128 MiB
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('linux-overlay/arch/minimachine/kernel/bootstrap.c')
+          s = p.read_text()
+          old = '#define MINIMACHINE_BOOT_RAM_SIZE (64UL * 1024 * 1024)'
+          new = '#define MINIMACHINE_BOOT_RAM_SIZE (128UL * 1024 * 1024)'
+          if old not in s:
+              raise SystemExit('64 MiB boot RAM definition not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          grep -F '#define MINIMACHINE_BOOT_RAM_SIZE (128UL * 1024 * 1024)' \
+            linux-overlay/arch/minimachine/kernel/bootstrap.c
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 llvm-18 lld-18 xz-utils
+
+      - name: Restore pinned Linux archive
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/minimachine/source/linux-6.6.143.tar.xz
+          key: minimachine-linux-source-6.6.143-dace1f8dc9c0dbf5
+
+      - name: Restore incremental Linux objects
+        uses: actions/cache/restore@v4
+        with:
+          path: build/linux-6.6.143-minimachine-initramfs/out
+          key: sqlite-128m-linux-out-${{ github.sha }}
+          restore-keys: |
+            minimachine-linux-initramfs-out-v1-
+
+      - name: Build 128 MiB Linux image
+        run: |
+          bash scripts/check-minimachine-boot.sh
+          test -s "$BUILD_ROOT/llvm/linked.ll"
+          grep -F 'MINIMACHINE_BOOT_RAM_SIZE' linux-overlay/arch/minimachine/kernel/bootstrap.c
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download proven SQLite bundle
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34689448761
+          github-token: ${{ github.token }}
+          name: minimachine-sqlite3534-34689448761
+          path: sqlite
+
+      - name: Download frozen BusyBox image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33396890631
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-multicall-33396890631
+          path: busybox
+
+      - name: Build generation-matched P3 cache
+        run: |
+          set -o pipefail
+          set +e
+          python3 scripts/run-minimachine-linux.py "$BUILD_ROOT/llvm/linked.ll" \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --initramfs "$BUILD_ROOT/out/minimachine-initramfs.cpio" \
+            --program-cache-out build/linux-128m-p3-cache.pkl.gz \
+            --probe-kallsyms start_kernel \
+            --max-steps 1 \
+            2>&1 | tee build/linux-128m-cache.log
+          status=${PIPESTATUS[0]}
+          set -e
+          grep -F 'BOOT_EXEC_PROGRAM_CACHE_SAVED path=build/linux-128m-p3-cache.pkl.gz' \
+            build/linux-128m-cache.log
+          test -s build/linux-128m-p3-cache.pkl.gz
+          if [ "$status" -ne 0 ]; then
+            grep -F 'step limit exceeded: 1' build/linux-128m-cache.log
+          fi
+
+      - name: Build SQLite persistence rootfs
+        run: |
+          cat > build/sqlite-init.sh <<'SH'
+          #!/bin/sh
+          PATH=/bin
+          export PATH
+          rm -f /tmp/mm.db
+          echo SQLITE_MINIMACHINE_BEGIN
+          /bin/sqlite3 -batch -noheader /tmp/mm.db <<'SQL'
+          CREATE TABLE mm(id INTEGER PRIMARY KEY, n INTEGER NOT NULL, s TEXT NOT NULL);
+          INSERT INTO mm(n,s) VALUES(7,'alpha'),(11,'beta'),(13,'gamma');
+          SELECT 'SQLITE_MINIMACHINE_CREATE', sqlite_version(), count(*), sum(n) FROM mm;
+          SQL
+          echo SQLITE_MINIMACHINE_FIRST_EXIT_$?
+          /bin/sqlite3 -batch -noheader /tmp/mm.db <<'SQL'
+          SELECT 'SQLITE_MINIMACHINE_REOPEN', count(*), sum(n), group_concat(s, ',') FROM mm;
+          SQL
+          echo SQLITE_MINIMACHINE_SECOND_EXIT_$?
+          test -s /tmp/mm.db
+          echo SQLITE_MINIMACHINE_DONE
+          exit 0
+          SH
+          chmod +x build/sqlite-init.sh
+          python3 scripts/build-minimachine-busybox-rootfs.py \
+            build/sqlite-rootfs.cpio \
+            --busybox-image busybox/busybox-multicall.bflt \
+            --init-script-file build/sqlite-init.sh \
+            --extra-program sqlite/sqlite3534.bflt /bin/sqlite3 \
+            2>&1 | tee build/sqlite-rootfs.log
+          test -s build/sqlite-rootfs.cpio
+
+      - name: Freeze 128 MiB kernel_execve checkpoint
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'SQLITE_128M_COLD_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          python3 scripts/run-minimachine-linux.py "$BUILD_ROOT/llvm/linked.ll" \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in build/linux-128m-p3-cache.pkl.gz \
+            --initramfs build/sqlite-rootfs.cpio \
+            --native-vm \
+            --native-boot-phases-only \
+            --checkpoint-out build/sqlite-128m-kernel-execve.chk.gz \
+            --checkpoint-function kernel_execve \
+            --checkpoint-function-hit 1 \
+            --stop-after-checkpoint \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/sqlite-128m-cold.log
+          grep -F 'BOOT_EXEC_CHECKPOINT_SAVED ' build/sqlite-128m-cold.log
+          test -s build/sqlite-128m-kernel-execve.chk.gz
+
+      - name: Resume SQLite workload on 128 MiB guest
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          set +e
+          /usr/bin/time -f 'SQLITE_128M_RESUME_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 240 \
+          python3 scripts/run-minimachine-linux-forkstack.py "$BUILD_ROOT/llvm/linked.ll" \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in build/linux-128m-p3-cache.pkl.gz \
+            --initramfs build/sqlite-rootfs.cpio \
+            --native-vm \
+            --checkpoint-in build/sqlite-128m-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/sqlite-128m-runtime.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "SQLITE_128M_STATUS=$status" | tee -a build/sqlite-128m-runtime.log
+
+      - name: Classify 128 MiB frontier
+        if: always()
+        run: |
+          log=build/sqlite-128m-runtime.log
+          grep -E 'SQLITE_MINIMACHINE_|nommu: Allocation|binfmt_flat:|nr=221|BOOT_EXEC_USER_(HANDOFF|EXTERNAL|SYSCALL)|Function not implemented|BOOT_EXEC_BLOCKED' "$log" | tail -500 || true
+          if grep -Fx 'SQLITE_MINIMACHINE_CREATE|3.53.4|3|31' "$log" >/dev/null \
+             && grep -Fx 'SQLITE_MINIMACHINE_FIRST_EXIT_0' "$log" >/dev/null \
+             && grep -Fx 'SQLITE_MINIMACHINE_REOPEN|3|31|alpha,beta,gamma' "$log" >/dev/null \
+             && grep -Fx 'SQLITE_MINIMACHINE_SECOND_EXIT_0' "$log" >/dev/null; then
+            echo SQLITE_128M_FRONTIER=persistence-complete
+          elif grep -F 'binfmt_flat: Unable to mmap process text, errno -12' "$log" >/dev/null; then
+            echo SQLITE_128M_FRONTIER=flat-loader-enomem
+          elif grep -E 'BOOT_EXEC_USER_HANDOFF .*functions=1944|payload_bytes=11669952' "$log" >/dev/null; then
+            echo SQLITE_128M_FRONTIER=sqlite-user-handoff
+          elif grep -E 'nr=221 .*result=0|BOOT_EXEC_USER_SYSCALL_FALLBACK_TRANSFER nr=221' "$log" >/dev/null; then
+            echo SQLITE_128M_FRONTIER=sqlite-exec-passed
+          else
+            echo SQLITE_128M_FRONTIER=before-sqlite-exec
+          fi
+
+      - name: Assert real persistence
+        run: |
+          log=build/sqlite-128m-runtime.log
+          grep -Fx 'SQLITE_MINIMACHINE_CREATE|3.53.4|3|31' "$log"
+          grep -Fx 'SQLITE_MINIMACHINE_FIRST_EXIT_0' "$log"
+          grep -Fx 'SQLITE_MINIMACHINE_REOPEN|3|31|alpha,beta,gamma' "$log"
+          grep -Fx 'SQLITE_MINIMACHINE_SECOND_EXIT_0' "$log"
+          ! grep -F 'BOOT_EXEC_BLOCKED ' "$log"
+          ! grep -F 'Function not implemented' "$log"
+
+      - name: Upload 128 MiB evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-runtime-128m-${{ github.run_id }}
+          path: |
+            build/linux-128m-cache.log
+            build/sqlite-rootfs.log
+            build/sqlite-128m-cold.log
+            build/sqlite-128m-runtime.log
+            build/sqlite-128m-kernel-execve.chk.gz
+          if-no-files-found: warn
+          compression-level: 1
+          retention-days: 7
