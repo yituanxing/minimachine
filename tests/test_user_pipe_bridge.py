@@ -40,6 +40,8 @@ class UserPipeBridgeTests(unittest.TestCase):
             vm.memory.write(pipefd + 4, 32, 8)
             return 0
 
+        # These two libc-facing tests isolate the ABI mapping. The separate
+        # fallback test below validates syscall 59 -> __se_sys_pipe2.
         self.runner.user_syscall = fake_user_syscall
 
     def test_pipe_maps_to_pipe2_syscall_zero_flags(self):
@@ -59,6 +61,52 @@ class UserPipeBridgeTests(unittest.TestCase):
         assert callback is not None
         self.assertEqual(callback(self.vm, (pipefd, 0x80800)), 0)
         self.assertEqual(self.calls, [(59, pipefd, 0x80800, 0, 0, 0, 0)])
+
+    def test_pipe2_syscall_uses_guest_kernel_wrapper(self):
+        runner = self.bridge.load_runner()
+        base_calls = []
+        guest_calls = []
+
+        def fake_base(vm, args):
+            base_calls.append(args)
+            return (1 << 64) - 38
+
+        def fake_call(vm, target, args, **kwargs):
+            guest_calls.append((target, args, kwargs))
+            return (0,)
+
+        runner.user_syscall = fake_base
+        runner._call_linux_function_preserving_control = fake_call
+        self.bridge.install_pipe_syscall_fallback(runner)
+
+        vm = Program().new_vm()
+        vm.program.functions["__se_sys_pipe2"] = object()
+        pipefd = vm.alloc_bytes(8, align=4)
+        result = runner.user_syscall(vm, (59, pipefd, 0x80000, 0, 0, 0, 0))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(base_calls, [])
+        self.assertEqual(len(guest_calls), 1)
+        target, args, kwargs = guest_calls[0]
+        self.assertEqual(target, "__se_sys_pipe2")
+        self.assertEqual(args, (pipefd, 0x80000))
+        self.assertEqual(kwargs["result_count"], 1)
+        self.assertEqual(kwargs["max_extra_steps"], 8_000_000)
+
+    def test_pipe2_syscall_delegates_when_kernel_wrapper_missing(self):
+        runner = self.bridge.load_runner()
+        calls = []
+
+        def fake_base(vm, args):
+            calls.append(args)
+            return (1 << 64) - 38
+
+        runner.user_syscall = fake_base
+        self.bridge.install_pipe_syscall_fallback(runner)
+        vm = Program().new_vm()
+        args = (59, 0x1000, 0, 0, 0, 0, 0)
+        self.assertEqual(runner.user_syscall(vm, args), (1 << 64) - 38)
+        self.assertEqual(calls, [args])
 
     def test_non_pipe_external_still_uses_base_runner(self):
         callback = self.runner._user_libc_callback("__mm_user_ext_getpid", None)
