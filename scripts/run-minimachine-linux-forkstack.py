@@ -8,6 +8,10 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 POSIX_BRIDGE_PATH = ROOT / "scripts" / "run-minimachine-linux-posix.py"
+_U64_MASK = (1 << 64) - 1
+_RESTART_ERRNOS = {512, 513, 514, 516}
+_SIGCHLD = 17
+_SIGSET_BYTES = 8
 
 
 def load_posix_bridge():
@@ -30,6 +34,51 @@ def _current_task(runner, vm) -> int:
     if current_addr is None:
         return 0
     return int(vm.memory.read(current_addr, 64))
+
+
+def _signed_u64(value: int) -> int:
+    value = int(value) & _U64_MASK
+    return value - (1 << 64) if value & (1 << 63) else value
+
+
+def _drain_pending_sigchld(runner, vm) -> bool:
+    """Consume one pending SIGCHLD before retrying a direct clone syscall.
+
+    The base runner invokes ``__se_sys_clone`` directly instead of traversing
+    the architecture syscall-exit path.  Linux copy_process() deliberately
+    returns -ERESTARTNOINTR when TIF_SIGPENDING is set so that syscall-exit can
+    deliver/dequeue the signal before restarting fork.  A completed child can
+    therefore leave SIGCHLD pending across our semantic wait4 call and make a
+    later fork restart forever.  Use Linux's own rt_sigtimedwait syscall with a
+    zero timeout to dequeue exactly SIGCHLD; never turn ERESTART* into success.
+    """
+    base = (int(vm.heap_next) + 15) & ~15
+    sigset_addr = base
+    timeout_addr = base + 8
+    vm.heap_next = base + 24
+
+    vm.memory.write(sigset_addr, 64, 1 << (_SIGCHLD - 1))
+    vm.memory.write(timeout_addr, 64, 0)
+    vm.memory.write(timeout_addr + 8, 64, 0)
+
+    raw = runner.user_syscall(
+        vm,
+        (137, sigset_addr, 0, timeout_addr, _SIGSET_BYTES, 0, 0),
+    )
+    if raw is getattr(runner, "HOST_CONTROL_TRANSFER", None) or raw is None:
+        print(
+            "BOOT_EXEC_USER_FORK_SIGNAL_DRAIN sig=17 result=control-transfer",
+            flush=True,
+        )
+        return False
+
+    signed = _signed_u64(int(raw))
+    print(
+        "BOOT_EXEC_USER_FORK_SIGNAL_DRAIN "
+        f"sig=17 result={signed} mask=0x{sigset_addr:x} timeout=0x{timeout_addr:x}",
+        flush=True,
+    )
+    return signed == _SIGCHLD
 
 
 def install_fork_stack_bridge(runner) -> None:
@@ -62,12 +111,39 @@ def install_fork_stack_bridge(runner) -> None:
                 f"bytes={sum(len(payload) for _, payload in snapshot)}",
                 flush=True,
             )
-            try:
-                return callback(vm, args)
-            except Exception:
-                if getattr(vm, "pending_user_fork_continuation", None) is None:
-                    vm.pending_user_fork_stack_snapshot = None
-                raise
+            signal_retry = 0
+            while True:
+                vm.pending_user_fork_stack_snapshot = snapshot
+                try:
+                    result = callback(vm, args)
+                except Exception:
+                    if getattr(vm, "pending_user_fork_continuation", None) is None:
+                        vm.pending_user_fork_stack_snapshot = None
+                    raise
+
+                if result != _U64_MASK or errno_address is None:
+                    if getattr(vm, "pending_user_fork_continuation", None) is None:
+                        vm.pending_user_fork_stack_snapshot = None
+                    return result
+
+                errno_value = int(vm.memory.read(errno_address, 32))
+                if errno_value not in _RESTART_ERRNOS or signal_retry >= 3:
+                    if getattr(vm, "pending_user_fork_continuation", None) is None:
+                        vm.pending_user_fork_stack_snapshot = None
+                    return result
+
+                if not _drain_pending_sigchld(runner, vm):
+                    if getattr(vm, "pending_user_fork_continuation", None) is None:
+                        vm.pending_user_fork_stack_snapshot = None
+                    return result
+
+                signal_retry += 1
+                vm.memory.write(errno_address, 32, 0)
+                print(
+                    "BOOT_EXEC_USER_FORK_SIGNAL_RESTART "
+                    f"kind={original} attempt={signal_retry} errno={errno_value}",
+                    flush=True,
+                )
 
         return user_fork_with_snapshot
 

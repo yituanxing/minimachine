@@ -22,6 +22,17 @@ def load_bridge():
     return module
 
 
+class Memory:
+    def __init__(self):
+        self.values = {}
+
+    def write(self, address, width, value):
+        self.values[(int(address), int(width))] = int(value)
+
+    def read(self, address, width):
+        return self.values.get((int(address), int(width)), 0)
+
+
 class ForkStackBridgeTests(unittest.TestCase):
     def test_child_first_user_return_restores_fork_time_stack(self):
         bridge = load_bridge()
@@ -102,6 +113,69 @@ class ForkStackBridgeTests(unittest.TestCase):
         )
         self.assertLess(restore_index, service3_index)
         self.assertEqual(events[restore_index][2], fork_snapshot)
+
+    def test_restart_errno_drains_sigchld_then_retries_fork(self):
+        bridge = load_bridge()
+        errno_address = 0x3000
+        memory = Memory()
+        calls = []
+        syscalls = []
+        fork_snapshot = [(0x1000, b"fork-frame")]
+
+        def external_original(symbol):
+            return symbol.rsplit("_ext_", 1)[-1]
+
+        def base_callback(symbol, callback_errno_address):
+            self.assertEqual(callback_errno_address, errno_address)
+
+            def user_fork(vm, args):
+                calls.append(args)
+                if len(calls) == 1:
+                    vm.pending_user_fork_continuation = None
+                    vm.memory.write(errno_address, 32, 513)
+                    return (1 << 64) - 1
+                vm.pending_user_fork_continuation = (0x1110, 0x2220, 0x3330)
+                return 23
+
+            return user_fork
+
+        def user_syscall(vm, args):
+            syscalls.append(tuple(args))
+            self.assertEqual(args[0], 137)
+            sigset_addr = args[1]
+            timeout_addr = args[3]
+            self.assertEqual(vm.memory.read(sigset_addr, 64), 1 << 16)
+            self.assertEqual(vm.memory.read(timeout_addr, 64), 0)
+            self.assertEqual(vm.memory.read(timeout_addr + 8, 64), 0)
+            self.assertEqual(args[4], 8)
+            return 17
+
+        runner = SimpleNamespace(
+            _user_libc_callback=base_callback,
+            _user_external_original=external_original,
+            _snapshot_p3_call_chain=lambda vm: list(fork_snapshot),
+            _restore_p3_call_chain=lambda vm, frames: None,
+            linux_ecall=lambda vm, args: None,
+            user_syscall=user_syscall,
+            HOST_CONTROL_TRANSFER=object(),
+        )
+        bridge.install_fork_stack_bridge(runner)
+        vm = SimpleNamespace(
+            linux_current_task=0x1000,
+            pending_user_fork_continuation=None,
+            linux_user_fork_continuations={},
+            memory=memory,
+            heap_next=0x4003,
+        )
+
+        fork_cb = runner._user_libc_callback("__mm_user_ext_fork", errno_address)
+        self.assertEqual(fork_cb(vm, ()), 23)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(syscalls), 1)
+        self.assertEqual(memory.read(errno_address, 32), 0)
+        self.assertEqual(vm.pending_user_fork_stack_snapshot, fork_snapshot)
+        self.assertEqual(vm.pending_user_fork_continuation, (0x1110, 0x2220, 0x3330))
+        self.assertEqual(vm.heap_next, 0x4028)
 
     def test_non_fork_callback_is_unchanged(self):
         bridge = load_bridge()
