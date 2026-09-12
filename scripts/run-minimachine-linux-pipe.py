@@ -45,7 +45,12 @@ def install_pipe_callbacks(runner) -> None:
             )
             if raw is runner.HOST_CONTROL_TRANSFER:
                 return raw
-            return runner.libc_linux_result(vm, raw)
+            signed = raw - (1 << 64) if raw & (1 << 63) else raw
+            if -4095 <= signed < 0:
+                if errno_address is not None:
+                    vm.memory.write(errno_address, 32, (-signed) & 0xFFFFFFFF)
+                return (1 << 64) - 1
+            return raw
 
         return user_pipe
 
