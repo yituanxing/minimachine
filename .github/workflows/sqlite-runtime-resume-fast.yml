@@ -1,0 +1,148 @@
+name: SQLite Runtime Fast Resume
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/sqlite-real-software]
+    paths:
+      - .github/workflows/sqlite-runtime-resume-fast.yml
+      - scripts/run-minimachine-linux-pipe.py
+      - scripts/run-minimachine-linux-posix.py
+      - tests/test_user_pipe_bridge.py
+      - tests/test_user_posix_bridge.py
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resume:
+    strategy:
+      fail-fast: false
+      matrix:
+        bridge: [pipe, posix]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate bridge
+        run: |
+          if [ "${{ matrix.bridge }}" = pipe ]; then
+            python3 tests/test_user_pipe_bridge.py
+          else
+            python3 tests/test_user_pipe_bridge.py
+            python3 tests/test_user_posix_bridge.py
+          fi
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download exact Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33632628029
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33632628029
+          path: linux
+
+      - name: Download reusable runtime base
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34690929288
+          github-token: ${{ github.token }}
+          name: sqlite-runtime-base-34690929288
+          path: base
+
+      - name: Verify frozen inputs
+        run: |
+          test -s linux/llvm/linked.ll
+          test -s base/linux-current-p3-cache.pkl.gz
+          test -s base/sqlite-rootfs.cpio
+          test -s base/sqlite-kernel-execve.chk.gz
+          cat base/base-inputs.txt
+
+      - name: Resume SQLite workload
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          runner="scripts/run-minimachine-linux-${{ matrix.bridge }}.py"
+          set +e
+          /usr/bin/time -f 'SQLITE_FAST_RUNTIME_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 240 \
+          python3 "$runner" linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in base/linux-current-p3-cache.pkl.gz \
+            --initramfs base/sqlite-rootfs.cpio \
+            --native-vm \
+            --native-pack-cache-out build/sqlite-native-pack.bin \
+            --native-append-pack-cache-out-dir build/sqlite-append-pack \
+            --checkpoint-in base/sqlite-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/sqlite-${{ matrix.bridge }}.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "SQLITE_FAST_RUNTIME_STATUS=$status" | tee -a build/sqlite-${{ matrix.bridge }}.log
+
+      - name: Classify exact frontier
+        if: always()
+        run: |
+          log="build/sqlite-${{ matrix.bridge }}.log"
+          echo "=== ${{ matrix.bridge }} frontier ==="
+          grep -E \
+            'BOOT_EXEC_(CHECKPOINT_RESTORED|USER_HANDOFF|USER_EXTERNAL|USER_SYSCALL|USER_EXIT|BLOCKED|HALTED)|SQLITE_' \
+            "$log" | tail -500 || true
+
+          create='SQLITE_MINIMACHINE_CREATE|3.53.4|3|31'
+          reopen='SQLITE_MINIMACHINE_REOPEN|3|31|alpha,beta,gamma'
+          if grep -Fx "$create" "$log" >/dev/null \
+             && grep -Fx 'SQLITE_MINIMACHINE_FIRST_EXIT_0' "$log" >/dev/null \
+             && grep -Fx "$reopen" "$log" >/dev/null \
+             && grep -Fx 'SQLITE_MINIMACHINE_SECOND_EXIT_0' "$log" >/dev/null \
+             && grep -Fx 'SQLITE_MINIMACHINE_DONE' "$log" >/dev/null \
+             && ! grep -F 'BOOT_EXEC_BLOCKED ' "$log" >/dev/null; then
+            echo SQLITE_RUNTIME_FRONTIER=persistence-complete
+          elif grep -F 'BOOT_EXEC_BLOCKED ' "$log" >/dev/null; then
+            echo SQLITE_RUNTIME_FRONTIER=blocked
+            grep -F 'BOOT_EXEC_BLOCKED ' "$log" | tail -1
+          elif grep -F 'Function not implemented' "$log" >/dev/null; then
+            echo SQLITE_RUNTIME_FRONTIER=enosys
+            grep -F 'Function not implemented' "$log" | tail -3
+          elif grep -Fx 'SQLITE_MINIMACHINE_BEGIN' "$log" >/dev/null; then
+            echo SQLITE_RUNTIME_FRONTIER=sqlite-workload-started
+          else
+            echo SQLITE_RUNTIME_FRONTIER=before-sqlite-workload
+          fi
+
+      - name: Assert real persistence
+        run: |
+          log="build/sqlite-${{ matrix.bridge }}.log"
+          grep -Fx 'SQLITE_MINIMACHINE_CREATE|3.53.4|3|31' "$log"
+          grep -Fx 'SQLITE_MINIMACHINE_FIRST_EXIT_0' "$log"
+          grep -Fx 'SQLITE_MINIMACHINE_REOPEN|3|31|alpha,beta,gamma' "$log"
+          grep -Fx 'SQLITE_MINIMACHINE_SECOND_EXIT_0' "$log"
+          grep -Fx 'SQLITE_MINIMACHINE_DONE' "$log"
+          ! grep -F 'BOOT_EXEC_BLOCKED ' "$log"
+          ! grep -F 'Function not implemented' "$log"
+          grep -E '^SQLITE_FAST_RUNTIME_STATUS=(0|124)$' "$log"
+
+      - name: Upload resume evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-runtime-fast-${{ matrix.bridge }}-${{ github.run_id }}
+          path: |
+            build/sqlite-${{ matrix.bridge }}.log
+            build/sqlite-native-pack.bin
+            build/sqlite-append-pack
+          if-no-files-found: warn
+          compression-level: 1
+          retention-days: 7
