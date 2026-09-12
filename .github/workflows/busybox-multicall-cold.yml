@@ -1,3 +1,4 @@
+# formal rerun for latest compact native ABI
 name: MiniMachine BusyBox Multicall Cold
 
 on:
