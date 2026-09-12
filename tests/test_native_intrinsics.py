@@ -76,47 +76,47 @@ class NativeABIContractTests(unittest.TestCase):
   printf("offsetof.%s.%s=%zu\n", #type, #field, offsetof(type, field))
 
 int main(void) {
-  printf("MM_MAX_OPS=%u\n", (unsigned)MM_MAX_OPS);
-
   PRINT_SIZE(MMOperand);
   PRINT_OFFSET(MMOperand, kind);
+  PRINT_OFFSET(MMOperand, width);
+  PRINT_OFFSET(MMOperand, base_kind);
   PRINT_OFFSET(MMOperand, _pad);
-  PRINT_OFFSET(MMOperand, value0);
-  PRINT_OFFSET(MMOperand, value1);
-  PRINT_OFFSET(MMOperand, value2);
+  PRINT_OFFSET(MMOperand, offset);
+  PRINT_OFFSET(MMOperand, value);
+  PRINT_OFFSET(MMOperand, base_value);
 
   PRINT_SIZE(MMInst);
-  PRINT_OFFSET(MMInst, op_code);
+  PRINT_OFFSET(MMInst, opcode);
   PRINT_OFFSET(MMInst, width);
-  PRINT_OFFSET(MMInst, ops);
+  PRINT_OFFSET(MMInst, cond);
+  PRINT_OFFSET(MMInst, extend);
+  PRINT_OFFSET(MMInst, src_bits);
+  PRINT_OFFSET(MMInst, _pad);
+  PRINT_OFFSET(MMInst, op0);
+  PRINT_OFFSET(MMInst, op1);
+  PRINT_OFFSET(MMInst, op2);
+  PRINT_OFFSET(MMInst, op3);
 
   PRINT_SIZE(MMBlock);
-  PRINT_OFFSET(MMBlock, name);
+  PRINT_OFFSET(MMBlock, code);
+  PRINT_OFFSET(MMBlock, first);
   PRINT_OFFSET(MMBlock, count);
-  PRINT_OFFSET(MMBlock, _pad);
-  PRINT_OFFSET(MMBlock, insts);
 
   PRINT_SIZE(MMHostIntrinsic);
-  PRINT_OFFSET(MMHostIntrinsic, intrinsic_id);
-  PRINT_OFFSET(MMHostIntrinsic, argc);
-  PRINT_OFFSET(MMHostIntrinsic, ret_width);
-  PRINT_OFFSET(MMHostIntrinsic, control_kind);
-  PRINT_OFFSET(MMHostIntrinsic, target_block);
-  PRINT_OFFSET(MMHostIntrinsic, target_ip);
-  PRINT_OFFSET(MMHostIntrinsic, unwind_count);
-  PRINT_OFFSET(MMHostIntrinsic, capture_count);
-  PRINT_OFFSET(MMHostIntrinsic, widths);
-  PRINT_OFFSET(MMHostIntrinsic, kinds);
-  PRINT_OFFSET(MMHostIntrinsic, payloads);
+  PRINT_OFFSET(MMHostIntrinsic, op);
+  PRINT_OFFSET(MMHostIntrinsic, bits);
+  PRINT_OFFSET(MMHostIntrinsic, pred);
+  PRINT_OFFSET(MMHostIntrinsic, _pad);
+  PRINT_OFFSET(MMHostIntrinsic, imm);
 
   PRINT_SIZE(MMRunResult);
-  PRINT_OFFSET(MMRunResult, code);
-  PRINT_OFFSET(MMRunResult, _pad);
-  PRINT_OFFSET(MMRunResult, target);
-  PRINT_OFFSET(MMRunResult, ip);
-  PRINT_OFFSET(MMRunResult, unwind_count);
-  PRINT_OFFSET(MMRunResult, capture_count);
   PRINT_OFFSET(MMRunResult, status);
+  PRINT_OFFSET(MMRunResult, error);
+  PRINT_OFFSET(MMRunResult, target_code);
+  PRINT_OFFSET(MMRunResult, block_code);
+  PRINT_OFFSET(MMRunResult, sp);
+  PRINT_OFFSET(MMRunResult, steps);
+  PRINT_OFFSET(MMRunResult, ip);
   return 0;
 }
 '''
@@ -174,45 +174,28 @@ int main(void) {
 
     def test_python_and_c_struct_layouts_match(self):
         c_layout = self._compile_layout_probe()
-        self.assertEqual(c_layout["MM_MAX_OPS"], len(CInst().ops))
+        self.assertEqual(
+            [name for name, _ctype in CInst._fields_ if name.startswith("op")],
+            ["opcode", "op0", "op1", "op2", "op3"],
+        )
 
         contracts = (
             (
                 "MMOperand",
                 COperand,
-                ("kind", "_pad", "value0", "value1", "value2"),
+                ("kind", "width", "base_kind", "_pad", "offset", "value", "base_value"),
             ),
-            ("MMInst", CInst, ("op_code", "width", "ops")),
-            ("MMBlock", CBlock, ("name", "count", "_pad", "insts")),
             (
-                "MMHostIntrinsic",
-                CHostIntrinsic,
-                (
-                    "intrinsic_id",
-                    "argc",
-                    "ret_width",
-                    "control_kind",
-                    "target_block",
-                    "target_ip",
-                    "unwind_count",
-                    "capture_count",
-                    "widths",
-                    "kinds",
-                    "payloads",
-                ),
+                "MMInst",
+                CInst,
+                ("opcode", "width", "cond", "extend", "src_bits", "_pad", "op0", "op1", "op2", "op3"),
             ),
+            ("MMBlock", CBlock, ("code", "first", "count")),
+            ("MMHostIntrinsic", CHostIntrinsic, ("op", "bits", "pred", "_pad", "imm")),
             (
                 "MMRunResult",
                 CRunResult,
-                (
-                    "code",
-                    "_pad",
-                    "target",
-                    "ip",
-                    "unwind_count",
-                    "capture_count",
-                    "status",
-                ),
+                ("status", "error", "target_code", "block_code", "sp", "steps", "ip"),
             ),
         )
         for c_name, py_type, fields in contracts:
