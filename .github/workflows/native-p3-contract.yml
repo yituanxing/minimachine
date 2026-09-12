@@ -1,0 +1,55 @@
+name: Native P3 Contract Gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/native-p3-vm, main]
+    paths:
+      - native/p3vm.c
+      - src/minimachine/native_vm.py
+      - src/minimachine/program_cache.py
+      - src/minimachine/runtime.py
+      - src/minimachine/vm.py
+      - tests/test_native_intrinsics.py
+      - tests/test_native_compact_layout.py
+      - tests/test_native_scalar_intrinsics.py
+      - tests/test_native_i128_value_intrinsics.py
+      - tests/test_native_memory_intrinsics.py
+      - tests/test_native_fast_memory_intrinsics.py
+      - tests/test_program_cache.py
+      - .github/workflows/native-p3-contract.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-p3-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Python C ABI and compact layout
+        run: |
+          python3 -m unittest tests.test_native_intrinsics -v
+          python3 -m unittest tests.test_native_compact_layout -v
+          python3 -m unittest tests.test_program_cache -v
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Execute native edge cases
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          python3 -m unittest tests.test_native_scalar_intrinsics -v
+          python3 -m unittest tests.test_native_i128_value_intrinsics -v
+          python3 -m unittest tests.test_native_memory_intrinsics -v
+          python3 -m unittest tests.test_native_fast_memory_intrinsics -v
