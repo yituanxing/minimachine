@@ -1,0 +1,98 @@
+name: Native P3 Cold Summary
+
+on:
+  workflow_dispatch:
+    inputs:
+      formal_run_id:
+        description: Formal MiniMachine BusyBox Multicall Cold run ID (blank = latest success)
+        required: false
+        type: string
+  push:
+    branches: [work/native-p3-vm]
+    paths:
+      - scripts/summarize-native-p3-cold.py
+      - tests/test_summarize_native_p3_cold.py
+      - .github/workflows/native-p3-cold-summary.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: native-p3-cold-summary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  summarize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test summary parser
+        run: python3 -m unittest tests.test_summarize_native_p3_cold -v
+
+      - name: Resolve formal run
+        id: formal
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RUN_ID: ${{ inputs.formal_run_id }}
+        run: |
+          run_id="$REQUESTED_RUN_ID"
+          if [ -z "$run_id" ]; then
+            run_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow busybox-multicall-cold.yml \
+              --branch work/native-p3-vm \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+          test -n "$run_id"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "FORMAL_RUN_ID=$run_id"
+
+      - name: Download formal job log
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORMAL_RUN_ID: ${{ steps.formal.outputs.run_id }}
+        run: |
+          mkdir -p build
+          gh run view "$FORMAL_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --log > build/native-p3-formal.log
+          test -s build/native-p3-formal.log
+
+      - name: Build compact benchmark summary
+        env:
+          FORMAL_RUN_ID: ${{ steps.formal.outputs.run_id }}
+        run: |
+          python3 scripts/summarize-native-p3-cold.py \
+            --combined-log build/native-p3-formal.log \
+            --output build/native-p3-cold-summary.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("build/native-p3-cold-summary.json")
+          data = json.loads(path.read_text())
+          data["formal_run_id"] = int(os.environ["FORMAL_RUN_ID"])
+          path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+          PY
+          cat build/native-p3-cold-summary.json
+          {
+            echo '## Native P3 formal cold summary'
+            echo '```json'
+            cat build/native-p3-cold-summary.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload compact summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-p3-cold-summary-${{ steps.formal.outputs.run_id }}
+          path: build/native-p3-cold-summary.json
+          if-no-files-found: error
+          retention-days: 30
