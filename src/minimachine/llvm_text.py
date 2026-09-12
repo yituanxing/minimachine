@@ -41,6 +41,11 @@ _FENCE_RE = re.compile(
     r'(acquire|release|acq_rel|seq_cst)'
     r'(?:\s*,\s*!.*)?$'
 )
+_ATOMIC_MEMORY_ORDER_RE = re.compile(
+    r'\s+(?:syncscope\("[^"]+"\)\s+)?'
+    r'(?:unordered|monotonic|acquire|release|acq_rel|seq_cst)'
+    r'(?=\s*(?:,|$))'
+)
 
 
 class LLVMTextError(ValueError):
@@ -59,6 +64,28 @@ def _normalize_standard_fence(body: str) -> str:
     if _FENCE_RE.fullmatch(body.strip()) is None:
         return body
     return 'call void asm sideeffect "fence rw,rw", "~{memory}"()'
+
+
+def _normalize_atomic_memory_order(body: str) -> str:
+    """Drop LLVM ordering syntax from atomic loads/stores after optimization.
+
+    In the current single-thread MiniMachine userspace model, atomic loads and
+    stores have the same value semantics as ordinary loads/stores.  RMW/LRSC
+    operations retain their explicit SYS contracts elsewhere; this only strips
+    the syncscope/ordering suffix that follows the pointer operand so the
+    existing load/store legalizer sees the real address expression.
+    """
+    stripped = body.strip()
+    if not (
+        stripped.startswith("load atomic ")
+        or stripped.startswith("load volatile atomic ")
+        or stripped.startswith("load atomic volatile ")
+        or stripped.startswith("store atomic ")
+        or stripped.startswith("store volatile atomic ")
+        or stripped.startswith("store atomic volatile ")
+    ):
+        return body
+    return _ATOMIC_MEMORY_ORDER_RE.sub("", body, count=1)
 
 
 def _opcode(body: str) -> str:
@@ -226,6 +253,7 @@ def parse_module(text: str) -> list[TextFunction]:
             body = rm.group(2)
 
         body = _normalize_standard_fence(body)
+        body = _normalize_atomic_memory_order(body)
         try:
             op = _opcode(body)
         except LLVMTextError:
