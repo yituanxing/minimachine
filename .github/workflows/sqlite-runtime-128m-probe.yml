@@ -6,6 +6,7 @@ on:
     branches: [work/sqlite-real-software]
     paths:
       - .github/workflows/sqlite-runtime-128m-probe.yml
+      - scripts/run-minimachine-linux-forkstack.py
 
 permissions:
   contents: read
