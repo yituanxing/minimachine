@@ -234,15 +234,24 @@ def install_fork_stack_bridge(runner) -> None:
 
             result = base_linux_ecall(vm, args)
 
+            # Minimal unit-test runners intentionally expose only the fork
+            # control-transfer surface.  Real Linux runners additionally own
+            # Program/runtime descriptor state; refresh only when that surface
+            # is present.
+            program = getattr(vm, "program", None)
+            refresher = getattr(runner, "refresh_host_service_descriptors", None)
+            if program is None or refresher is None:
+                return result
+
             # register_service/register_system mutate Program.initial_memory.
             # On a live checkpoint-restored VM those immutable descriptors are
             # not automatically copied into the concrete guest/native memory.
             # Refresh after each real userspace handoff so dynamically added
             # runtime helpers and pre-existing system services retain valid
             # descriptor entries before userspace executes them.
-            fence_descriptor = vm.program.symbol_addresses.get("__mm_sys_fence")
+            fence_descriptor = program.symbol_addresses.get("__mm_sys_fence")
             fence_initial = (
-                vm.program.initial_memory.read(fence_descriptor, 64)
+                program.initial_memory.read(fence_descriptor, 64)
                 if fence_descriptor is not None
                 else 0
             )
@@ -251,8 +260,8 @@ def install_fork_stack_bridge(runner) -> None:
                 if fence_descriptor is not None
                 else 0
             )
-            fence_registered = int("__mm_sys_fence" in vm.program.host_services)
-            runner.refresh_host_service_descriptors(vm)
+            fence_registered = int("__mm_sys_fence" in program.host_services)
+            refresher(vm)
             fence_after = (
                 vm.memory.read(fence_descriptor, 64)
                 if fence_descriptor is not None
