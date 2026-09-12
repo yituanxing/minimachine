@@ -97,7 +97,9 @@ def install_fork_stack_bridge(runner) -> None:
 
     base_callback = runner._user_libc_callback
     base_linux_ecall = runner.linux_ecall
-    base_preserved_call = runner._call_linux_function_preserving_control
+    base_preserved_call = getattr(
+        runner, "_call_linux_function_preserving_control", None
+    )
 
     def preserved_call(vm, name, args, **kwargs):
         if name == "minimachine_user_syscall" and args and int(args[0]) == _EXECVE_NR:
@@ -201,7 +203,8 @@ def install_fork_stack_bridge(runner) -> None:
 
         return base_linux_ecall(vm, args)
 
-    runner._call_linux_function_preserving_control = preserved_call
+    if base_preserved_call is not None:
+        runner._call_linux_function_preserving_control = preserved_call
     runner._user_libc_callback = callback_for
     runner.linux_ecall = linux_ecall
     runner._minimachine_fork_stack_bridge_installed = True
