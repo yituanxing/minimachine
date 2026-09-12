@@ -12,6 +12,8 @@ _U64_MASK = (1 << 64) - 1
 _RESTART_ERRNOS = {512, 513, 514, 516}
 _SIGCHLD = 17
 _SIGSET_BYTES = 8
+_EXECVE_NR = 221
+_EXECVE_PRESERVED_STEPS = 64_000_000
 
 
 def load_posix_bridge():
@@ -95,6 +97,19 @@ def install_fork_stack_bridge(runner) -> None:
 
     base_callback = runner._user_libc_callback
     base_linux_ecall = runner.linux_ecall
+    base_preserved_call = runner._call_linux_function_preserving_control
+
+    def preserved_call(vm, name, args, **kwargs):
+        if name == "minimachine_user_syscall" and args and int(args[0]) == _EXECVE_NR:
+            old_budget = int(kwargs.get("max_extra_steps", 0) or 0)
+            if old_budget < _EXECVE_PRESERVED_STEPS:
+                kwargs["max_extra_steps"] = _EXECVE_PRESERVED_STEPS
+                print(
+                    "BOOT_EXEC_USER_EXECVE_BUDGET "
+                    f"old={old_budget} new={_EXECVE_PRESERVED_STEPS}",
+                    flush=True,
+                )
+        return base_preserved_call(vm, name, args, **kwargs)
 
     def callback_for(symbol: str, errno_address: int | None):
         callback = base_callback(symbol, errno_address)
@@ -186,6 +201,7 @@ def install_fork_stack_bridge(runner) -> None:
 
         return base_linux_ecall(vm, args)
 
+    runner._call_linux_function_preserving_control = preserved_call
     runner._user_libc_callback = callback_for
     runner.linux_ecall = linux_ecall
     runner._minimachine_fork_stack_bridge_installed = True
