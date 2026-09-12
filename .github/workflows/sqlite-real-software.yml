@@ -1,0 +1,194 @@
+name: MiniMachine SQLite Real Software
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/sqlite-real-software]
+    paths:
+      - src/minimachine/user_bundle.py
+      - src/minimachine/user_image.py
+      - src/minimachine/legalize.py
+      - scripts/build-minimachine-user-program.py
+      - scripts/build-minimachine-program-rootfs.py
+      - tests/test_user_bundle.py
+      - tests/test_user_namespace.py
+      - .github/workflows/sqlite-real-software.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sqlite-real-software-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sqlite-bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SQLITE_VERSION: "3.53.4"
+      SQLITE_VERSION_NUMBER: "3530400"
+      SQLITE_AUTOCONF_SHA3_256: "454e45f61c6bd75b7420e7190732dea03ce6639c63ada47bbc592f67fc340338"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross and LLVM dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates \
+            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross qemu-user \
+            clang-18 llvm-18 lld-18
+
+      - name: Validate generic user-program namespace contracts
+        run: |
+          python3 -m unittest \
+            tests.test_user_bundle \
+            tests.test_user_namespace \
+            -v
+          python3 -m py_compile scripts/build-minimachine-user-program.py
+
+      - name: Fetch pinned upstream SQLite
+        run: |
+          mkdir -p build
+          tarball="sqlite-autoconf-${SQLITE_VERSION_NUMBER}.tar.gz"
+          curl -fL --retry 5 --retry-delay 2 \
+            -o "build/$tarball" \
+            "https://www.sqlite.org/2026/$tarball"
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          version = os.environ["SQLITE_VERSION_NUMBER"]
+          expected = os.environ["SQLITE_AUTOCONF_SHA3_256"]
+          path = Path(f"build/sqlite-autoconf-{version}.tar.gz")
+          actual = hashlib.sha3_256(path.read_bytes()).hexdigest()
+          print(f"SQLITE_SOURCE_SHA3_256={actual}")
+          if actual != expected:
+              raise SystemExit(f"SQLite source hash mismatch: {actual} != {expected}")
+          PY
+          tar -xzf "build/$tarball" -C build
+          printf 'version=%s\nversion_number=%s\nsha3_256=%s\n' \
+            "$SQLITE_VERSION" "$SQLITE_VERSION_NUMBER" "$SQLITE_AUTOCONF_SHA3_256" \
+            | tee build/sqlite-source.txt
+          test -s "build/sqlite-autoconf-${SQLITE_VERSION_NUMBER}/sqlite3.c"
+          test -s "build/sqlite-autoconf-${SQLITE_VERSION_NUMBER}/shell.c"
+
+      - name: Build and run normal RISC-V SQLite baseline
+        run: |
+          src="build/sqlite-autoconf-${SQLITE_VERSION_NUMBER}"
+          riscv64-linux-gnu-gcc \
+            -O2 -std=gnu11 -I"$src" \
+            "$src/shell.c" "$src/sqlite3.c" \
+            -lm -ldl -lpthread \
+            -o build/sqlite3-riscv64
+
+          rm -f build/sqlite-baseline.db
+          qemu-riscv64 -L /usr/riscv64-linux-gnu \
+            build/sqlite3-riscv64 -batch -noheader build/sqlite-baseline.db \
+            > build/sqlite-riscv-create.txt <<'SQL'
+          CREATE TABLE mm(id INTEGER PRIMARY KEY, n INTEGER NOT NULL, s TEXT NOT NULL);
+          INSERT INTO mm(n,s) VALUES(7,'alpha'),(11,'beta'),(13,'gamma');
+          SELECT 'SQLITE_RISCV_CREATE', sqlite_version(), count(*), sum(n) FROM mm;
+          SQL
+          cat build/sqlite-riscv-create.txt
+          grep -F 'SQLITE_RISCV_CREATE|3.53.4|3|31' build/sqlite-riscv-create.txt
+          test -s build/sqlite-baseline.db
+
+          qemu-riscv64 -L /usr/riscv64-linux-gnu \
+            build/sqlite3-riscv64 -batch -noheader build/sqlite-baseline.db \
+            > build/sqlite-riscv-reopen.txt <<'SQL'
+          SELECT 'SQLITE_RISCV_REOPEN', count(*), sum(n), group_concat(s, ',') FROM mm;
+          SQL
+          cat build/sqlite-riscv-reopen.txt
+          grep -F 'SQLITE_RISCV_REOPEN|3|31|alpha,beta,gamma' build/sqlite-riscv-reopen.txt
+
+      - name: Build whole-program RISC-V LLVM LTO image
+        run: |
+          src="build/sqlite-autoconf-${SQLITE_VERSION_NUMBER}"
+          clang-18 \
+            --target=riscv64-linux-gnu \
+            --sysroot=/usr/riscv64-linux-gnu \
+            --gcc-toolchain=/usr \
+            -O2 -std=gnu11 -I"$src" \
+            -flto=full \
+            "$src/shell.c" "$src/sqlite3.c" \
+            -fuse-ld=lld -Wl,--sysroot=/ -Wl,--save-temps -Wl,-E \
+            -L/usr/riscv64-linux-gnu/lib -lm -ldl -lpthread \
+            -o build/sqlite3-lto
+
+          find build -maxdepth 2 -type f -name '*.bc' -printf '%p %s\n' \
+            | sort | tee build/sqlite-lto-files.txt
+          opt_bc="$(find build -maxdepth 2 -type f -name '*.opt.bc' -print | head -1)"
+          test -n "$opt_bc"
+          test -s "$opt_bc"
+          llvm-dis-18 "$opt_bc" -o build/sqlite-whole.ll
+          test -s build/sqlite-whole.ll
+
+      - name: Lower complete SQLite CLI to MiniMachine bundle
+        run: |
+          set -o pipefail
+          /usr/bin/time -f 'SQLITE_MINIMACHINE_BUNDLE_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+            python3 scripts/build-minimachine-user-program.py \
+              build/sqlite-whole.ll \
+              build/sqlite3534.bflt \
+              --entry main \
+              --namespace sqlite3534 \
+              --entry-args linux-main \
+              --stack-size 0x200000 \
+              --report build/sqlite3534-bundle.json \
+              2>&1 | tee build/sqlite3534-bundle.log
+
+          grep -F 'USER_BUNDLE namespace=sqlite3534 entry=__mm_sqlite3534_main ' \
+            build/sqlite3534-bundle.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("build/sqlite3534-bundle.json").read_text())
+          print(
+              "SQLITE_MINIMACHINE_GATE "
+              f"entry={report['entry_namespaced']} "
+              f"functions={report['functions']} "
+              f"externals={len(report['external_functions'])} "
+              f"helpers={report['runtime_helpers']} "
+              f"objects={report['global_objects']} "
+              f"relocs={report['relocations']} "
+              f"payload={report['compressed_payload_bytes']}"
+          )
+          assert report["namespace"] == "sqlite3534"
+          assert report["entry_namespaced"] == "__mm_sqlite3534_main"
+          assert report["functions"] > 100
+          assert report["payload_under_16m"]
+          PY
+
+      - name: Report SQLite semantic surface
+        if: always()
+        run: |
+          echo '=== SQLite source ==='
+          cat build/sqlite-source.txt || true
+          echo '=== native RISC-V create ==='
+          cat build/sqlite-riscv-create.txt || true
+          echo '=== native RISC-V reopen ==='
+          cat build/sqlite-riscv-reopen.txt || true
+          echo '=== MiniMachine bundle ==='
+          grep -E '^(USER_BUNDLE|USER_EXTERNAL_FUNCTION|USER_EXTERNAL_DATA|SQLITE_MINIMACHINE_)' \
+            build/sqlite3534-bundle.log | tail -320 || true
+
+      - name: Upload SQLite evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-sqlite3534-${{ github.run_id }}
+          path: |
+            build/sqlite-source.txt
+            build/sqlite-riscv-create.txt
+            build/sqlite-riscv-reopen.txt
+            build/sqlite-lto-files.txt
+            build/sqlite-whole.ll
+            build/sqlite3534.bflt
+            build/sqlite3534-bundle.json
+            build/sqlite3534-bundle.log
+          if-no-files-found: warn
+          retention-days: 14
