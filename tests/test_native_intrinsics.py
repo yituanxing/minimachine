@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+import ctypes
 import os
+import re
+import shutil
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+from src.minimachine import native_vm as native_vm_module
 from src.minimachine.native_vm import (
+    CBlock,
+    CHostIntrinsic,
+    CInst,
+    COperand,
+    CRunResult,
     MM_INTR_EXPECT,
     MM_INTR_NONE,
     MM_INTR_PTR_ADD_SCALED,
@@ -26,6 +38,224 @@ from src.minimachine.native_vm import (
     MM_INTR_FAST_STRLEN,
     NativeVM,
 )
+
+
+class NativeABIContractTests(unittest.TestCase):
+    _PYTHON_ONLY_NATIVE_CONSTANTS = {"MM_V_INVALID"}
+    _CONSTANT_PREFIXES = (
+        "MM_OP_",
+        "MM_V_",
+        "MM_EXT_",
+        "MM_COND_",
+        "MM_T_",
+        "MM_INTR_",
+        "MM_IPRED_",
+        "MM_STATUS_",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repo_root = Path(__file__).resolve().parents[1]
+        cls.c_source = (cls.repo_root / "native" / "p3vm.c").read_text(
+            encoding="utf-8"
+        )
+
+    def _compile_layout_probe(self) -> dict[str, int]:
+        compiler = shutil.which("cc") or shutil.which("gcc")
+        if compiler is None:
+            self.skipTest("native ABI layout probe requires cc or gcc")
+
+        probe_source = r'''
+#include <stddef.h>
+#include <stdio.h>
+#include "p3vm.c"
+
+#define PRINT_SIZE(type) \
+  printf("sizeof.%s=%zu\n", #type, sizeof(type))
+#define PRINT_OFFSET(type, field) \
+  printf("offsetof.%s.%s=%zu\n", #type, #field, offsetof(type, field))
+
+int main(void) {
+  printf("MM_MAX_OPS=%u\n", (unsigned)MM_MAX_OPS);
+
+  PRINT_SIZE(MMOperand);
+  PRINT_OFFSET(MMOperand, kind);
+  PRINT_OFFSET(MMOperand, _pad);
+  PRINT_OFFSET(MMOperand, value0);
+  PRINT_OFFSET(MMOperand, value1);
+  PRINT_OFFSET(MMOperand, value2);
+
+  PRINT_SIZE(MMInst);
+  PRINT_OFFSET(MMInst, op_code);
+  PRINT_OFFSET(MMInst, width);
+  PRINT_OFFSET(MMInst, ops);
+
+  PRINT_SIZE(MMBlock);
+  PRINT_OFFSET(MMBlock, name);
+  PRINT_OFFSET(MMBlock, count);
+  PRINT_OFFSET(MMBlock, _pad);
+  PRINT_OFFSET(MMBlock, insts);
+
+  PRINT_SIZE(MMHostIntrinsic);
+  PRINT_OFFSET(MMHostIntrinsic, intrinsic_id);
+  PRINT_OFFSET(MMHostIntrinsic, argc);
+  PRINT_OFFSET(MMHostIntrinsic, ret_width);
+  PRINT_OFFSET(MMHostIntrinsic, control_kind);
+  PRINT_OFFSET(MMHostIntrinsic, target_block);
+  PRINT_OFFSET(MMHostIntrinsic, target_ip);
+  PRINT_OFFSET(MMHostIntrinsic, unwind_count);
+  PRINT_OFFSET(MMHostIntrinsic, capture_count);
+  PRINT_OFFSET(MMHostIntrinsic, widths);
+  PRINT_OFFSET(MMHostIntrinsic, kinds);
+  PRINT_OFFSET(MMHostIntrinsic, payloads);
+
+  PRINT_SIZE(MMRunResult);
+  PRINT_OFFSET(MMRunResult, code);
+  PRINT_OFFSET(MMRunResult, _pad);
+  PRINT_OFFSET(MMRunResult, target);
+  PRINT_OFFSET(MMRunResult, ip);
+  PRINT_OFFSET(MMRunResult, unwind_count);
+  PRINT_OFFSET(MMRunResult, capture_count);
+  PRINT_OFFSET(MMRunResult, status);
+  return 0;
+}
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            probe = tmp_path / "native_abi_probe.c"
+            executable = tmp_path / "native_abi_probe"
+            probe.write_text(probe_source, encoding="utf-8")
+            compile_result = subprocess.run(
+                [
+                    compiler,
+                    "-std=c11",
+                    "-O0",
+                    "-I",
+                    str(self.repo_root / "native"),
+                    str(probe),
+                    "-o",
+                    str(executable),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(
+                compile_result.returncode,
+                0,
+                msg=f"native ABI probe compilation failed:\n{compile_result.stderr}",
+            )
+            run_result = subprocess.run(
+                [str(executable)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(
+                run_result.returncode,
+                0,
+                msg=f"native ABI probe execution failed:\n{run_result.stderr}",
+            )
+
+        values: dict[str, int] = {}
+        for line in run_result.stdout.splitlines():
+            key, value = line.split("=", 1)
+            values[key] = int(value)
+        return values
+
+    @staticmethod
+    def _ctypes_layout(struct_type, fields: tuple[str, ...]) -> tuple[int, dict[str, int]]:
+        return (
+            ctypes.sizeof(struct_type),
+            {field: getattr(struct_type, field).offset for field in fields},
+        )
+
+    def test_python_and_c_struct_layouts_match(self):
+        c_layout = self._compile_layout_probe()
+        self.assertEqual(c_layout["MM_MAX_OPS"], len(CInst().ops))
+
+        contracts = (
+            (
+                "MMOperand",
+                COperand,
+                ("kind", "_pad", "value0", "value1", "value2"),
+            ),
+            ("MMInst", CInst, ("op_code", "width", "ops")),
+            ("MMBlock", CBlock, ("name", "count", "_pad", "insts")),
+            (
+                "MMHostIntrinsic",
+                CHostIntrinsic,
+                (
+                    "intrinsic_id",
+                    "argc",
+                    "ret_width",
+                    "control_kind",
+                    "target_block",
+                    "target_ip",
+                    "unwind_count",
+                    "capture_count",
+                    "widths",
+                    "kinds",
+                    "payloads",
+                ),
+            ),
+            (
+                "MMRunResult",
+                CRunResult,
+                (
+                    "code",
+                    "_pad",
+                    "target",
+                    "ip",
+                    "unwind_count",
+                    "capture_count",
+                    "status",
+                ),
+            ),
+        )
+        for c_name, py_type, fields in contracts:
+            with self.subTest(struct=c_name):
+                py_size, py_offsets = self._ctypes_layout(py_type, fields)
+                self.assertEqual(c_layout[f"sizeof.{c_name}"], py_size)
+                for field, py_offset in py_offsets.items():
+                    self.assertEqual(
+                        c_layout[f"offsetof.{c_name}.{field}"],
+                        py_offset,
+                        msg=f"ABI offset drift: {c_name}.{field}",
+                    )
+
+    def test_python_and_c_numeric_native_constants_match(self):
+        pattern = re.compile(
+            r"^#define\s+(MM_[A-Z0-9_]+)\s+([0-9]+)[uUlL]*\s*$",
+            re.MULTILINE,
+        )
+        c_values = {
+            name: int(value)
+            for name, value in pattern.findall(self.c_source)
+            if name.startswith(self._CONSTANT_PREFIXES)
+        }
+        python_values = {
+            name: value
+            for name, value in vars(native_vm_module).items()
+            if name.startswith(self._CONSTANT_PREFIXES)
+            and isinstance(value, int)
+            and name not in self._PYTHON_ONLY_NATIVE_CONSTANTS
+        }
+
+        self.assertTrue(c_values, "no native C ABI constants were discovered")
+        self.assertEqual(
+            set(c_values),
+            set(python_values),
+            msg=(
+                "native ABI constant names drifted between native/p3vm.c and "
+                "src/minimachine/native_vm.py"
+            ),
+        )
+        for name, c_value in c_values.items():
+            with self.subTest(constant=name):
+                self.assertEqual(c_value, python_values[name])
 
 
 class NativeIntrinsicMappingTests(unittest.TestCase):
