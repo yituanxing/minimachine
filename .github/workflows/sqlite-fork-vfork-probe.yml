@@ -1,0 +1,106 @@
+name: SQLite Fork Vfork Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/sqlite-fork-vfork-probe-final]
+    paths:
+      - .github/workflows/sqlite-fork-vfork-probe.yml
+      - scripts/run-minimachine-linux-forkvfork.py
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native VM
+        run: |
+          mkdir -p build
+          gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
+            native/p3vm.c -o build/libminimachine_p3vm.so
+
+      - name: Download exact Linux image
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33632628029
+          github-token: ${{ github.token }}
+          name: minimachine-linux-initramfs-33632628029
+          path: linux
+
+      - name: Download reusable runtime base
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34690929288
+          github-token: ${{ github.token }}
+          name: sqlite-runtime-base-34690929288
+          path: base
+
+      - name: Download warm native packs
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34691392289
+          github-token: ${{ github.token }}
+          name: sqlite-runtime-fast-pipe-34691392289
+          path: warm
+
+      - name: Resume with fork serialized as vfork
+        env:
+          MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
+        run: |
+          set -o pipefail
+          test -s warm/sqlite-native-pack.bin
+          set +e
+          /usr/bin/time -f 'SQLITE_FORK_VFORK_WALL=%e USER=%U SYS=%S MAXRSS_KB=%M' \
+          timeout --signal=TERM 180 \
+          python3 scripts/run-minimachine-linux-forkvfork.py linux/llvm/linked.ll \
+            --linker-contract configs/linux-6.6.143-minimachine-linker.json \
+            --program-cache-in base/linux-current-p3-cache.pkl.gz \
+            --initramfs base/sqlite-rootfs.cpio \
+            --native-vm \
+            --native-pack-cache-in warm/sqlite-native-pack.bin \
+            --native-append-pack-cache-in-dir warm/sqlite-append-pack \
+            --checkpoint-in base/sqlite-kernel-execve.chk.gz \
+            --stop-on-panic \
+            --max-steps 0 \
+            --progress-every 0 \
+            2>&1 | tee build/fork-vfork.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "SQLITE_FORK_VFORK_STATUS=$status" | tee -a build/fork-vfork.log
+
+      - name: Classify fork exec frontier
+        if: always()
+        run: |
+          log=build/fork-vfork.log
+          grep -E 'BOOT_EXEC_USER_(FORK_COMPAT|FORK_CLONE|FORK_CHILD|IMAGE_CACHE|HANDOFF|SYSCALL|EXIT)|SQLITE_' "$log" | tail -600 || true
+          echo EXECVE_FALLBACK_COUNT=$(grep -c 'BOOT_EXEC_USER_SYSCALL_FALLBACK nr=221' "$log" || true)
+          echo USER_IMAGE_CACHE_COUNT=$(grep -c 'BOOT_EXEC_USER_IMAGE_CACHE ' "$log" || true)
+          echo FIRST_EXIT=$(grep 'SQLITE_MINIMACHINE_FIRST_EXIT_' "$log" | tail -1 || true)
+          echo SECOND_EXIT=$(grep 'SQLITE_MINIMACHINE_SECOND_EXIT_' "$log" | tail -1 || true)
+          if grep -Fx 'SQLITE_MINIMACHINE_CREATE|3.53.4|3|31' "$log" >/dev/null; then
+            echo SQLITE_FORK_VFORK_FRONTIER=create-passed
+          elif grep -c 'BOOT_EXEC_USER_IMAGE_CACHE ' "$log" | grep -Eq '^[2-9][0-9]*$'; then
+            echo SQLITE_FORK_VFORK_FRONTIER=sqlite-image-loaded
+          elif grep -F 'BOOT_EXEC_USER_SYSCALL_FALLBACK nr=221' "$log" >/dev/null; then
+            echo SQLITE_FORK_VFORK_FRONTIER=execve-reached
+          else
+            echo SQLITE_FORK_VFORK_FRONTIER=before-execve
+          fi
+
+      - name: Upload probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-fork-vfork-probe-${{ github.run_id }}
+          path: build/fork-vfork.log
+          if-no-files-found: warn
+          retention-days: 7
