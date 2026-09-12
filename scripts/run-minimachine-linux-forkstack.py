@@ -127,6 +127,26 @@ def install_fork_stack_bridge(runner) -> None:
     def callback_for(symbol: str, errno_address: int | None):
         callback = base_callback(symbol, errno_address)
         original = runner._user_external_original(symbol)
+
+        if original == "atexit":
+            def user_atexit(vm, args):
+                if len(args) != 1:
+                    raise runner.VMError("atexit expects one function pointer")
+                handler = int(args[0])
+                handlers = getattr(vm, "user_atexit_handlers", None)
+                if handlers is None:
+                    handlers = []
+                    vm.user_atexit_handlers = handlers
+                handlers.append(handler)
+                print(
+                    "BOOT_EXEC_USER_ATEXIT_REGISTER "
+                    f"handler=0x{handler:x} count={len(handlers)}",
+                    flush=True,
+                )
+                return 0
+
+            return user_atexit
+
         if original not in {"fork", "vfork"} or callback is None:
             return callback
 
