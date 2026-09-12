@@ -33,10 +33,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate Python C ABI and compact layout
+      - name: Validate Python C ABI and cache contract
         run: |
           python3 -m unittest tests.test_native_intrinsics -v
-          python3 -m unittest tests.test_native_compact_layout -v
           python3 -m unittest tests.test_program_cache -v
 
       - name: Build native VM
@@ -45,10 +44,11 @@ jobs:
           gcc -O3 -DNDEBUG -std=c11 -fPIC -shared \
             native/p3vm.c -o build/libminimachine_p3vm.so
 
-      - name: Execute native edge cases
+      - name: Validate compact layout and execute native edge cases
         env:
           MINIMACHINE_NATIVE_LIB: ${{ github.workspace }}/build/libminimachine_p3vm.so
         run: |
+          python3 -m unittest tests.test_native_compact_layout -v
           python3 -m unittest tests.test_native_scalar_intrinsics -v
           python3 -m unittest tests.test_native_i128_value_intrinsics -v
           python3 -m unittest tests.test_native_memory_intrinsics -v
