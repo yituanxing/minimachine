@@ -1,4 +1,5 @@
 name: MiniMachine BusyBox Cold Initramfs
+# CI trigger: refresh formal cold measurement for current native VM
 
 on:
   workflow_dispatch:
