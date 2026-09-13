@@ -26,34 +26,59 @@ def load_census_module():
     return module
 
 
-class MiniMachineCompatCensusTests(unittest.TestCase):
-    def test_reports_unserialized_system_descriptor(self):
-        census = load_census_module()
-        fn = p3.Function(
-            "main",
-            [
-                p3.Block(
-                    "entry",
-                    [
-                        p3.Mov(
+def function_loading(symbol: str) -> p3.Function:
+    return p3.Function(
+        "main",
+        [
+            p3.Block(
+                "entry",
+                [
+                    p3.Mov(
+                        muir.Width.I64,
+                        muir.Slot("entry"),
+                        p3.Mem(
+                            muir.Address(muir.Symbol(symbol), 0),
                             muir.Width.I64,
-                            muir.Slot("entry"),
-                            p3.Mem(
-                                muir.Address(muir.Symbol("__mm_sys_fence"), 0),
-                                muir.Width.I64,
-                            ),
-                        )
-                    ],
-                )
-            ],
-            {"entry"},
-        )
-        program = UserProgramImage("main", (fn,))
+                        ),
+                    )
+                ],
+            )
+        ],
+        {"entry"},
+    )
+
+
+class MiniMachineCompatCensusTests(unittest.TestCase):
+    def test_reports_runtime_resolvable_system_descriptor(self):
+        census = load_census_module()
+        program = UserProgramImage("main", (function_loading("__mm_sys_fence"),))
         result = census.census_program(Path("synthetic.bflt"), program)
 
         self.assertEqual(result.system_descriptors, ("__mm_sys_fence",))
         self.assertEqual(result.serialized_system_ops, ())
-        self.assertEqual(result.missing_system_descriptors, ("__mm_sys_fence",))
+        self.assertEqual(
+            result.resolvable_system_descriptors,
+            ("__mm_sys_fence",),
+        )
+        self.assertEqual(result.missing_system_descriptors, ())
+
+    def test_reports_truly_unknown_system_descriptor(self):
+        census = load_census_module()
+        program = UserProgramImage(
+            "main",
+            (function_loading("__mm_sys_future_semantics"),),
+        )
+        result = census.census_program(Path("synthetic.bflt"), program)
+
+        self.assertEqual(
+            result.system_descriptors,
+            ("__mm_sys_future_semantics",),
+        )
+        self.assertEqual(result.resolvable_system_descriptors, ())
+        self.assertEqual(
+            result.missing_system_descriptors,
+            ("__mm_sys_future_semantics",),
+        )
 
     def test_non_system_symbols_do_not_pollute_system_surface(self):
         census = load_census_module()
@@ -81,6 +106,7 @@ class MiniMachineCompatCensusTests(unittest.TestCase):
         result = census.census_program(Path("synthetic.bflt"), program)
 
         self.assertEqual(result.system_descriptors, ())
+        self.assertEqual(result.resolvable_system_descriptors, ())
         self.assertEqual(result.missing_system_descriptors, ())
 
 
