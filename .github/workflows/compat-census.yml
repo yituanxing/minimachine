@@ -64,14 +64,16 @@ jobs:
           import importlib.util
           import json
           from pathlib import Path
+          import sys
 
           path = Path('scripts/minimachine-compat-census.py')
           spec = importlib.util.spec_from_file_location('mm_compat_census', path)
           module = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = module
           spec.loader.exec_module(module)
           census = module.census_bflt(Path('sqlite/sqlite3534.bflt'))
           Path('build/sqlite-census.json').write_text(json.dumps({
-              'external_functions': [module._user_external_original(x) if hasattr(module, '_user_external_original') else x.rsplit('_ext_', 1)[-1] for x in census.external_functions],
+              'external_functions': [x.rsplit('_ext_', 1)[-1] for x in census.external_functions],
               'external_data': list(census.external_data),
           }, indent=2, sort_keys=True) + '\n')
           PY
