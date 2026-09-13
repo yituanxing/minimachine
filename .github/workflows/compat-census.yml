@@ -1,0 +1,66 @@
+name: MiniMachine Compatibility Census
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [work/sqlite-real-software]
+    paths:
+      - scripts/minimachine-compat-census.py
+      - tests/test_minimachine_compat_census.py
+      - .github/workflows/compat-census.yml
+      - src/minimachine/user_image.py
+      - src/minimachine/user_bundle.py
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  census:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run census unit tests
+        run: python3 tests/test_minimachine_compat_census.py
+
+      - name: Download proven SQLite bundle
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 34689448761
+          github-token: ${{ github.token }}
+          name: minimachine-sqlite3534-34689448761
+          path: sqlite
+
+      - name: Download frozen BusyBox bundle
+        uses: actions/download-artifact@v4
+        with:
+          repository: ${{ github.repository }}
+          run-id: 33396890631
+          github-token: ${{ github.token }}
+          name: minimachine-busybox-multicall-33396890631
+          path: busybox
+
+      - name: Census real software bundles
+        run: |
+          mkdir -p build
+          python3 scripts/minimachine-compat-census.py \
+            busybox/busybox-multicall.bflt \
+            sqlite/sqlite3534.bflt \
+            | tee build/compat-census.log
+
+      - name: Prove SQLite system-surface gap is caught before runtime
+        run: |
+          grep -F 'path=sqlite/sqlite3534.bflt descriptor=__mm_sys_fence ' build/compat-census.log
+          grep -F 'path=sqlite/sqlite3534.bflt descriptor=__mm_sys_fence inferred_op=fence state=missing' build/compat-census.log
+          grep -F 'MMCOMPAT_RESULT=OBSERVED_GAPS' build/compat-census.log
+
+      - name: Upload census evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimachine-compat-census-${{ github.run_id }}
+          path: build/compat-census.log
+          if-no-files-found: error
+          retention-days: 7
