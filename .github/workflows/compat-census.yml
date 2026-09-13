@@ -10,17 +10,20 @@ on:
       - scripts/run-minimachine-linux.py
       - scripts/run-minimachine-linux-pipe.py
       - scripts/run-minimachine-linux-forkstack.py
+      - scripts/run-minimachine-linux-syscall.py
       - tests/test_minimachine_compat_census.py
       - tests/test_system_surface.py
       - tests/test_pthread_mutex_surface.py
       - tests/test_passwd_surface.py
       - tests/test_stdio_surface.py
       - tests/test_ctype_surface.py
+      - tests/test_user_syscall_surface.py
       - .github/workflows/compat-census.yml
       - src/minimachine/passwd_surface.py
       - src/minimachine/pthread_surface.py
       - src/minimachine/stdio_surface.py
       - src/minimachine/ctype_surface.py
+      - src/minimachine/user_syscall_surface.py
       - src/minimachine/system_surface.py
       - src/minimachine/user_image.py
       - src/minimachine/user_bundle.py
@@ -44,6 +47,7 @@ jobs:
           PYTHONPATH=. python3 tests/test_passwd_surface.py
           PYTHONPATH=. python3 tests/test_stdio_surface.py
           PYTHONPATH=. python3 tests/test_ctype_surface.py
+          PYTHONPATH=. python3 tests/test_user_syscall_surface.py
 
       - name: Download proven SQLite bundle
         uses: actions/download-artifact@v4
