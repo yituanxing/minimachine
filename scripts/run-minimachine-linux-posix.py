@@ -46,6 +46,7 @@ def install_posix_callbacks(runner) -> None:
         "munmap": (215, 2),
         "fchmod": (52, 2),
         "fchown": (55, 3),
+        "nanosleep": (101, 2),
     }
 
     def callback_for(symbol: str, errno_address: int | None):
