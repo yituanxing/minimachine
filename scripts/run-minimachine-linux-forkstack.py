@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.minimachine.pthread_surface import resolve_pthread_mutex_callback
 from src.minimachine.system_surface import resolve_system_surface
 
 
@@ -133,6 +134,13 @@ def install_fork_stack_bridge(runner) -> None:
     def callback_for(symbol: str, errno_address: int | None):
         callback = base_callback(symbol, errno_address)
         original = runner._user_external_original(symbol)
+
+        pthread_callback = resolve_pthread_mutex_callback(
+            original,
+            vm_error=runner.VMError,
+        )
+        if pthread_callback is not None:
+            return pthread_callback
 
         if original == "atexit":
             def user_atexit(vm, args):
