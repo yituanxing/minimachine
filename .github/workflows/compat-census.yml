@@ -6,6 +6,9 @@ on:
     branches: [work/sqlite-real-software]
     paths:
       - scripts/minimachine-compat-census.py
+      - scripts/scan-sqlite-external-surface.py
+      - scripts/run-minimachine-linux.py
+      - scripts/run-minimachine-linux-pipe.py
       - tests/test_minimachine_compat_census.py
       - tests/test_system_surface.py
       - .github/workflows/compat-census.yml
@@ -55,16 +58,40 @@ jobs:
             sqlite/sqlite3534.bflt \
             | tee build/compat-census.log
 
-      - name: Prove SQLite system-surface gap is caught before runtime
+      - name: Scan SQLite external surface
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          import json
+          from pathlib import Path
+
+          path = Path('scripts/minimachine-compat-census.py')
+          spec = importlib.util.spec_from_file_location('mm_compat_census', path)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          census = module.census_bflt(Path('sqlite/sqlite3534.bflt'))
+          Path('build/sqlite-census.json').write_text(json.dumps({
+              'external_functions': [module._user_external_original(x) if hasattr(module, '_user_external_original') else x.rsplit('_ext_', 1)[-1] for x in census.external_functions],
+              'external_data': list(census.external_data),
+          }, indent=2, sort_keys=True) + '\n')
+          PY
+          python3 scripts/scan-sqlite-external-surface.py build/sqlite-census.json \
+            | tee build/sqlite-external-surface.log
+
+      - name: Prove current frontier is visible before runtime
         run: |
           grep -F 'path=sqlite/sqlite3534.bflt descriptor=__mm_sys_fence ' build/compat-census.log
           grep -F 'path=sqlite/sqlite3534.bflt descriptor=__mm_sys_fence inferred_op=fence state=missing' build/compat-census.log
           grep -F 'MMCOMPAT_RESULT=OBSERVED_GAPS' build/compat-census.log
+          grep -F 'SQLITE_EXTERNAL_UNSUPPORTED pthread_mutex_lock' build/sqlite-external-surface.log
 
       - name: Upload census evidence
         uses: actions/upload-artifact@v4
         with:
           name: minimachine-compat-census-${{ github.run_id }}
-          path: build/compat-census.log
+          path: |
+            build/compat-census.log
+            build/sqlite-census.json
+            build/sqlite-external-surface.log
           if-no-files-found: error
           retention-days: 7
