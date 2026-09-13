@@ -109,6 +109,7 @@ def install_fork_stack_bridge(runner) -> None:
     base_preserved_call = getattr(
         runner, "_call_linux_function_preserving_control", None
     )
+    pthread_vm_error = getattr(runner, "VMError", RuntimeError)
 
     def preserved_call(vm, name, args, **kwargs):
         if name == "minimachine_user_syscall" and args and int(args[0]) == _EXECVE_NR:
@@ -137,7 +138,7 @@ def install_fork_stack_bridge(runner) -> None:
 
         pthread_callback = resolve_pthread_mutex_callback(
             original,
-            vm_error=runner.VMError,
+            vm_error=pthread_vm_error,
         )
         if pthread_callback is not None:
             return pthread_callback
