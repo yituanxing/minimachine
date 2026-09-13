@@ -1,20 +1,27 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import sys
 import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.minimachine import muir, p3
 from src.minimachine.user_image import UserProgramImage
 
 
-ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "minimachine-compat-census.py"
 
 
 def load_census_module():
-    spec = spec_from_file_location("minimachine_compat_census", SCRIPT)
+    name = "minimachine_compat_census"
+    spec = spec_from_file_location(name, SCRIPT)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load census script: {SCRIPT}")
     module = module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
