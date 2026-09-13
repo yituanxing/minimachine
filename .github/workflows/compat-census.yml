@@ -9,9 +9,12 @@ on:
       - scripts/scan-sqlite-external-surface.py
       - scripts/run-minimachine-linux.py
       - scripts/run-minimachine-linux-pipe.py
+      - scripts/run-minimachine-linux-forkstack.py
       - tests/test_minimachine_compat_census.py
       - tests/test_system_surface.py
+      - tests/test_pthread_mutex_surface.py
       - .github/workflows/compat-census.yml
+      - src/minimachine/pthread_surface.py
       - src/minimachine/system_surface.py
       - src/minimachine/user_image.py
       - src/minimachine/user_bundle.py
@@ -31,6 +34,7 @@ jobs:
         run: |
           PYTHONPATH=. python3 tests/test_minimachine_compat_census.py
           PYTHONPATH=. python3 tests/test_system_surface.py
+          PYTHONPATH=. python3 tests/test_pthread_mutex_surface.py
 
       - name: Download proven SQLite bundle
         uses: actions/download-artifact@v4
@@ -80,12 +84,16 @@ jobs:
           python3 scripts/scan-sqlite-external-surface.py build/sqlite-census.json \
             | tee build/sqlite-external-surface.log
 
-      - name: Prove current frontier is visible before runtime
+      - name: Prove generic surface before runtime
         run: |
-          grep -F 'path=sqlite/sqlite3534.bflt descriptor=__mm_sys_fence ' build/compat-census.log
-          grep -F 'path=sqlite/sqlite3534.bflt descriptor=__mm_sys_fence inferred_op=fence state=missing' build/compat-census.log
-          grep -F 'MMCOMPAT_RESULT=OBSERVED_GAPS' build/compat-census.log
-          grep -F 'SQLITE_EXTERNAL_UNSUPPORTED pthread_mutex_lock' build/sqlite-external-surface.log
+          grep -F 'path=sqlite/sqlite3534.bflt descriptor=__mm_sys_fence inferred_op=fence state=runtime-resolvable' build/compat-census.log
+          grep -F 'MMCOMPAT_RESULT=PASS' build/compat-census.log
+          if grep -E 'SQLITE_EXTERNAL_UNSUPPORTED pthread_mutex(attr)?_' build/sqlite-external-surface.log; then
+            echo 'pthread mutex family still has unsupported members' >&2
+            exit 1
+          fi
+          grep -F 'SQLITE_EXTERNAL_UNSUPPORTED pthread_create' build/sqlite-external-surface.log
+          grep -F 'SQLITE_EXTERNAL_UNSUPPORTED pthread_join' build/sqlite-external-surface.log
 
       - name: Upload census evidence
         uses: actions/upload-artifact@v4
