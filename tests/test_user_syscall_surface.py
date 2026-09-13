@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
 from src.minimachine.user_syscall_surface import retry_enosys_linux_syscall
 
 
+ROOT = Path(__file__).resolve().parents[1]
 _U64_MASK = (1 << 64) - 1
 
 
@@ -35,6 +37,38 @@ class UserSyscallSurfaceTests(unittest.TestCase):
             seen,
             [("__se_sys_newfstat", (3, 0x12340000), {"result_count": 1})],
         )
+
+    def test_fstatat_enosys_retries_through_linux_newfstatat(self):
+        vm = self.vm_with("__se_sys_newfstatat")
+        seen = []
+
+        def linux_call(vm_arg, name, args, **kwargs):
+            self.assertIs(vm_arg, vm)
+            seen.append((name, args, kwargs))
+            return (0,)
+
+        dirfd = (-100) & _U64_MASK
+        result = retry_enosys_linux_syscall(
+            vm,
+            (79, dirfd, 0x12341000, 0x12342000, 0x100, 0, 0),
+            (-38) & _U64_MASK,
+            linux_call=linux_call,
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            seen,
+            [(
+                "__se_sys_newfstatat",
+                (dirfd, 0x12341000, 0x12342000, 0x100),
+                {"result_count": 1},
+            )],
+        )
+
+    def test_minimachine_arch_opts_into_asm_generic_new_stat(self):
+        text = (
+            ROOT / "linux-overlay/arch/minimachine/include/asm/unistd.h"
+        ).read_text()
+        self.assertIn("#define __ARCH_WANT_NEW_STAT", text)
 
     def test_non_enosys_result_is_not_replayed(self):
         vm = self.vm_with("__se_sys_newfstat")
