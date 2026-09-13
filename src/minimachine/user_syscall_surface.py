@@ -8,9 +8,18 @@ _ENOSYS = 38
 # first-stage minimachine_user_syscall switch but have a real Linux syscall
 # implementation in the linked kernel. Keep the fallback here rather than
 # reimplementing kernel ABI structures in the host.
+#
+# The fd-I/O group is deliberately kept together: SQLite's Unix VFS reaches
+# these through libc's *64 spellings, while the 64-bit asm-generic ABI maps
+# them to the ordinary kernel syscall implementations.
 ENOSYS_LINUX_FALLBACKS: dict[int, tuple[str, int]] = {
+    46: ("__se_sys_ftruncate", 2),
+    67: ("__se_sys_pread64", 4),
+    68: ("__se_sys_pwrite64", 4),
     79: ("__se_sys_newfstatat", 4),
     80: ("__se_sys_newfstat", 2),
+    82: ("__se_sys_fsync", 1),
+    83: ("__se_sys_fdatasync", 1),
 }
 
 
