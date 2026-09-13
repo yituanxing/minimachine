@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from src.minimachine.ctype_surface import resolve_ctype_callback
+
 
 STDIO_LINE_EXTERNALS = frozenset({"fputs", "fgets"})
 _U64_MASK = (1 << 64) - 1
@@ -69,12 +71,17 @@ def resolve_stdio_line_callback(
     vm_error,
     user_syscall,
 ):
-    """Resolve line-oriented stdio not yet covered by the base libc bridge.
+    """Resolve line-oriented stdio and its immediate libc table dependencies.
 
-    This surface deliberately uses the guest Linux read/write syscalls and
-    guest FILE* state.  It does not proxy through host Python file objects, so
-    pipes, initramfs files and future guest descriptors keep Linux semantics.
+    The stdio surface deliberately uses the guest Linux read/write syscalls and
+    guest FILE* state.  Ctype table accessors are delegated to a deterministic
+    guest C-locale surface because the frozen SQLite input loop reaches them
+    immediately after reading each line.
     """
+    ctype_callback = resolve_ctype_callback(original, vm_error=vm_error)
+    if ctype_callback is not None:
+        return ctype_callback
+
     if original not in STDIO_LINE_EXTERNALS:
         return None
 
