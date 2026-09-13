@@ -42,7 +42,7 @@ jobs:
             syscall)
               python3 tests/test_user_pipe_bridge.py
               python3 tests/test_user_posix_bridge.py
-              python3 tests/test_user_syscall_surface.py
+              PYTHONPATH=. python3 tests/test_user_syscall_surface.py
               ;;
           esac
 
