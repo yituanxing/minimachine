@@ -7,6 +7,12 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.minimachine.system_surface import resolve_system_surface
+
+
 POSIX_BRIDGE_PATH = ROOT / "scripts" / "run-minimachine-linux-posix.py"
 _U64_MASK = (1 << 64) - 1
 _RESTART_ERRNOS = {512, 513, 514, 516}
@@ -236,19 +242,40 @@ def install_fork_stack_bridge(runner) -> None:
 
             # Minimal unit-test runners intentionally expose only the fork
             # control-transfer surface.  Real Linux runners additionally own
-            # Program/runtime descriptor state; refresh only when that surface
-            # is present.
+            # Program/runtime descriptor state; resolve and refresh only when
+            # that surface is present.
             program = getattr(vm, "program", None)
             refresher = getattr(runner, "refresh_host_service_descriptors", None)
             if program is None or refresher is None:
                 return result
 
+            function_count = len(program.functions)
+            previous_count = int(
+                getattr(vm, "_resolved_system_surface_function_count", -1)
+            )
+            if function_count != previous_count:
+                resolution = resolve_system_surface(
+                    program,
+                    tuple(linked.function for linked in program.functions.values()),
+                )
+                vm._resolved_system_surface_function_count = function_count
+                print(
+                    "BOOT_EXEC_USER_SYSTEM_SURFACE "
+                    f"functions={function_count} "
+                    f"referenced={len(resolution.referenced)} "
+                    f"added={len(resolution.added)} "
+                    f"unsupported={len(resolution.unsupported)} "
+                    f"added_symbols={','.join(resolution.added) if resolution.added else '-'} "
+                    f"unsupported_symbols={','.join(resolution.unsupported) if resolution.unsupported else '-'}",
+                    flush=True,
+                )
+
             # register_service/register_system mutate Program.initial_memory.
             # On a live checkpoint-restored VM those immutable descriptors are
             # not automatically copied into the concrete guest/native memory.
             # Refresh after each real userspace handoff so dynamically added
-            # runtime helpers and pre-existing system services retain valid
-            # descriptor entries before userspace executes them.
+            # runtime helpers and system services retain valid descriptor
+            # entries before userspace executes them.
             fence_descriptor = program.symbol_addresses.get("__mm_sys_fence")
             fence_initial = (
                 program.initial_memory.read(fence_descriptor, 64)
