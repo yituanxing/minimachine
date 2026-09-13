@@ -9,7 +9,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-BRIDGE = ROOT / "scripts" / "run-minimachine-linux-pipe.py"
+BRIDGE = ROOT / "scripts" / "run-minimachine-linux-forkstack.py"
 
 
 def load_bridge():
@@ -28,13 +28,16 @@ def main() -> int:
     report = json.loads(Path(sys.argv[1]).read_text())
     bridge = load_bridge()
     runner = bridge.load_runner()
-    bridge.install_pipe_callbacks(runner)
 
     supported: list[str] = []
     unsupported: list[str] = []
+    # The real installer always allocates an errno cell before resolving
+    # external functions.  A non-null placeholder keeps this static census
+    # aligned with that runtime contract without allocating a VM.
+    errno_address = 0x1000
     for original in sorted(report["external_functions"]):
         symbol = f"__mm_sqlite3534_ext_{original}"
-        callback = runner._user_libc_callback(symbol, None)
+        callback = runner._user_libc_callback(symbol, errno_address)
         if callback is None or getattr(callback, "__name__", "") == "unimplemented":
             unsupported.append(original)
         else:
