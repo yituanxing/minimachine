@@ -13,7 +13,9 @@ on:
       - tests/test_minimachine_compat_census.py
       - tests/test_system_surface.py
       - tests/test_pthread_mutex_surface.py
+      - tests/test_passwd_surface.py
       - .github/workflows/compat-census.yml
+      - src/minimachine/passwd_surface.py
       - src/minimachine/pthread_surface.py
       - src/minimachine/system_surface.py
       - src/minimachine/user_image.py
@@ -35,6 +37,7 @@ jobs:
           PYTHONPATH=. python3 tests/test_minimachine_compat_census.py
           PYTHONPATH=. python3 tests/test_system_surface.py
           PYTHONPATH=. python3 tests/test_pthread_mutex_surface.py
+          PYTHONPATH=. python3 tests/test_passwd_surface.py
 
       - name: Download proven SQLite bundle
         uses: actions/download-artifact@v4
@@ -88,8 +91,13 @@ jobs:
         run: |
           grep -F 'path=sqlite/sqlite3534.bflt descriptor=__mm_sys_fence inferred_op=fence state=runtime-resolvable' build/compat-census.log
           grep -F 'MMCOMPAT_RESULT=PASS' build/compat-census.log
+          grep -F 'SQLITE_EXTERNAL_SURFACE total=144 supported=77 unsupported=67' build/sqlite-external-surface.log
           if grep -E 'SQLITE_EXTERNAL_UNSUPPORTED pthread_mutex(attr)?_' build/sqlite-external-surface.log; then
             echo 'pthread mutex family still has unsupported members' >&2
+            exit 1
+          fi
+          if grep -F 'SQLITE_EXTERNAL_UNSUPPORTED getpwuid' build/sqlite-external-surface.log; then
+            echo 'getpwuid passwd surface is still unsupported' >&2
             exit 1
           fi
           grep -F 'SQLITE_EXTERNAL_UNSUPPORTED pthread_create' build/sqlite-external-surface.log

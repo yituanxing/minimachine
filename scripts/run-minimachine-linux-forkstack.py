@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.minimachine.passwd_surface import resolve_passwd_callback
 from src.minimachine.pthread_surface import resolve_pthread_mutex_callback
 from src.minimachine.system_surface import resolve_system_surface
 
@@ -109,7 +110,7 @@ def install_fork_stack_bridge(runner) -> None:
     base_preserved_call = getattr(
         runner, "_call_linux_function_preserving_control", None
     )
-    pthread_vm_error = getattr(runner, "VMError", RuntimeError)
+    bridge_vm_error = getattr(runner, "VMError", RuntimeError)
 
     def preserved_call(vm, name, args, **kwargs):
         if name == "minimachine_user_syscall" and args and int(args[0]) == _EXECVE_NR:
@@ -138,15 +139,22 @@ def install_fork_stack_bridge(runner) -> None:
 
         pthread_callback = resolve_pthread_mutex_callback(
             original,
-            vm_error=pthread_vm_error,
+            vm_error=bridge_vm_error,
         )
         if pthread_callback is not None:
             return pthread_callback
 
+        passwd_callback = resolve_passwd_callback(
+            original,
+            vm_error=bridge_vm_error,
+        )
+        if passwd_callback is not None:
+            return passwd_callback
+
         if original == "atexit":
             def user_atexit(vm, args):
                 if len(args) != 1:
-                    raise runner.VMError("atexit expects one function pointer")
+                    raise bridge_vm_error("atexit expects one function pointer")
                 handler = int(args[0])
                 handlers = getattr(vm, "user_atexit_handlers", None)
                 if handlers is None:

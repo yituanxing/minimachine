@@ -7,6 +7,8 @@ on:
     paths:
       - .github/workflows/sqlite-runtime-128m-probe.yml
       - scripts/run-minimachine-linux-forkstack.py
+      - src/minimachine/passwd_surface.py
+      - src/minimachine/pthread_surface.py
 
 permissions:
   contents: read
@@ -186,12 +188,15 @@ jobs:
         if: always()
         run: |
           log=build/sqlite-128m-runtime.log
-          grep -E 'SQLITE_MINIMACHINE_|nommu: Allocation|binfmt_flat:|nr=221|BOOT_EXEC_USER_(HANDOFF|EXTERNAL|SYSCALL)|Function not implemented|BOOT_EXEC_BLOCKED' "$log" | tail -500 || true
+          grep -E 'SQLITE_MINIMACHINE_|nommu: Allocation|binfmt_flat:|nr=221|BOOT_EXEC_USER_(HANDOFF|EXTERNAL|SYSCALL|GETPWUID)|Function not implemented|BOOT_EXEC_BLOCKED' "$log" | tail -500 || true
+          external_frontier="$(sed -n 's/.*BOOT_EXEC_BLOCKED .*error=unimplemented userspace external \([^ ]*\).*/\1/p' "$log" | head -1)"
           if grep -Fx 'SQLITE_MINIMACHINE_CREATE|3.53.4|3|31' "$log" >/dev/null \
              && grep -Fx 'SQLITE_MINIMACHINE_FIRST_EXIT_0' "$log" >/dev/null \
              && grep -Fx 'SQLITE_MINIMACHINE_REOPEN|3|31|alpha,beta,gamma' "$log" >/dev/null \
              && grep -Fx 'SQLITE_MINIMACHINE_SECOND_EXIT_0' "$log" >/dev/null; then
             echo SQLITE_128M_FRONTIER=persistence-complete
+          elif [ -n "$external_frontier" ]; then
+            echo "SQLITE_128M_FRONTIER=external:$external_frontier"
           elif grep -F 'binfmt_flat: Unable to mmap process text, errno -12' "$log" >/dev/null; then
             echo SQLITE_128M_FRONTIER=flat-loader-enomem
           elif grep -E 'BOOT_EXEC_USER_HANDOFF .*functions=1944|payload_bytes=11669952' "$log" >/dev/null; then
