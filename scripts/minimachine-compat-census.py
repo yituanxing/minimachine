@@ -16,6 +16,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.minimachine import muir, p3
+from src.minimachine.runtime import system_callback
+from src.minimachine.system_surface import system_op_from_symbol
 from src.minimachine.user_image import (
     BFLT_HEADER_SIZE,
     BFLT_MAGIC,
@@ -40,6 +42,7 @@ class Census:
     runtime_helpers: tuple[str, ...]
     system_descriptors: tuple[str, ...]
     serialized_system_ops: tuple[str, ...]
+    resolvable_system_descriptors: tuple[str, ...]
     external_functions: tuple[str, ...]
     external_data: tuple[str, ...]
     missing_system_descriptors: tuple[str, ...]
@@ -162,16 +165,26 @@ def _finish_census(
     external_data: tuple[str, ...],
 ) -> Census:
     serialized_descriptors = {_system_symbol(op) for op in serialized_system_ops}
+    resolvable_descriptors = {
+        symbol
+        for symbol in system_descriptors
+        if (
+            (op := system_op_from_symbol(symbol)) is not None
+            and system_callback(op) is not None
+        )
+    }
+    provided_descriptors = serialized_descriptors | resolvable_descriptors
     return Census(
         path=path,
         functions=functions,
         runtime_helpers=runtime_helpers,
         system_descriptors=system_descriptors,
         serialized_system_ops=serialized_system_ops,
+        resolvable_system_descriptors=tuple(sorted(resolvable_descriptors)),
         external_functions=external_functions,
         external_data=external_data,
         missing_system_descriptors=tuple(
-            sorted(set(system_descriptors) - serialized_descriptors)
+            sorted(set(system_descriptors) - provided_descriptors)
         ),
     )
 
@@ -219,12 +232,20 @@ def print_census(census: Census) -> None:
         f"helpers={len(census.runtime_helpers)} "
         f"system_refs={len(census.system_descriptors)} "
         f"serialized_system_ops={len(census.serialized_system_ops)} "
+        f"runtime_resolvable_system_refs={len(census.resolvable_system_descriptors)} "
         f"external_functions={len(census.external_functions)} "
         f"external_data={len(census.external_data)} "
         f"missing_system_refs={len(census.missing_system_descriptors)}"
     )
+    serialized = {_system_symbol(op) for op in census.serialized_system_ops}
+    resolvable = set(census.resolvable_system_descriptors)
     for descriptor in census.system_descriptors:
-        state = "missing" if descriptor in census.missing_system_descriptors else "serialized"
+        if descriptor in serialized:
+            state = "serialized"
+        elif descriptor in resolvable:
+            state = "runtime-resolvable"
+        else:
+            state = "missing"
         inferred = descriptor[len("__mm_sys_"):]
         print(
             "MMCOMPAT_SYSTEM "
@@ -243,7 +264,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="fail when a referenced __mm_sys_* descriptor is not serialized",
+        help="fail when a referenced __mm_sys_* descriptor is neither serialized nor runtime-resolvable",
     )
     return parser.parse_args()
 
