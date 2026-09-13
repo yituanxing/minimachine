@@ -17,8 +17,8 @@ class UserSyscallSurfaceTests(unittest.TestCase):
             program=SimpleNamespace(functions={name: object() for name in functions})
         )
 
-    def test_fstat_enosys_retries_through_linux_newfstat(self):
-        vm = self.vm_with("__se_sys_newfstat")
+    def assert_retry(self, nr, target, argv):
+        vm = self.vm_with(target)
         seen = []
 
         def linux_call(vm_arg, name, args, **kwargs):
@@ -26,43 +26,40 @@ class UserSyscallSurfaceTests(unittest.TestCase):
             seen.append((name, args, kwargs))
             return (0,)
 
+        padded = tuple(argv) + (0,) * (6 - len(argv))
         result = retry_enosys_linux_syscall(
             vm,
-            (80, 3, 0x12340000, 0, 0, 0, 0),
+            (nr, *padded),
             (-38) & _U64_MASK,
             linux_call=linux_call,
         )
         self.assertEqual(result, 0)
         self.assertEqual(
             seen,
-            [("__se_sys_newfstat", (3, 0x12340000), {"result_count": 1})],
+            [(target, tuple(argv), {"result_count": 1})],
         )
 
-    def test_fstatat_enosys_retries_through_linux_newfstatat(self):
-        vm = self.vm_with("__se_sys_newfstatat")
-        seen = []
-
-        def linux_call(vm_arg, name, args, **kwargs):
-            self.assertIs(vm_arg, vm)
-            seen.append((name, args, kwargs))
-            return (0,)
-
+    def test_stat_syscall_family_routes_to_linux(self):
         dirfd = (-100) & _U64_MASK
-        result = retry_enosys_linux_syscall(
-            vm,
-            (79, dirfd, 0x12341000, 0x12342000, 0x100, 0, 0),
-            (-38) & _U64_MASK,
-            linux_call=linux_call,
+        cases = (
+            (79, "__se_sys_newfstatat", (dirfd, 0x12341000, 0x12342000, 0x100)),
+            (80, "__se_sys_newfstat", (3, 0x12340000)),
         )
-        self.assertEqual(result, 0)
-        self.assertEqual(
-            seen,
-            [(
-                "__se_sys_newfstatat",
-                (dirfd, 0x12341000, 0x12342000, 0x100),
-                {"result_count": 1},
-            )],
+        for nr, target, argv in cases:
+            with self.subTest(nr=nr, target=target):
+                self.assert_retry(nr, target, argv)
+
+    def test_fd_io_syscall_family_routes_to_linux(self):
+        cases = (
+            (46, "__se_sys_ftruncate", (3, 4096)),
+            (67, "__se_sys_pread64", (3, 0x20000000, 100, 0)),
+            (68, "__se_sys_pwrite64", (3, 0x20000100, 100, 4096)),
+            (82, "__se_sys_fsync", (3,)),
+            (83, "__se_sys_fdatasync", (3,)),
         )
+        for nr, target, argv in cases:
+            with self.subTest(nr=nr, target=target):
+                self.assert_retry(nr, target, argv)
 
     def test_minimachine_arch_opts_into_asm_generic_new_stat(self):
         text = (
@@ -98,7 +95,7 @@ class UserSyscallSurfaceTests(unittest.TestCase):
         raw = (-38) & _U64_MASK
         result = retry_enosys_linux_syscall(
             vm,
-            (80, 3, 0x1234, 0, 0, 0, 0),
+            (67, 3, 0x1234, 100, 0, 0, 0),
             raw,
             linux_call=lambda *args, **kwargs: self.fail("unexpected replay"),
         )
@@ -106,10 +103,10 @@ class UserSyscallSurfaceTests(unittest.TestCase):
 
     def test_control_transfer_is_preserved(self):
         token = object()
-        vm = self.vm_with("__se_sys_newfstat")
+        vm = self.vm_with("__se_sys_pread64")
         result = retry_enosys_linux_syscall(
             vm,
-            (80, 3, 0x1234, 0, 0, 0, 0),
+            (67, 3, 0x1234, 100, 0, 0, 0),
             token,
             linux_call=lambda *args, **kwargs: self.fail("unexpected replay"),
             host_control_transfer=token,
