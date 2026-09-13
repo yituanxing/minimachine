@@ -6,7 +6,7 @@ _ENOSYS = 38
 
 # asm-generic/RISC-V syscall numbers which are intentionally absent from the
 # first-stage minimachine_user_syscall switch but have a real Linux syscall
-# implementation in the linked kernel.  Keep the fallback here rather than
+# implementation in the linked kernel. Keep the fallback here rather than
 # reimplementing kernel ABI structures in the host.
 ENOSYS_LINUX_FALLBACKS: dict[int, tuple[str, int]] = {
     80: ("__se_sys_newfstat", 2),
@@ -29,9 +29,9 @@ def retry_enosys_linux_syscall(
     """Retry a stage-1 -ENOSYS through the linked Linux syscall body.
 
     ``minimachine_user_syscall`` intentionally started with a very small
-    syscall switch.  Real userspace can therefore reach a syscall whose
+    syscall switch. Real userspace can therefore reach a syscall whose
     implementation is already present in the linked Linux image while the
-    architecture shim still returns ``-ENOSYS``.  In that case only, dispatch
+    architecture shim still returns ``-ENOSYS``. In that case only, dispatch
     to Linux's own ``__se_sys_*`` wrapper so argument validation, guest ABI
     structures, VFS semantics, and errno behavior remain kernel-owned.
     """
@@ -43,6 +43,11 @@ def retry_enosys_linux_syscall(
     nr = int(args[0])
     fallback = ENOSYS_LINUX_FALLBACKS.get(nr)
     if fallback is None:
+        print(
+            "BOOT_EXEC_USER_SYSCALL_ENOSYS_UNRESOLVED "
+            f"nr={nr} reason=no-fallback",
+            flush=True,
+        )
         return result
 
     target, argc = fallback
@@ -50,8 +55,8 @@ def retry_enosys_linux_syscall(
     functions = getattr(program, "functions", {}) if program is not None else {}
     if target not in functions:
         print(
-            "BOOT_EXEC_USER_SYSCALL_ENOSYS_FALLBACK_MISSING "
-            f"nr={nr} target={target}",
+            "BOOT_EXEC_USER_SYSCALL_ENOSYS_UNRESOLVED "
+            f"nr={nr} reason=missing-target target={target}",
             flush=True,
         )
         return result
@@ -74,4 +79,10 @@ def retry_enosys_linux_syscall(
         raise RuntimeError(
             f"{target} returned {len(retried)} values, expected one"
         )
-    return int(retried[0]) & _U64_MASK
+    value = int(retried[0]) & _U64_MASK
+    print(
+        "BOOT_EXEC_USER_SYSCALL_ENOSYS_RETRY "
+        f"nr={nr} target={target} result={_signed_u64(value)}",
+        flush=True,
+    )
+    return value
