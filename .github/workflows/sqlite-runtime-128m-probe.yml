@@ -6,6 +6,7 @@ on:
     branches: [work/sqlite-real-software]
     paths:
       - .github/workflows/sqlite-runtime-128m-probe.yml
+      - scripts/run-minimachine-linux-posix.py
       - scripts/run-minimachine-linux-forkstack.py
       - scripts/run-minimachine-linux-syscall.py
       - src/minimachine/passwd_surface.py
@@ -193,17 +194,18 @@ jobs:
         run: |
           log=build/sqlite-128m-runtime.log
           grep -E 'SQLITE_MINIMACHINE_|nommu: Allocation|binfmt_flat:|nr=221|BOOT_EXEC_USER_(HANDOFF|EXTERNAL|SYSCALL|GETPWUID)|Function not implemented|BOOT_EXEC_BLOCKED' "$log" | tail -500 || true
-          external_frontier="$(sed -n 's/.*BOOT_EXEC_BLOCKED .*error=unimplemented userspace external \([^ ]*\).*/\1/p' "$log" | head -1)"
-          unresolved_syscall="$(sed -n 's/.*BOOT_EXEC_USER_SYSCALL_ENOSYS_UNRESOLVED nr=\([0-9][0-9]*\).*/\1/p' "$log" | head -1)"
+          first_runtime_frontier="$(grep -m1 -E 'BOOT_EXEC_USER_SYSCALL_ENOSYS_UNRESOLVED nr=[0-9]+|BOOT_EXEC_BLOCKED .*error=unimplemented userspace external ' "$log" || true)"
           if grep -Fx 'SQLITE_MINIMACHINE_CREATE|3.53.4|3|31' "$log" >/dev/null \
              && grep -Fx 'SQLITE_MINIMACHINE_FIRST_EXIT_0' "$log" >/dev/null \
              && grep -Fx 'SQLITE_MINIMACHINE_REOPEN|3|31|alpha,beta,gamma' "$log" >/dev/null \
              && grep -Fx 'SQLITE_MINIMACHINE_SECOND_EXIT_0' "$log" >/dev/null; then
             echo SQLITE_128M_FRONTIER=persistence-complete
-          elif [ -n "$external_frontier" ]; then
-            echo "SQLITE_128M_FRONTIER=external:$external_frontier"
-          elif [ -n "$unresolved_syscall" ]; then
+          elif printf '%s\n' "$first_runtime_frontier" | grep -F 'BOOT_EXEC_USER_SYSCALL_ENOSYS_UNRESOLVED ' >/dev/null; then
+            unresolved_syscall="$(printf '%s\n' "$first_runtime_frontier" | sed -n 's/.*nr=\([0-9][0-9]*\).*/\1/p')"
             echo "SQLITE_128M_FRONTIER=syscall:$unresolved_syscall:ENOSYS"
+          elif printf '%s\n' "$first_runtime_frontier" | grep -F 'unimplemented userspace external ' >/dev/null; then
+            external_frontier="$(printf '%s\n' "$first_runtime_frontier" | sed -n 's/.*error=unimplemented userspace external \([^ ]*\).*/\1/p')"
+            echo "SQLITE_128M_FRONTIER=external:$external_frontier"
           elif grep -F 'binfmt_flat: Unable to mmap process text, errno -12' "$log" >/dev/null; then
             echo SQLITE_128M_FRONTIER=flat-loader-enomem
           elif grep -E 'BOOT_EXEC_USER_HANDOFF .*functions=1944|payload_bytes=11669952' "$log" >/dev/null; then
