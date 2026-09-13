@@ -10,6 +10,7 @@ from src.minimachine.vm import Program
 
 
 def function_loading(symbol: str) -> p3.Function:
+    stop = muir.Target(symbol="__mm_test_stop")
     return p3.Function(
         "main",
         [
@@ -23,7 +24,15 @@ def function_loading(symbol: str) -> p3.Function:
                             muir.Address(muir.Symbol(symbol), 0),
                             muir.Width.I64,
                         ),
-                    )
+                    ),
+                    p3.Br(
+                        muir.Width.I8,
+                        muir.Cond.EQ,
+                        muir.Imm(0),
+                        muir.Imm(0),
+                        stop,
+                        stop,
+                    ),
                 ],
             )
         ],
