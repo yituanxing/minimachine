@@ -9,6 +9,7 @@ _ENOSYS = 38
 # implementation in the linked kernel. Keep the fallback here rather than
 # reimplementing kernel ABI structures in the host.
 ENOSYS_LINUX_FALLBACKS: dict[int, tuple[str, int]] = {
+    79: ("__se_sys_newfstatat", 4),
     80: ("__se_sys_newfstat", 2),
 }
 
