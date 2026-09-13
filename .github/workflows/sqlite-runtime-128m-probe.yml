@@ -9,6 +9,7 @@ on:
       - scripts/run-minimachine-linux-forkstack.py
       - src/minimachine/passwd_surface.py
       - src/minimachine/pthread_surface.py
+      - src/minimachine/stdio_surface.py
 
 permissions:
   contents: read

@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from src.minimachine.passwd_surface import resolve_passwd_callback
 from src.minimachine.pthread_surface import resolve_pthread_mutex_callback
+from src.minimachine.stdio_surface import resolve_stdio_line_callback
 from src.minimachine.system_surface import resolve_system_surface
 
 
@@ -150,6 +151,15 @@ def install_fork_stack_bridge(runner) -> None:
         )
         if passwd_callback is not None:
             return passwd_callback
+
+        stdio_callback = resolve_stdio_line_callback(
+            original,
+            errno_address=errno_address,
+            vm_error=bridge_vm_error,
+            user_syscall=runner.user_syscall,
+        )
+        if stdio_callback is not None:
+            return stdio_callback
 
         if original == "atexit":
             def user_atexit(vm, args):
