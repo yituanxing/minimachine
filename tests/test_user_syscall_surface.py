@@ -49,6 +49,16 @@ class UserSyscallSurfaceTests(unittest.TestCase):
             with self.subTest(nr=nr, target=target):
                 self.assert_retry(nr, target, argv)
 
+    def test_file_lifecycle_syscall_family_routes_to_linux(self):
+        dirfd = (-100) & _U64_MASK
+        cases = (
+            (35, "__se_sys_unlinkat", (dirfd, 0x22000000, 0)),
+            (55, "__se_sys_fchown", (4, 1000, 1000)),
+        )
+        for nr, target, argv in cases:
+            with self.subTest(nr=nr, target=target):
+                self.assert_retry(nr, target, argv)
+
     def test_fd_io_syscall_family_routes_to_linux(self):
         cases = (
             (46, "__se_sys_ftruncate", (3, 4096)),
@@ -60,6 +70,9 @@ class UserSyscallSurfaceTests(unittest.TestCase):
         for nr, target, argv in cases:
             with self.subTest(nr=nr, target=target):
                 self.assert_retry(nr, target, argv)
+
+    def test_nanosleep_routes_to_linux(self):
+        self.assert_retry(101, "__se_sys_nanosleep", (0x23000000, 0x23000020))
 
     def test_minimachine_arch_opts_into_asm_generic_new_stat(self):
         text = (
